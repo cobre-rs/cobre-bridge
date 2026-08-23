@@ -521,13 +521,13 @@ class TestLineBoundsAndMeta:
 
         line_bounds, line_meta = _line_bounds_and_meta(output_dir)
 
-        assert isinstance(line_bounds, pd.DataFrame)
-        assert not isinstance(line_bounds, pl.DataFrame)
+        assert isinstance(line_bounds, pl.DataFrame)
         assert {"line_id", "stage_id", "direct_mw", "reverse_mw"}.issubset(
             set(line_bounds.columns)
         )
-        assert line_bounds.iloc[0]["direct_mw"] == 1200.0
-        assert line_bounds.iloc[0]["reverse_mw"] == 800.0
+        row = line_bounds.row(0, named=True)
+        assert row["direct_mw"] == 1200.0
+        assert row["reverse_mw"] == 800.0
         assert line_meta == line_meta_in
         assert line_meta[0]["capacity"]["direct_mw"] == 1000.0
 
@@ -537,8 +537,8 @@ class TestLineBoundsAndMeta:
 
         line_bounds, line_meta = _line_bounds_and_meta(output_dir)
 
-        assert isinstance(line_bounds, pd.DataFrame)
-        assert line_bounds.empty
+        assert isinstance(line_bounds, pl.DataFrame)
+        assert line_bounds.is_empty()
         assert line_meta == []
 
 
@@ -673,7 +673,7 @@ class TestBuildDecompDatasetNetwork:
         assert isinstance(line_pct, pl.DataFrame)
         assert line_pct.is_empty()
 
-    def test_line_bounds_is_pandas_with_the_expected_columns(
+    def test_line_bounds_is_polars_with_the_expected_columns(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
@@ -690,12 +690,11 @@ class TestBuildDecompDatasetNetwork:
         dataset = build_decomp_dataset(decomp_dir, cobre_output_dir)
 
         line_bounds = dataset.render.line_bounds
-        assert isinstance(line_bounds, pd.DataFrame)
-        assert not isinstance(line_bounds, pl.DataFrame)
+        assert isinstance(line_bounds, pl.DataFrame)
         assert {"line_id", "stage_id", "direct_mw", "reverse_mw"}.issubset(
             set(line_bounds.columns)
         )
-        assert line_bounds.iloc[0]["direct_mw"] == 1200.0
+        assert line_bounds.row(0, named=True)["direct_mw"] == 1200.0
 
     def test_line_meta_has_the_nested_capacity_shape(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

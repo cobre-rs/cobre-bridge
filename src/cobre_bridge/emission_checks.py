@@ -53,15 +53,11 @@ from cobre_bridge.diagnostics import (
     emit,
     format_stage_ranges,
 )
+from cobre_bridge.tolerances import relative_tolerance
 
 _LOG = logging.getLogger(__name__)
 
 _CATEGORY = "Emission self-checks"
-
-#: Mirrors cobre-io's semantic-validation ``ENVELOPE_TOLERANCE``. A
-#: relative tolerance, not an absolute one — an absolute epsilon would false-fire
-#: on a plant declared at, say, 1e6 m^3/s and float-noise-pass a plant near zero.
-_ENVELOPE_TOLERANCE = 1e-9
 
 #: Both guarded columns for rule 43 / rule 41, checked independently.
 _ENVELOPE_COLUMNS: tuple[str, ...] = ("max_turbined_m3s", "max_generation_mw")
@@ -82,7 +78,7 @@ class EmissionCheckError(ValueError):
 
 def _tolerance(declared: float) -> float:
     """``ENVELOPE_TOLERANCE * max(|declared|, 1.0)`` — cobre's envelope tolerance."""
-    return _ENVELOPE_TOLERANCE * max(abs(declared), 1.0)
+    return relative_tolerance(declared)
 
 
 @dataclass(frozen=True)

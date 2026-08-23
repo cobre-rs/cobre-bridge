@@ -22,6 +22,8 @@ from cobre_bridge.dashboard.chart_helpers import (
     COST_GROUP_COLORS,
     COST_GROUPS,
     add_mean_p50_band,
+    build_cost_table,
+    chart_cost_bar,
     compute_cost_summary,
     compute_npv_costs,
     compute_percentiles,
@@ -671,6 +673,120 @@ def test_cost_group_colors_keys() -> None:
 
 
 # ---------------------------------------------------------------------------
+# build_cost_table
+# ---------------------------------------------------------------------------
+
+
+def test_build_cost_table_contains_table_and_thermal() -> None:
+    """build_cost_table must return HTML containing <table and group names."""
+    df = _make_costs_df()
+    summary = compute_cost_summary(df, 0.12)
+    html = build_cost_table(summary)
+
+    assert "<table" in html
+    assert "Thermal" in html
+
+
+def test_build_cost_table_contains_data_table_class() -> None:
+    """build_cost_table must return HTML with class 'data-table'."""
+    df = _make_costs_df()
+    summary = compute_cost_summary(df, 0.12)
+    html = build_cost_table(summary)
+    assert 'class="data-table"' in html
+
+
+def test_build_cost_table_has_tbody_with_rows() -> None:
+    """build_cost_table must include a <tbody> with at least one <tr>."""
+    df = _make_costs_df()
+    summary = compute_cost_summary(df, 0.12)
+    html = build_cost_table(summary)
+    assert "<tbody>" in html
+    assert "<tr>" in html
+
+
+def test_build_cost_table_empty_df_returns_placeholder() -> None:
+    """build_cost_table on an empty DataFrame must return the <p> fallback."""
+    html = build_cost_table(pd.DataFrame())
+    assert "<table" not in html
+    assert "No cost data" in html
+
+
+# ---------------------------------------------------------------------------
+# chart_cost_bar
+# ---------------------------------------------------------------------------
+
+
+def test_chart_cost_bar_returns_figure() -> None:
+    """chart_cost_bar must return a plotly Figure."""
+    df = _make_costs_df()
+    summary = compute_cost_summary(df, 0.12)
+    fig = chart_cost_bar(summary)
+    assert isinstance(fig, go.Figure)
+
+
+def test_chart_cost_bar_has_vertical_bar_traces() -> None:
+    """chart_cost_bar must produce at least one vertical Bar trace."""
+    df = _make_costs_df()
+    summary = compute_cost_summary(df, 0.12)
+    fig = chart_cost_bar(summary)
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    assert len(bar_traces) >= 1
+    # Bars are vertical: orientation is None (default) or "v", never "h"
+    for trace in bar_traces:
+        assert trace.orientation != "h"
+
+
+def test_chart_cost_bar_error_bars_p5_p95() -> None:
+    """chart_cost_bar must set error_y with the p5-p95 range on each bar trace.
+
+    Given p5=800, mean=1000, p95=1200, the trace must have
+    error_y.array=[200] and error_y.arrayminus=[200].
+    """
+    summary = pd.DataFrame(
+        {
+            "group": ["Thermal"],
+            "mean": [1000.0],
+            "std": [100.0],
+            "p5": [800.0],
+            "p10": [850.0],
+            "p90": [1150.0],
+            "p95": [1200.0],
+            "pct": [100.0],
+        }
+    )
+    fig = chart_cost_bar(summary)
+
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    assert len(bar_traces) == 1
+    trace = bar_traces[0]
+    assert trace.error_y is not None
+    assert trace.error_y.visible is True
+    assert trace.error_y.array == (200.0,)
+    assert trace.error_y.arrayminus == (200.0,)
+
+
+def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
+    """chart_cost_bar must omit error_y when p5 or p95 is NaN."""
+    summary = pd.DataFrame(
+        {
+            "group": ["Thermal"],
+            "mean": [1000.0],
+            "std": [0.0],
+            "p5": [math.nan],
+            "p10": [math.nan],
+            "p90": [math.nan],
+            "p95": [math.nan],
+            "pct": [100.0],
+        }
+    )
+    fig = chart_cost_bar(summary)
+
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    assert len(bar_traces) == 1
+    assert bar_traces[0].error_y is None or bar_traces[0].error_y.visible is not True
+
+
+# ---------------------------------------------------------------------------
 # ticket-009: comparators.charts golden-string parity
 #
 # These tests guard that re-pointing the per-stage / percentile-band
@@ -1057,8 +1173,8 @@ def line_summary_pct() -> pl.DataFrame:
 
 
 @pytest.fixture()
-def line_summary_bounds() -> pd.DataFrame:
-    return pd.DataFrame(
+def line_summary_bounds() -> pl.DataFrame:
+    return pl.DataFrame(
         {
             "line_id": [0, 0, 1, 1, 2, 2],
             "stage_id": [1, 2, 1, 2, 1, 2],
@@ -1080,7 +1196,7 @@ def line_summary_meta() -> list[dict]:
 def test_line_summary_chart_html_matches_golden(
     line_summary_results: list[ResultComparison],
     line_summary_pct: pl.DataFrame,
-    line_summary_bounds: pd.DataFrame,
+    line_summary_bounds: pl.DataFrame,
     line_summary_meta: list[dict],
 ) -> None:
     html = _cmp_charts.line_summary_chart(
@@ -1090,6 +1206,10 @@ def test_line_summary_chart_html_matches_golden(
         line_summary_meta,
     )
     assert_html_golden(html, "line_summary_chart.html")
+    # Anti-silent-blank guard (see ticket-051): the overlay's two capacity
+    # traces must actually be present, not just byte-match an empty chart.
+    assert "Upper bound" in html
+    assert "Lower bound" in html
 
 
 def test_build_hydro_detail_tab_html_matches_golden(

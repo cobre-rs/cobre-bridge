@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import pandas as pd
 import polars as pl
 import pytest
 from polars.testing import assert_frame_equal
@@ -153,20 +152,6 @@ def test_roundtrip_polars_metadata_frame(tmp_path: Path) -> None:
     assert_frame_equal(value, frame)
 
 
-def test_roundtrip_pandas_metadata_frame(tmp_path: Path) -> None:
-    """A ``pd.DataFrame`` stored in metadata survives the round-trip."""
-    cost = pd.DataFrame({"category": ["thermal", "deficit"], "value": [1.0, 2.0]})
-    dataset = ComparisonDataset(
-        tidy=_one_row_tidy("cobre"),
-        summary=_small_summary(),
-        metadata={"cost": cost},
-    )
-    reloaded = ComparisonDataset.from_dir(dataset.to_dir(tmp_path)[0].parent)
-    value = reloaded.metadata["cost"]
-    assert isinstance(value, pd.DataFrame)
-    pd.testing.assert_frame_equal(value, cost)
-
-
 def test_roundtrip_int_keyed_metadata_coerces_to_string_keys(tmp_path: Path) -> None:
     """An int-keyed metadata dict round-trips with string keys per JSON semantics."""
     dataset = ComparisonDataset(
@@ -226,21 +211,6 @@ def test_roundtrip_empty_polars_metadata_frame_preserves_schema() -> None:
     value = reloaded["bound_table"]
     assert isinstance(value, pl.DataFrame)
     assert_frame_equal(value, empty)
-
-
-def test_roundtrip_empty_pandas_metadata_frame_preserves_schema() -> None:
-    """An empty pandas metadata frame round-trips with its columns and dtypes."""
-    empty = pd.DataFrame(
-        {
-            "category": pd.Series([], dtype="object"),
-            "value": pd.Series([], dtype="float64"),
-        }
-    )
-    view = _metadata_to_json({"cost": empty})
-    reloaded = _metadata_from_json(view)
-    value = reloaded["cost"]
-    assert isinstance(value, pd.DataFrame)
-    pd.testing.assert_frame_equal(value, empty)
 
 
 def test_metadata_from_json_frame_missing_records_raises() -> None:
@@ -303,8 +273,8 @@ def _make_result_comparison() -> ResultComparison:
 
 
 def _populated_render() -> RenderInputs:
-    """A ``RenderInputs`` exercising every field kind: frames (polars and
-    pandas), int-keyed and str-keyed dicts, a list of dicts, scalars, and the
+    """A ``RenderInputs`` exercising every field kind: polars frames,
+    int-keyed and str-keyed dicts, a list of dicts, scalars, and the
     ``results`` object-graph list."""
     return RenderInputs(
         results=[_make_result_comparison()],
@@ -314,7 +284,7 @@ def _populated_render() -> RenderInputs:
         cobre_bus_meta={0: {"name": "SUDESTE"}},
         cobre_hydro_meta={0: {"name": "ITAIPU", "bus_ids": [0]}},
         bus=pl.DataFrame({"entity_id": [0], "stage_id": [0]}),
-        line_bounds=pd.DataFrame({"line_id": [0], "max_flow_mw": [100.0]}),
+        line_bounds=pl.DataFrame({"line_id": [0], "max_flow_mw": [100.0]}),
         gc_constraints=[{"id": 1, "name": "c1"}],
         nw_offset=1,
         nw_max_stage=5,
@@ -325,7 +295,7 @@ def _populated_render() -> RenderInputs:
 def test_roundtrip_render_frame_fields_preserve_type_and_values(
     tmp_path: Path,
 ) -> None:
-    """A polars and a pandas render field each keep their frame type/values."""
+    """Polars render fields (including ``line_bounds``) keep their type/values."""
     dataset = ComparisonDataset(
         tidy=_one_row_tidy("newave"),
         summary=_small_summary(),
@@ -335,10 +305,8 @@ def test_roundtrip_render_frame_fields_preserve_type_and_values(
 
     assert isinstance(reloaded.render.bus, pl.DataFrame)
     assert_frame_equal(reloaded.render.bus, dataset.render.bus)
-    assert isinstance(reloaded.render.line_bounds, pd.DataFrame)
-    pd.testing.assert_frame_equal(
-        reloaded.render.line_bounds, dataset.render.line_bounds
-    )
+    assert isinstance(reloaded.render.line_bounds, pl.DataFrame)
+    assert_frame_equal(reloaded.render.line_bounds, dataset.render.line_bounds)
 
 
 def test_roundtrip_render_int_keyed_dicts_restore_int_keys(tmp_path: Path) -> None:

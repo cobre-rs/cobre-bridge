@@ -17,7 +17,6 @@ import json
 from dataclasses import asdict, dataclass, field, fields
 from typing import TYPE_CHECKING, cast
 
-import pandas as pd  # type: ignore[import-untyped]  # pandas-stubs not installed
 import polars as pl
 
 if TYPE_CHECKING:
@@ -51,10 +50,10 @@ TIDY_SCHEMA: dict[str, type[pl.DataType]] = {
     "value": pl.Float64,
 }
 
-#: Wrapper key marking a metadata value that was a polars/pandas DataFrame.
-#: A wrapped entry has the shape ``{_FRAME_SENTINEL: "<polars|pandas>",
-#: "records": [...], "columns": {name: dtype_name}}``. The ``columns`` map
-#: preserves the schema so empty frames keep their columns/dtypes on round-trip.
+#: Wrapper key marking a metadata value that was a polars DataFrame. A
+#: wrapped entry has the shape ``{_FRAME_SENTINEL: "polars", "records": [...],
+#: "columns": {name: dtype_name}}``. The ``columns`` map preserves the schema
+#: so empty frames keep their columns/dtypes on round-trip.
 _FRAME_SENTINEL: str = "__frame__"
 
 #: File names written/read by :meth:`ComparisonDataset.to_dir` /
@@ -128,10 +127,7 @@ class RenderInputs:
     gc_lhs_newave: pl.DataFrame = field(default_factory=pl.DataFrame)
     hydro: pl.DataFrame = field(default_factory=pl.DataFrame)
     line: pl.DataFrame = field(default_factory=pl.DataFrame)
-    # Must stay pandas, never polars -- `line_summary_chart` indexes it via
-    # `.iterrows()` / `row["..."]`, and a polars frame here makes the bounds
-    # overlay silently disappear.
-    line_bounds: pd.DataFrame = field(default_factory=pd.DataFrame)
+    line_bounds: pl.DataFrame = field(default_factory=pl.DataFrame)
     line_meta: list[dict] = field(default_factory=list)
     nw_bus_names: dict[int, str] = field(default_factory=dict)
     nw_convergence: pl.DataFrame = field(default_factory=pl.DataFrame)
@@ -236,9 +232,9 @@ class ComparisonDataset:
         the round trip reproduces the report byte-identically.
 
         Metadata serialization (see :func:`_metadata_to_json`): JSON-native
-        values pass through; ``pl.DataFrame`` / ``pd.DataFrame`` values are
-        wrapped as ``{"__frame__": "<polars|pandas>", "records": [...]}``; any
-        other value raises :class:`TypeError` naming its key. ``render``'s
+        values pass through; ``pl.DataFrame`` values are wrapped as
+        ``{"__frame__": "polars", "records": [...]}``; any other value raises
+        :class:`TypeError` naming its key. ``render``'s
         frame fields serialize the same way; its ``results`` field serializes
         as a list of :func:`dataclasses.asdict` records (see
         :func:`_render_to_json`).
@@ -331,12 +327,12 @@ def _metadata_to_json(meta: dict[str, object]) -> dict[str, object]:
     """Build the JSON-serializable view of a metadata dict.
 
     JSON-native values (``str, int, float, bool, None`` and ``list``/``dict``
-    thereof) are passed through verbatim. ``pl.DataFrame`` and ``pd.DataFrame``
-    values are wrapped as ``{_FRAME_SENTINEL: "<polars|pandas>", "records":
-    [...], "columns": {name: dtype_name}}`` using the frame's native record
-    export. The ``columns`` map carries the schema so that an *empty* frame
-    (whose ``records`` list is ``[]``) keeps its column names and dtypes on
-    round-trip instead of collapsing to a zero-column frame.
+    thereof) are passed through verbatim. ``pl.DataFrame`` values are wrapped
+    as ``{_FRAME_SENTINEL: "polars", "records": [...], "columns": {name:
+    dtype_name}}`` using the frame's native record export. The ``columns`` map
+    carries the schema so that an *empty* frame (whose ``records`` list is
+    ``[]``) keeps its column names and dtypes on round-trip instead of
+    collapsing to a zero-column frame.
 
     Args:
         meta: The metadata side-table.
@@ -345,8 +341,8 @@ def _metadata_to_json(meta: dict[str, object]) -> dict[str, object]:
         A dict whose values are all JSON-serializable.
 
     Raises:
-        TypeError: If a value is neither JSON-native nor a supported frame;
-            the message names the offending key.
+        TypeError: If a value is neither JSON-native nor a polars frame; the
+            message names the offending key.
     """
     view: dict[str, object] = {}
     for key, value in meta.items():
@@ -355,13 +351,6 @@ def _metadata_to_json(meta: dict[str, object]) -> dict[str, object]:
             view[key] = {
                 _FRAME_SENTINEL: "polars",
                 "records": value.to_dicts(),
-                "columns": columns,
-            }
-        elif isinstance(value, pd.DataFrame):
-            columns = {str(name): str(dtype) for name, dtype in value.dtypes.items()}
-            view[key] = {
-                _FRAME_SENTINEL: "pandas",
-                "records": value.to_dict(orient="records"),
                 "columns": columns,
             }
         elif _is_json_native(value):
@@ -376,12 +365,12 @@ def _metadata_to_json(meta: dict[str, object]) -> dict[str, object]:
 def _metadata_from_json(view: dict[str, object]) -> dict[str, object]:
     """Reconstruct a metadata dict from its JSON view (inverse of to-json).
 
-    Entries shaped like ``{_FRAME_SENTINEL: "<polars|pandas>", "records":
-    [...], "columns": {name: dtype_name}}`` are rebuilt into the corresponding
-    frame type; all other entries pass through unchanged. When ``records`` is
-    empty and a ``columns`` map is present, the frame is reconstructed *with* an
-    explicit schema so that an empty frame keeps its column names and dtypes
-    (see :func:`_metadata_to_json`).
+    Entries shaped like ``{_FRAME_SENTINEL: "polars", "records": [...],
+    "columns": {name: dtype_name}}`` are rebuilt into a polars frame; all
+    other entries pass through unchanged. When ``records`` is empty and a
+    ``columns`` map is present, the frame is reconstructed *with* an explicit
+    schema so that an empty frame keeps its column names and dtypes (see
+    :func:`_metadata_to_json`).
 
     Args:
         view: The JSON-deserialized metadata view.
@@ -397,7 +386,7 @@ def _metadata_from_json(view: dict[str, object]) -> dict[str, object]:
     for key, value in view.items():
         if isinstance(value, dict) and _FRAME_SENTINEL in value:
             kind = value[_FRAME_SENTINEL]
-            if kind not in ("polars", "pandas"):
+            if kind != "polars":
                 msg = f"metadata key {key!r} has unknown frame type {kind!r}"
                 raise TypeError(msg)
             if "records" not in value:
@@ -412,10 +401,7 @@ def _metadata_from_json(view: dict[str, object]) -> dict[str, object]:
                 )
                 raise TypeError(msg)
             columns = value.get("columns")
-            if kind == "polars":
-                meta[key] = _build_polars_frame(records, columns)
-            else:
-                meta[key] = _build_pandas_frame(records, columns)
+            meta[key] = _build_polars_frame(records, columns)
         else:
             meta[key] = value
     return meta
@@ -424,7 +410,7 @@ def _metadata_from_json(view: dict[str, object]) -> dict[str, object]:
 def _render_to_json(render: RenderInputs) -> dict[str, object]:
     """Build the JSON-serializable view of a :class:`RenderInputs`.
 
-    Reuses :func:`_metadata_to_json`'s frame-wrapping for every ``pl``/``pd``
+    Reuses :func:`_metadata_to_json`'s frame-wrapping for every ``pl``
     frame field. The one field that is neither JSON-native nor a frame
     (``results``, a ``list[ResultComparison]``) is flattened via
     :func:`dataclasses.asdict` first — ``ResultComparison`` is a flat frozen
@@ -524,28 +510,6 @@ def _build_polars_frame(records: list[object], columns: object) -> pl.DataFrame:
         schema = {name: getattr(pl, dtype_name) for name, dtype_name in columns.items()}
         return pl.DataFrame(schema=schema)
     return pl.DataFrame(records)
-
-
-def _build_pandas_frame(records: list[object], columns: object) -> pd.DataFrame:
-    """Rebuild a pandas frame from records, preserving schema when empty.
-
-    Args:
-        records: The ``records`` payload (a list of row dicts).
-        columns: The ``columns`` map (column-name -> pandas dtype string), or
-            ``None`` for legacy wrappers without a schema.
-
-    Returns:
-        The reconstructed pandas frame. When ``records`` is empty and
-        ``columns`` is a mapping, an empty frame with those columns and dtypes
-        is built; otherwise the records drive inference.
-    """
-    if not records and isinstance(columns, dict):
-        empty_cols = {
-            name: pd.Series([], dtype=dtype_name)
-            for name, dtype_name in columns.items()
-        }
-        return pd.DataFrame(empty_cols)
-    return pd.DataFrame(records)
 
 
 def _is_json_native(value: object) -> bool:

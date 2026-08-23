@@ -29,6 +29,7 @@ from cobre_bridge.comparators.decomp_results import (
     _result_comparisons,
     _scenario_mean,
     _stage_rows,
+    _weighted_group_mean,
     build_decomp_dataset,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
@@ -73,6 +74,66 @@ class TestStageRows:
         frame = _source_frame().filter(pl.col("patamar").is_not_null())
         rows = _stage_rows(frame)
         assert len(rows) == 4
+
+
+class TestWeightedGroupMean:
+    """ticket-052: the shared kernel `_scenario_mean` and
+    `_probability_weighted_stage_cost` both delegate to."""
+
+    def test_weighted_mean_matches_the_probability_weighted_expectation(self) -> None:
+        frame = pl.DataFrame(
+            {
+                "estagio": [3, 3],
+                "probabilidade": [0.6, 0.4],
+                "geracao_MW": [100.0, 20.0],
+            }
+        )
+        out = _weighted_group_mean(frame, ["estagio"], ["geracao_MW"])
+        assert out["geracao_MW"].to_list() == [pytest.approx(0.6 * 100.0 + 0.4 * 20.0)]
+
+    def test_zero_weight_sum_falls_back_to_the_plain_mean(self) -> None:
+        """The ``1e-12`` guard: a group whose weights sum to ~0 must use the
+        plain mean instead of dividing by zero."""
+        frame = pl.DataFrame(
+            {
+                "estagio": [3, 3],
+                "probabilidade": [0.0, 0.0],
+                "geracao_MW": [10.0, 30.0],
+            }
+        )
+        out = _weighted_group_mean(frame, ["estagio"], ["geracao_MW"])
+        assert out["geracao_MW"].to_list() == [pytest.approx(20.0)]
+
+    def test_agrees_with_scenario_means_weighted_branch(self) -> None:
+        """`_scenario_mean`'s weighted branch is exactly this kernel applied
+        to its own joined frame -- calling it directly on the same shape must
+        reproduce the identical per-group value."""
+        joined = pl.DataFrame(
+            {
+                "estagio": [3, 3],
+                "codigo_usina": [10, 10],
+                "cenario": [1, 2],
+                "geracao_MW": [100.0, 20.0],
+                "probabilidade": [0.6, 0.4],
+            }
+        )
+        via_kernel = _weighted_group_mean(
+            joined, ["estagio", "codigo_usina"], ["geracao_MW"]
+        )
+
+        frame = joined.drop("probabilidade")
+        probabilities = joined.select("estagio", "cenario", "probabilidade")
+        via_scenario_mean = _scenario_mean(
+            frame,
+            "estagio",
+            ["geracao_MW"],
+            entity_column="codigo_usina",
+            probabilities=probabilities,
+        )
+
+        assert via_kernel["geracao_MW"].to_list() == pytest.approx(
+            via_scenario_mean["geracao_MW"].to_list()
+        )
 
 
 class TestScenarioMean:

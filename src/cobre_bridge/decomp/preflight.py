@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pandas as pd
 from idecomp.decomp.modelos import dadger as _dadger_models
@@ -36,7 +36,13 @@ from cobre_bridge.preflight import (
 )
 
 if TYPE_CHECKING:
+    from idecomp.decomp import Dadger, Vazoes
+
     from cobre_bridge.decomp.cadastro import CadastroResolutionReport
+    from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.id_map import DecompIdMap
+    from cobre_bridge.decomp.pipeline import DecompFiles
+    from cobre_bridge.decomp.temporal import OperativeStage
 
 _CONTEXT = "Preflight"
 
@@ -80,12 +86,14 @@ def _deferred(code: str, title: str, summary: str, remediation: str) -> Diagnost
     )
 
 
-def _calendar_check(dadger: object) -> tuple[CheckItem, list, str | None]:
+def _calendar_check(
+    dadger: Dadger,
+) -> tuple[CheckItem, list[OperativeStage], str | None]:
     """Build the operative calendar, turning its validation into one check."""
     from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
 
     try:
-        calendar = operative_calendar_from_dadger(dadger)  # type: ignore[arg-type]
+        calendar = operative_calendar_from_dadger(dadger)
     except (ValueError, AttributeError, TypeError) as exc:
         return (
             CheckItem(
@@ -108,12 +116,12 @@ def _calendar_check(dadger: object) -> tuple[CheckItem, list, str | None]:
     )
 
 
-def _tree_checks(vazoes: object, calendar: list) -> list[CheckItem]:
+def _tree_checks(vazoes: Vazoes, calendar: list[OperativeStage]) -> list[CheckItem]:
     """Per-stage probability mass and the trunk-plus-terminal-fan shape gate."""
     from cobre_bridge.decomp.scenarios import convert_scenario_probabilities
 
     try:
-        table = convert_scenario_probabilities(vazoes, calendar).to_pydict()  # type: ignore[arg-type]
+        table = convert_scenario_probabilities(vazoes, calendar).to_pydict()
     except (ValueError, KeyError, AttributeError) as exc:
         return [
             CheckItem(
@@ -159,15 +167,16 @@ def _tree_checks(vazoes: object, calendar: list) -> list[CheckItem]:
     return checks
 
 
-def _load_factor_check(dadger: object, id_map: object, calendar: list) -> CheckItem:
+def _load_factor_check(case: DecompCase, id_map: DecompIdMap) -> CheckItem:
     """The per-(bus, stage) identity ``Σ_b f_b·h_b = H`` (matrix row 17)."""
     from cobre_bridge.decomp.load import convert_load_factors
 
     try:
-        document = convert_load_factors(dadger, id_map, calendar)  # type: ignore[arg-type]
+        document = convert_load_factors(case, id_map)
     except (ValueError, KeyError, AttributeError) as exc:
         return CheckItem(label="Load block factors", passed=False, detail=str(exc))
 
+    calendar = case.calendar
     hours = {stage.index: list(stage.block_hours) for stage in calendar}
     worst = 0.0
     for entry in document.get("load_factors", []):
@@ -187,7 +196,7 @@ def _load_factor_check(dadger: object, id_map: object, calendar: list) -> CheckI
     )
 
 
-def _deferred_inventory(dadger: object, files: object) -> list[Diagnostic]:
+def _deferred_inventory(dadger: Dadger, files: DecompFiles) -> list[Diagnostic]:
     """Name what the conversion will not carry, so it is never a surprise."""
     found: list[Diagnostic] = []
 
@@ -239,7 +248,7 @@ def _deferred_inventory(dadger: object, files: object) -> list[Diagnostic]:
     return found
 
 
-def _ac_present(dadger: object, classes: frozenset[type]) -> list[type]:
+def _ac_present(dadger: Dadger, classes: frozenset[type]) -> list[type]:
     """The subset of *classes* present in *dadger*'s deck, name-sorted.
 
     A class is present iff its ``AC`` frame is a non-empty
@@ -251,8 +260,13 @@ def _ac_present(dadger: object, classes: frozenset[type]) -> list[type]:
     present = [
         cls
         for cls in classes
+        # idecomp's stub declares codigo_usina: int, but None is its own
+        # documented no-filter sentinel (scan every plant) -- passing a real
+        # int here would narrow the scan to one usina.
         if isinstance(
-            frame := dadger.ac(codigo_usina=None, modificacao=cls, df=True),  # type: ignore[attr-defined]
+            frame := dadger.ac(  # type: ignore[arg-type]
+                codigo_usina=None, modificacao=cls, df=True
+            ),
             pd.DataFrame,
         )
         and not frame.empty
@@ -261,7 +275,7 @@ def _ac_present(dadger: object, classes: frozenset[type]) -> list[type]:
 
 
 def _ac_coverage(
-    dadger: object, report: CadastroResolutionReport
+    dadger: Dadger, report: CadastroResolutionReport
 ) -> tuple[list[CheckItem], list[Diagnostic]]:
     """Classify every idecomp ``AC`` class into applied/uningestable/deferred
     and report which of those buckets the deck actually exercises.
@@ -381,7 +395,7 @@ def _ac_coverage(
 
 
 def _special_constraint_coverage(
-    dadger: object, files: object
+    dadger: Dadger, files: DecompFiles
 ) -> tuple[list[CheckItem], list[Diagnostic]]:
     """Classify the deck's special constraints into converted (RE/HQ/HV/HE,
     split into bounds-lowered vs generic-emitted) and deferred (``FE``/RHA/
@@ -406,7 +420,7 @@ def _special_constraint_coverage(
     / :func:`~cobre_bridge.decomp.constraint_registers.detect_libs_electrical`)
     — never re-derived here.
     """
-    census = constraint_registers.read_constraints(dadger)  # type: ignore[arg-type]
+    census = constraint_registers.read_constraints(dadger)
 
     bounds_by_family: dict[str, int] = {}
     generic_by_family: dict[str, int] = {}
@@ -455,7 +469,7 @@ def _special_constraint_coverage(
             )
         )
 
-    dadger_path = files.dadger  # type: ignore[attr-defined]
+    dadger_path = files.dadger
     diagnostics.extend(constraint_registers.detect_unreadable_electrical(dadger_path))
     libs_diagnostic = constraint_registers.detect_libs_electrical(dadger_path.parent)
     if libs_diagnostic is not None:
@@ -474,6 +488,7 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
     """
     from idecomp.decomp import Dadger, Vazoes
 
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.pipeline import discover_decomp_files
 
@@ -506,7 +521,10 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
     diagnostics.extend(optional_diags)
 
     try:
-        dadger = Dadger.read(str(files.dadger))
+        # RegisterFile.read() is annotated to return the base RegisterFile,
+        # not the calling subclass; narrow back to Dadger so downstream
+        # helpers (typed Dadger, not the object escape hatch) type-check.
+        dadger = cast(Dadger, Dadger.read(str(files.dadger)))
     except Exception as exc:  # noqa: BLE001
         checks.append(
             CheckItem(label="Deck registers readable", passed=False, detail=str(exc))
@@ -517,6 +535,8 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
             diagnostics=diagnostics,
             checks=checks,
         )
+
+    case = DecompCase(files=files)
 
     try:
         id_map = DecompIdMap.from_dadger(dadger)
@@ -545,9 +565,9 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
     checks.append(calendar_check)
 
     if failure is None:
-        checks.append(_load_factor_check(dadger, id_map, calendar))
+        checks.append(_load_factor_check(case, id_map))
         try:
-            vazoes = Vazoes.read(str(files.vazoes))
+            vazoes = cast(Vazoes, Vazoes.read(str(files.vazoes)))
         except Exception as exc:  # noqa: BLE001
             checks.append(
                 CheckItem(label="Scenario tree readable", passed=False, detail=str(exc))

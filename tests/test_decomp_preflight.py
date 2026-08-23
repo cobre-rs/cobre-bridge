@@ -34,12 +34,14 @@ from cobre_bridge.decomp.pipeline import DecompFiles
 from cobre_bridge.decomp.preflight import (
     _ALL_AC_CLASSES,
     _ac_coverage,
+    _load_factor_check,
     _special_constraint_coverage,
     run_decomp_preflight,
 )
 from cobre_bridge.diagnostics import Severity
 from cobre_bridge.errors import FieldParseError
-from cobre_bridge.preflight import PreflightVerdict, optional_input_advisory
+from cobre_bridge.preflight import CheckItem, PreflightVerdict, optional_input_advisory
+from tests.conftest import make_decomp_case
 from tests.test_decomp_cadastro import _FakeDadger
 from tests.test_decomp_constraint_registers import (
     _cm,
@@ -49,6 +51,12 @@ from tests.test_decomp_constraint_registers import (
     _lv,
 )
 from tests.test_decomp_constraint_registers import _FakeDadger as _ConstraintFakeDadger
+from tests.test_decomp_network_load import (
+    _ID_MAP,
+    _calendar_rv3,
+    _dp_frame,
+    _StubDadger,
+)
 
 
 class TestDiscoveryFailure:
@@ -436,3 +444,24 @@ class TestSpecialConstraintCoverage:
             "0 family(ies) present in the deck"
         )
         assert diagnostics == []
+
+
+class TestLoadFactorCheck:
+    """``_load_factor_check`` must call ``convert_load_factors(case,
+    id_map)`` -- the pre-refactor ``(dadger, id_map, calendar)`` call shape
+    raises ``TypeError`` on every deck that reaches it, uncaught by the
+    ``except (ValueError, KeyError, AttributeError)`` clause below.
+    """
+
+    def test_runs_to_completion_and_returns_a_check_item(self) -> None:
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=_StubDadger(dp=_dp_frame()),
+            calendar=_calendar_rv3(),
+        )
+
+        item = _load_factor_check(case, _ID_MAP)
+
+        assert isinstance(item, CheckItem)
+        assert item.label == "Load block factors reproduce the stage span"
+        assert item.passed is True

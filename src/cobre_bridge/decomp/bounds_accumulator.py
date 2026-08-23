@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import pyarrow as pa
 
 from cobre_bridge.generic_constraint_builder import is_bounded
+from cobre_bridge.tolerances import relative_tolerance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -220,12 +221,6 @@ def axis_spec(family: str, axis: str) -> AxisSpec:
         ) from err
 
 
-#: Mirrors the ``_floats_differ`` idiom in ``decomp/bounds.py`` — a relative
-#: tolerance so float noise on an intersection's edges never spuriously
-#: raises the empty-intersection conflict below.
-_INTERSECTION_TOLERANCE = 1e-9
-
-
 def _effective(value: float | None) -> float | None:
     """*value* as an effective bound, or ``None`` for "no bound on that side".
 
@@ -290,7 +285,7 @@ def intersect(
     upper = min((value for value, _ in uppers), default=None)
 
     if lower is not None and upper is not None:
-        tolerance = _INTERSECTION_TOLERANCE * max(1.0, abs(upper))
+        tolerance = relative_tolerance(upper)
         if lower - upper > tolerance:
             lower_desc = ", ".join(f"{name}={value}" for value, name in lowers)
             upper_desc = ", ".join(f"{name}={value}" for value, name in uppers)

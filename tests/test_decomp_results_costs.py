@@ -22,8 +22,11 @@ from cobre_bridge.comparators.decomp_results import (
     _NW_COST_LABELS,
     _bus_side,
     _cost_frames,
+    _probability_weighted_stage_cost,
     _scenario_probabilities,
     _union_cost_rows,
+    _union_relato_reports,
+    _weighted_group_mean,
     build_decomp_dataset,
 )
 from cobre_bridge.comparators.report_builder import build_comparison_report
@@ -384,6 +387,65 @@ class TestScenarioProbabilities:
         result = _scenario_probabilities(tmp_path)
 
         assert set(result["estagio"].unique().to_list()) == {3}
+
+
+class TestWeightedGroupMeanCostEquivalence:
+    """ticket-052: `_probability_weighted_stage_cost`'s weighted branch is
+    now `_weighted_group_mean(frame, ["estagio"], present)` -- pin that the
+    two calls agree on the exact frame `_cost_frames` builds, and that the
+    kernel's zero-weight guard still governs a malformed report."""
+
+    def test_matches_the_probability_weighted_stage_cost_wrapper(self) -> None:
+        frame = pl.DataFrame(
+            {
+                "estagio": [3, 3],
+                "probabilidade": [0.6, 0.4],
+                "geracao_termica": [1000.0, 500.0],
+            }
+        )
+        via_kernel = _weighted_group_mean(frame, ["estagio"], ["geracao_termica"])
+        via_wrapper = _probability_weighted_stage_cost(frame, ["geracao_termica"])
+
+        assert via_kernel.to_dicts() == via_wrapper.to_dicts()
+        # Known value from the pre-refactor formula: 0.6*1000 + 0.4*500 = 800.
+        assert via_kernel["geracao_termica"].to_list() == [pytest.approx(800.0)]
+
+    def test_zero_probability_sum_falls_back_to_the_plain_mean(self) -> None:
+        frame = pl.DataFrame(
+            {
+                "estagio": [3, 3],
+                "probabilidade": [0.0, 0.0],
+                "geracao_termica": [1000.0, 500.0],
+            }
+        )
+        out = _probability_weighted_stage_cost(frame, ["geracao_termica"])
+        assert out["geracao_termica"].to_list() == [pytest.approx(750.0)]
+
+
+class TestUnionRelatoReports:
+    """ticket-052: `_union_relato_reports` -- the shared union `_cost_frames`
+    and `_scenario_probabilities` both delegate to."""
+
+    def test_monthly_empty_returns_raw_unchanged(self) -> None:
+        raw = _relato_costs_frame()
+        assert _union_relato_reports(raw, pl.DataFrame()) is raw
+
+    def test_raw_empty_returns_monthly_unchanged(self) -> None:
+        monthly = _relato2_costs_frame()
+        assert _union_relato_reports(pl.DataFrame(), monthly) is monthly
+
+    def test_relato2_drops_the_shared_stage_from_raw(self) -> None:
+        combined = _union_relato_reports(
+            _relato_costs_with_overlapping_fan_stage(), _relato2_costs_frame()
+        )
+
+        stage_3 = combined.filter(pl.col("estagio") == 3)
+        # relato2's 0.6/0.4 wins -- NOT relato's (wrong) 0.9/0.1 duplicate rows.
+        assert len(stage_3) == 2
+        assert sorted(stage_3["probabilidade"].to_list()) == [
+            pytest.approx(0.4),
+            pytest.approx(0.6),
+        ]
 
 
 def _bus_fan_stage_frame() -> pl.DataFrame:

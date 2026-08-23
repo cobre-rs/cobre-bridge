@@ -7,7 +7,6 @@ case.
 
 from __future__ import annotations
 
-import pandas as pd
 import polars as pl
 import pytest
 
@@ -309,7 +308,7 @@ class TestHtmlReportNewSections:
                     "capacity": {"direct_mw": 1000.0, "reverse_mw": 800.0},
                 }
             ],
-            line_bounds=pd.DataFrame(),
+            line_bounds=pl.DataFrame(),
         )
         dataset = build_results_dataset(results, pctiles, 0.05)
         html = build_comparison_report(dataset)

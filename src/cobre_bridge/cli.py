@@ -803,6 +803,26 @@ _OutDirOpt = Annotated[
         ),
     ),
 ]
+_JsonOpt = Annotated[
+    bool,
+    typer.Option(
+        "--json",
+        help=(
+            "Emit a single machine-readable JSON verdict to stdout and "
+            "suppress the human-readable (Rich) output."
+        ),
+    ),
+]
+_ToleranceOpt = Annotated[
+    float | None,
+    typer.Option(
+        envvar="COBRE_BRIDGE_RESULTS_TOLERANCE",
+        help=(
+            "Relative tolerance for results comparison (default 1e-2; "
+            "overridable via COBRE_BRIDGE_RESULTS_TOLERANCE or cobre-bridge.toml)."
+        ),
+    ),
+]
 
 app = typer.Typer(
     name="cobre-bridge",
@@ -868,16 +888,7 @@ def _convert_newave(
             help="Also write the conversion diagnostics (counts + findings) as JSON.",
         ),
     ] = None,
-    json_output: Annotated[
-        bool,
-        typer.Option(
-            "--json",
-            help=(
-                "Emit a single machine-readable JSON verdict to stdout and "
-                "suppress the human (Rich) rendering."
-            ),
-        ),
-    ] = False,
+    json_output: _JsonOpt = False,
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -1242,16 +1253,7 @@ def _convert_decomp(
             help="Also write the conversion diagnostics (counts + findings) as JSON.",
         ),
     ] = None,
-    json_output: Annotated[
-        bool,
-        typer.Option(
-            "--json",
-            help=(
-                "Emit a single machine-readable JSON verdict to stdout and "
-                "suppress the human (Rich) rendering."
-            ),
-        ),
-    ] = False,
+    json_output: _JsonOpt = False,
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -1404,29 +1406,10 @@ def _compare_decomp(
     cobre_output_dir: Annotated[
         Path, typer.Argument(help="Path to the Cobre output directory.")
     ],
-    tolerance: Annotated[
-        float | None,
-        typer.Option(
-            envvar="COBRE_BRIDGE_RESULTS_TOLERANCE",
-            help=(
-                "Relative tolerance for the within-tolerance verdict (default "
-                "1e-2; overridable via COBRE_BRIDGE_RESULTS_TOLERANCE or "
-                "cobre-bridge.toml)."
-            ),
-        ),
-    ] = None,
+    tolerance: _ToleranceOpt = None,
     fmt: _FormatOpt = None,
     out_dir: _OutDirOpt = None,
-    json_output: Annotated[
-        bool,
-        typer.Option(
-            "--json",
-            help=(
-                "Emit a single machine-readable JSON verdict to stdout and "
-                "suppress the human (Rich) tables."
-            ),
-        ),
-    ] = False,
+    json_output: _JsonOpt = False,
     verbose: _VerboseOpt = 0,
     log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
@@ -1474,28 +1457,10 @@ def _compare_newave(
     cobre_output_dir: Annotated[
         Path, typer.Argument(help="Path to the Cobre output directory.")
     ],
-    tolerance: Annotated[
-        float | None,
-        typer.Option(
-            envvar="COBRE_BRIDGE_RESULTS_TOLERANCE",
-            help=(
-                "Relative tolerance for results comparison (default 1e-2; "
-                "overridable via COBRE_BRIDGE_RESULTS_TOLERANCE or cobre-bridge.toml)."
-            ),
-        ),
-    ] = None,
+    tolerance: _ToleranceOpt = None,
     fmt: _FormatOpt = None,
     out_dir: _OutDirOpt = None,
-    json_output: Annotated[
-        bool,
-        typer.Option(
-            "--json",
-            help=(
-                "Emit a single machine-readable JSON verdict to stdout and "
-                "suppress the human (Rich) tables."
-            ),
-        ),
-    ] = False,
+    json_output: _JsonOpt = False,
     verbose: _VerboseOpt = 0,
     log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
@@ -1525,16 +1490,7 @@ def _compare_newave(
 @check_app.command("newave")
 def _check_newave(
     src: Annotated[Path, typer.Argument(help="Path to the NEWAVE case directory.")],
-    json_output: Annotated[
-        bool,
-        typer.Option(
-            "--json",
-            help=(
-                "Emit a single machine-readable JSON verdict to stdout and "
-                "suppress the human (Rich) checklist."
-            ),
-        ),
-    ] = False,
+    json_output: _JsonOpt = False,
     verbose: _VerboseOpt = 0,
     log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
@@ -1557,16 +1513,7 @@ def _check_newave(
 @check_app.command("decomp")
 def _check_decomp(
     src: Annotated[Path, typer.Argument(help="Path to the DECOMP deck directory.")],
-    json_output: Annotated[
-        bool,
-        typer.Option(
-            "--json",
-            help=(
-                "Emit a single machine-readable JSON verdict to stdout and "
-                "suppress the human (Rich) checklist."
-            ),
-        ),
-    ] = False,
+    json_output: _JsonOpt = False,
     verbose: _VerboseOpt = 0,
     log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,
@@ -1611,16 +1558,7 @@ def _dashboard(
             ),
         ),
     ] = False,
-    json_output: Annotated[
-        bool,
-        typer.Option(
-            "--json",
-            help=(
-                "Emit a single machine-readable JSON verdict to stdout and "
-                "suppress the human (Rich) status lines."
-            ),
-        ),
-    ] = False,
+    json_output: _JsonOpt = False,
     verbose: _VerboseOpt = 0,
     log_file: _LogFileOpt = None,
     no_color: _NoColorOpt = False,

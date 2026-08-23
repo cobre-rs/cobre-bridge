@@ -51,3 +51,51 @@ class TestTyperApp:
             result = self._invoke(["convert", "newave", str(src), str(dst)])
         assert result.exit_code == 0
         assert "7 hydros" in result.stdout
+
+    @staticmethod
+    def _json_help_text(stdout: str) -> str:
+        """Reassemble the ``--json`` help text, undoing Rich's per-table wrap.
+
+        The Options box wraps the help column at a width set by the longest
+        option name/metavar in that *specific* command, so the same help
+        string breaks across a different number of lines per command; compare
+        the reflowed words, not the raw wrapped lines.
+        """
+        words: list[str] = []
+        capturing = False
+        for raw in stdout.splitlines():
+            content = raw.strip().strip("│").strip()
+            if content.startswith("--json"):
+                capturing = True
+                words.extend(content.split()[1:])
+                continue
+            if capturing:
+                if content == "" or content.startswith(("--", "╰")):
+                    break
+                words.extend(content.split())
+        return " ".join(words)
+
+    def test_json_help_line_identical_across_commands(
+        self, dumb_terminal: None
+    ) -> None:
+        """The ``--json`` help text converged to one canonical string (``_JsonOpt``)."""
+        canonical = (
+            "Emit a single machine-readable JSON verdict to stdout and "
+            "suppress the human-readable (Rich) output."
+        )
+        commands = [
+            ["convert", "newave", "--help"],
+            ["convert", "decomp", "--help"],
+            ["compare", "newave", "--help"],
+            ["compare", "decomp", "--help"],
+            ["check", "newave", "--help"],
+            ["check", "decomp", "--help"],
+            ["dashboard", "--help"],
+        ]
+        texts: dict[str, str] = {}
+        for argv in commands:
+            result = self._invoke(argv)
+            assert result.exit_code == 0
+            texts[" ".join(argv[:-1])] = self._json_help_text(result.stdout)
+        assert len(set(texts.values())) == 1, texts
+        assert next(iter(texts.values())) == canonical

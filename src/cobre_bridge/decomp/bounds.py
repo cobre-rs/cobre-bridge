@@ -52,22 +52,12 @@ import pyarrow as pa
 
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
+from cobre_bridge.tolerances import floats_differ
 
 if TYPE_CHECKING:
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
-
-#: Mirrors the ``_SPARSITY_TOLERANCE`` idiom in ``decomp/hydro.py`` — a
-#: relative tolerance scaled by the reference magnitude, used only to decide
-#: whether a stage's effective storage bounds differ from the plant's outer
-#: envelope past float noise (not a cobre-side rule).
-_SPARSITY_TOLERANCE = 1e-9
-
-
-def _floats_differ(value: float, reference: float) -> bool:
-    """Whether *value* differs from *reference* past relative float noise."""
-    return abs(value - reference) > _SPARSITY_TOLERANCE * max(abs(reference), 1.0)
 
 
 def convert_hydro_bounds(
@@ -234,7 +224,7 @@ def convert_storage_bounds(
         hydro_id = id_map.hydro_id(code)
         for stage_index in range(len(calendar)):
             vmin, vmax = effective_storage_range(effective, code, stage_index)
-            if not (_floats_differ(vmin, env_min) or _floats_differ(vmax, env_max)):
+            if not (floats_differ(vmin, env_min) or floats_differ(vmax, env_max)):
                 continue
             contributions.append(
                 BoundContribution(
@@ -312,7 +302,7 @@ def convert_volume_espera_bounds(
             ceiling = env_min + float(pct) / 100.0 * useful
             # Only tightens: a VE ≥ the envelope max is a no-op, and the
             # bound must never *raise* the declared ceiling.
-            if ceiling >= env_max or not _floats_differ(ceiling, env_max):
+            if ceiling >= env_max or not floats_differ(ceiling, env_max):
                 continue
             contributions.append(
                 BoundContribution(

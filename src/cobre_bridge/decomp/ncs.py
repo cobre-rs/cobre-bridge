@@ -29,6 +29,7 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge import cobre_schemas
+from cobre_bridge.tolerances import relative_tolerance
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -378,7 +379,7 @@ def _pee_series(
         # and warn rather than crash or trust the outlier (the max).
         representative = Counter(scenario_values).most_common(1)[0][0]
         spread = max(scenario_values) - min(scenario_values)
-        if spread > 1e-9 * max(abs(representative), 1.0):
+        if spread > relative_tolerance(representative):
             _LOG.warning(
                 "renewable park %d stage %d block %d: generation is not identical "
                 "across %d scenarios (%.6g..%.6g) — DECOMP renewables are "

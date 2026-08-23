@@ -102,6 +102,7 @@ from cobre_bridge.productivity import (
     equivalent_productivity_from_coeffs,
     fpha_efficiency,
 )
+from cobre_bridge.tolerances import relative_tolerance
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -1160,16 +1161,9 @@ def convert_energy_productivity(
     )
 
 
-#: Mirrors ``emission_checks._ENVELOPE_TOLERANCE`` (cobre-io's relative
-#: envelope tolerance) — used only to decide whether a computed availability
-#: value sits below the declared envelope past float noise, not to gate a
-#: cobre rule (that mirror lives in ``emission_checks.check_group_bound_envelope``).
-_SPARSITY_TOLERANCE = 1e-9
-
-
 def _below_envelope(value: float, envelope: float) -> bool:
     """Whether *value* is below *envelope* past relative float noise."""
-    return value < envelope - _SPARSITY_TOLERANCE * max(abs(envelope), 1.0)
+    return value < envelope - relative_tolerance(envelope)
 
 
 def _single_group_factor_rows(records: pd.DataFrame | None) -> dict[int, pd.Series]:

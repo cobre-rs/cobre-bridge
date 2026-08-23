@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pandas as pd
 import polars as pl
 
 from cobre_bridge.comparators.charts._shared import (
@@ -22,9 +21,7 @@ from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
 def line_summary_chart(
     results: list[ResultComparison],
     line_pct: pl.DataFrame | None,
-    # Must stay pandas, never polars — handing `line_bounds` a polars frame
-    # makes the bounds overlay silently disappear (`.iterrows()` below).
-    line_bounds: pd.DataFrame | None,
+    line_bounds: pl.DataFrame | None,
     line_meta: list[dict],
     reference_label: str = "NEWAVE",
 ) -> str:
@@ -65,8 +62,8 @@ def line_summary_chart(
             float(cap.get("reverse_mw", 0.0) or 0.0),
         )
     stage_caps: dict[int, dict[int, tuple[float, float]]] = {}
-    if line_bounds is not None and not line_bounds.empty:
-        for _, row in line_bounds.iterrows():
+    if line_bounds is not None and not line_bounds.is_empty():
+        for row in line_bounds.iter_rows(named=True):
             stage_caps.setdefault(int(row["line_id"]), {})[int(row["stage_id"])] = (
                 float(row.get("direct_mw", 0.0) or 0.0),
                 float(row.get("reverse_mw", 0.0) or 0.0),

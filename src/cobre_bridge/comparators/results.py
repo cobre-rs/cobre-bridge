@@ -65,7 +65,7 @@ class PercentileData:
     # mean interchange per (line_id, stage_0based) read from int*.out NWLISTOP files and
     # aligned via EntityAlignment.lines.
     line: pl.DataFrame = field(default_factory=pl.DataFrame)
-    line_bounds: pd.DataFrame = field(default_factory=pd.DataFrame)
+    line_bounds: pl.DataFrame = field(default_factory=pl.DataFrame)
     line_meta: list[dict] = field(default_factory=list)
     nw_line_means: pl.DataFrame = field(default_factory=pl.DataFrame)
 
@@ -1035,6 +1035,7 @@ def compare_results(
         read_cobre_hydro_total_flows,
         read_cobre_hydro_withdrawal,
         read_cobre_iteration_timing,
+        read_cobre_line_bounds,
         read_cobre_line_means,
         read_cobre_line_percentiles,
         read_cobre_lp_max_generation,
@@ -1324,14 +1325,7 @@ def compare_results(
     line_pct = read_cobre_line_percentiles(cobre_output_dir)
 
     # --- Line bounds (per stage) and line metadata for the Network tab ---
-    line_bounds_path = (
-        case_dir_for(cobre_output_dir) / "constraints" / "line_bounds.parquet"
-    )
-    line_bounds = (
-        pd.read_parquet(line_bounds_path)
-        if line_bounds_path.exists()
-        else pd.DataFrame()
-    )
+    line_bounds = read_cobre_line_bounds(cobre_output_dir)
     lines_json_path = case_dir_for(cobre_output_dir) / "system" / "lines.json"
     line_meta: list[dict] = []
     if lines_json_path.exists():

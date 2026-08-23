@@ -51,7 +51,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import pandas as pd
 import polars as pl
 
 from cobre_bridge.cobre_io import case_dir_for
@@ -167,6 +166,26 @@ def _stage_rows(frame: pl.DataFrame) -> pl.DataFrame:
     return frame
 
 
+def _weighted_group_mean(
+    frame: pl.DataFrame,
+    group: list[str],
+    columns: list[str],
+    *,
+    weight_col: str = "probabilidade",
+) -> pl.DataFrame:
+    """Per-group weighted mean with a zero-weight fallback -- never divide by ~0."""
+    weight = pl.col(weight_col)
+    weight_sum = weight.sum()
+    aggs = [
+        pl.when(weight_sum.abs() > 1e-12)
+        .then((pl.col(c) * weight).sum() / weight_sum)
+        .otherwise(pl.col(c).mean())
+        .alias(c)
+        for c in columns
+    ]
+    return frame.group_by(group).agg(aggs).sort(group)
+
+
 def _scenario_mean(
     frame: pl.DataFrame,
     key: str,
@@ -231,16 +250,7 @@ def _scenario_mean(
         )
         .with_columns(pl.col("probabilidade").fill_null(1.0))
     )
-    weight = pl.col("probabilidade")
-    weight_sum = weight.sum()
-    aggs = [
-        pl.when(weight_sum.abs() > 1e-12)
-        .then((pl.col(c) * weight).sum() / weight_sum)
-        .otherwise(pl.col(c).mean())
-        .alias(c)
-        for c in present
-    ]
-    return joined.group_by(group).agg(aggs).sort(group)
+    return _weighted_group_mean(joined, group, present)
 
 
 #: Canonical schema :func:`_scenario_probabilities` returns -- the
@@ -251,6 +261,19 @@ _SCENARIO_PROBABILITY_SCHEMA: dict[str, type[pl.DataType]] = {
     "cenario": pl.Int64,
     "probabilidade": pl.Float64,
 }
+
+
+def _union_relato_reports(raw: pl.DataFrame, monthly: pl.DataFrame) -> pl.DataFrame:
+    """Union ``relato``/``relato2`` -- relato2 wins for stages it covers."""
+    if monthly.is_empty():
+        return raw
+    if raw.is_empty():
+        return monthly
+    fan_stages = monthly["estagio"].unique().to_list()
+    return pl.concat(
+        [raw.filter(~pl.col("estagio").is_in(fan_stages)), monthly],
+        how="diagonal_relaxed",
+    )
 
 
 def _scenario_probabilities(decomp_dir: Path) -> pl.DataFrame:
@@ -292,18 +315,7 @@ def _scenario_probabilities(decomp_dir: Path) -> pl.DataFrame:
 
     if raw.is_empty() and monthly.is_empty():
         return pl.DataFrame(schema=_SCENARIO_PROBABILITY_SCHEMA)
-    if raw.is_empty():
-        combined = monthly
-    elif monthly.is_empty():
-        combined = raw
-    else:
-        # relato2 is authoritative for any stage it covers -- drop those
-        # stages from relato first, exactly like _cost_frames's own union.
-        fan_stages = monthly["estagio"].unique().to_list()
-        combined = pl.concat(
-            [raw.filter(~pl.col("estagio").is_in(fan_stages)), monthly],
-            how="diagonal_relaxed",
-        )
+    combined = _union_relato_reports(raw, monthly)
 
     return (
         combined.select("estagio", "cenario", "probabilidade")
@@ -953,23 +965,20 @@ def _line_result_comparisons(
     return results, unresolved_lists
 
 
-def _line_bounds_and_meta(cobre_output_dir: Path) -> tuple[pd.DataFrame, list[dict]]:
+def _line_bounds_and_meta(cobre_output_dir: Path) -> tuple[pl.DataFrame, list[dict]]:
     """Cobre-side line capacity bounds + metadata for the Network tab.
 
     Both are pure Cobre-case artifacts, not DECOMP-derived, so this reads
     them exactly the way ``results.compare_results`` does for the source
     model's own Network tab, via the shared ``cobre_readers`` readers:
 
-    - ``line_bounds``: :func:`cobre_readers.read_cobre_line_bounds`,
-      converted to pandas (``charts.line_summary_chart`` indexes it with
-      ``.iterrows()`` / ``row["..."]``, so it must stay pandas, never polars
-      -- handing it a polars frame makes the bounds overlay silently
-      disappear). This is already per-stage: ``decomp/network.py::
-      convert_lines`` writes one base row (``block_id`` null) per
-      ``(line, stage)`` carrying the resolved max-of-blocks ``IA`` capacity
-      for that stage, so a case whose capacity genuinely never changes
-      across stages naturally produces identical per-stage rows here -- no
-      separate static-capacity broadcast needs implementing on top.
+    - ``line_bounds``: :func:`cobre_readers.read_cobre_line_bounds` verbatim.
+      This is already per-stage: ``decomp/network.py::convert_lines`` writes
+      one base row (``block_id`` null) per ``(line, stage)`` carrying the
+      resolved max-of-blocks ``IA`` capacity for that stage, so a case whose
+      capacity genuinely never changes across stages naturally produces
+      identical per-stage rows here -- no separate static-capacity broadcast
+      needs implementing on top.
     - ``line_meta``: :func:`cobre_readers.read_cobre_lines`'s ``"lines"``
       list verbatim -- each entry's own nested ``capacity.direct_mw``/
       ``capacity.reverse_mw`` is exactly the shape ``line_summary_chart``
@@ -981,7 +990,7 @@ def _line_bounds_and_meta(cobre_output_dir: Path) -> tuple[pd.DataFrame, list[di
     warning) rather than raising, unchanged from before this module routed
     through the shared readers.
     """
-    line_bounds = cobre_readers.read_cobre_line_bounds(cobre_output_dir).to_pandas()
+    line_bounds = cobre_readers.read_cobre_line_bounds(cobre_output_dir)
 
     try:
         line_meta = cobre_readers.read_cobre_lines(cobre_output_dir)
@@ -1253,16 +1262,7 @@ def _probability_weighted_stage_cost(
             .agg([pl.col(c).mean().alias(c) for c in present])
             .sort("estagio")
         )
-    weight = pl.col("probabilidade")
-    weight_sum = weight.sum()
-    aggs = [
-        pl.when(weight_sum.abs() > 1e-12)
-        .then((pl.col(c) * weight).sum() / weight_sum)
-        .otherwise(pl.col(c).mean())
-        .alias(c)
-        for c in present
-    ]
-    return frame.group_by("estagio").agg(aggs).sort("estagio")
+    return _weighted_group_mean(frame, ["estagio"], present)
 
 
 def _cost_frames(decomp_dir: Path) -> tuple[dict[str, float], pl.DataFrame]:
@@ -1304,16 +1304,7 @@ def _cost_frames(decomp_dir: Path) -> tuple[dict[str, float], pl.DataFrame]:
     """
     raw = read_relato_costs(decomp_dir)
     monthly = read_relato2_costs(decomp_dir)
-    if monthly.is_empty():
-        combined = raw
-    else:
-        # relato2 is authoritative for any stage it covers -- drop those stages
-        # from relato first so a fan stage is never double-counted on union.
-        fan_stages = monthly["estagio"].unique().to_list()
-        combined = pl.concat(
-            [raw.filter(~pl.col("estagio").is_in(fan_stages)), monthly],
-            how="diagonal_relaxed",
-        )
+    combined = _union_relato_reports(raw, monthly)
     per_stage = _probability_weighted_stage_cost(combined, list(_RELATO_COST_COLUMNS))
     present = [c for c in _RELATO_COST_COLUMNS if c in per_stage.columns]
 
