@@ -584,9 +584,7 @@ class TestBuildDecompDataset:
             "evaporation": [],
         }
         thermal_codes = {
-            r.newave_code
-            for r in dataset.metadata["results"]
-            if r.entity_type == "thermal"
+            r.newave_code for r in dataset.render.results if r.entity_type == "thermal"
         }
         assert 86 not in thermal_codes
         assert 224 not in thermal_codes
@@ -1213,7 +1211,7 @@ class TestBuildDecompDatasetSingleParse:
         assert spy.call_count == 1
         # Sanity: the Constraints-tab census build (the third historical
         # parse site) actually ran as part of this build.
-        assert dataset.metadata["gc_constraints"] == constraints
+        assert dataset.render.gc_constraints == constraints
 
     def test_dataset_equal_across_base_ree_and_constraints_sections(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1311,12 +1309,12 @@ class TestBuildDecompDatasetSingleParse:
 
         # Constraints tab DECOMP-side LHS, derived via the shared case's
         # dadger/id_map (TestBuildDecompDatasetConstraints).
-        assert dataset.metadata["gc_constraints"] == constraints
-        nw_row = dataset.metadata["gc_lhs_newave"].row(0, named=True)
+        assert dataset.render.gc_constraints == constraints
+        nw_row = dataset.render.gc_lhs_newave.row(0, named=True)
         assert nw_row["constraint_id"] == 0
         assert nw_row["stage_id"] == 0
         assert nw_row["lhs_value"] == pytest.approx(2951.58)
-        cb_row = dataset.metadata["gc_lhs_cobre"].row(0, named=True)
+        cb_row = dataset.render.gc_lhs_cobre.row(0, named=True)
         assert cb_row == {"constraint_id": 0, "stage_id": 0, "lhs_value": 3000.0}
 
 
@@ -1553,7 +1551,7 @@ class TestBuildDecompDatasetNetwork:
 
         dataset = build_decomp_dataset(decomp_dir, cobre_output_dir)
 
-        line_pct = dataset.metadata["line"]
+        line_pct = dataset.render.line
         assert isinstance(line_pct, pl.DataFrame)
         assert not line_pct.is_empty()
         assert {"net_flow_mw_p10", "net_flow_mw_p50", "net_flow_mw_p90"}.issubset(
@@ -1579,7 +1577,7 @@ class TestBuildDecompDatasetNetwork:
 
         dataset = build_decomp_dataset(decomp_dir, cobre_output_dir)
 
-        line_pct = dataset.metadata["line"]
+        line_pct = dataset.render.line
         assert isinstance(line_pct, pl.DataFrame)
         assert line_pct.is_empty()
 
@@ -1599,7 +1597,7 @@ class TestBuildDecompDatasetNetwork:
 
         dataset = build_decomp_dataset(decomp_dir, cobre_output_dir)
 
-        line_bounds = dataset.metadata["line_bounds"]
+        line_bounds = dataset.render.line_bounds
         assert isinstance(line_bounds, pd.DataFrame)
         assert not isinstance(line_bounds, pl.DataFrame)
         assert {"line_id", "stage_id", "direct_mw", "reverse_mw"}.issubset(
@@ -1623,7 +1621,7 @@ class TestBuildDecompDatasetNetwork:
 
         dataset = build_decomp_dataset(decomp_dir, cobre_output_dir)
 
-        line_meta = dataset.metadata["line_meta"]
+        line_meta = dataset.render.line_meta
         assert isinstance(line_meta, list)
         assert line_meta[0]["id"] == 0
         assert line_meta[0]["capacity"]["direct_mw"] == 1000.0
@@ -1703,7 +1701,7 @@ class TestSystemTabMetadata:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        bus_pct = dataset.metadata["bus"]
+        bus_pct = dataset.render.bus
         assert isinstance(bus_pct, pl.DataFrame)
         assert not bus_pct.is_empty()
         assert {
@@ -1725,7 +1723,7 @@ class TestSystemTabMetadata:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        bus_pct = dataset.metadata["bus"]
+        bus_pct = dataset.render.bus
         assert isinstance(bus_pct, pl.DataFrame)
         assert bus_pct.is_empty()
 
@@ -2027,13 +2025,13 @@ class TestBuildDecompDatasetEnergyBalance:
             "cobre_hydro_means",
             "nw_sin",
         ):
-            value = dataset.metadata[key]
+            value = getattr(dataset.render, key)
             assert isinstance(value, pl.DataFrame)
             assert not value.is_empty()
-        assert isinstance(dataset.metadata["cobre_bus_meta"], dict)
-        assert dataset.metadata["cobre_bus_meta"]
+        assert isinstance(dataset.render.cobre_bus_meta, dict)
+        assert dataset.render.cobre_bus_meta
         # D-STAGE-OFFSET: fixed at 1 for DECOMP's 1-based estagio.
-        assert dataset.metadata["nw_offset"] == 1
+        assert dataset.render.nw_offset == 1
 
     def test_nw_market_tokens_are_all_consumed_by_the_tab(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2043,7 +2041,7 @@ class TestBuildDecompDatasetEnergyBalance:
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
         tab_tokens = {nw_var for _, nw_var, _, _ in _BALANCE_VARS if nw_var}
-        emitted = set(dataset.metadata["nw_market"]["variable"].unique().to_list())
+        emitted = set(dataset.render.nw_market["variable"].unique().to_list())
         assert emitted
         assert emitted <= tab_tokens
 
@@ -2054,7 +2052,7 @@ class TestBuildDecompDatasetEnergyBalance:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        nw_sin = dataset.metadata["nw_sin"]
+        nw_sin = dataset.render.nw_sin
         earmf = nw_sin.filter(pl.col("variable") == "EARMF")["value"].to_list()
         ena = nw_sin.filter(pl.col("variable") == "ENA")["value"].to_list()
         assert earmf == pytest.approx([7000.0])
@@ -2071,7 +2069,7 @@ class TestBuildDecompDatasetEnergyBalance:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        assert "EXCESSO" not in dataset.metadata["nw_market"]["variable"].to_list()
+        assert "EXCESSO" not in dataset.render.nw_market["variable"].to_list()
 
         html = build_comparison_report(dataset)
 
@@ -2663,7 +2661,7 @@ class TestBuildDecompDatasetCosts:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        variables = set(dataset.metadata["nw_sin"]["variable"].unique().to_list())
+        variables = set(dataset.render.nw_sin["variable"].unique().to_list())
         assert {"EARMF", "ENA"} <= variables
         assert {"COPER", "CUSTO_FUTURO", "CTERM"} <= variables
 
@@ -2674,16 +2672,12 @@ class TestBuildDecompDatasetCosts:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        assert dataset.metadata["nw_costs"]["GERACAO TERMICA"] == pytest.approx(
-            220_000.0
-        )
-        assert dataset.metadata["cobre_costs"]["thermal_cost"] == pytest.approx(
-            200_000.0
-        )
-        stage_costs = dataset.metadata["cobre_stage_costs"]
+        assert dataset.render.nw_costs["GERACAO TERMICA"] == pytest.approx(220_000.0)
+        assert dataset.render.cobre_costs["thermal_cost"] == pytest.approx(200_000.0)
+        stage_costs = dataset.render.cobre_stage_costs
         assert isinstance(stage_costs, pl.DataFrame)
         assert not stage_costs.is_empty()
-        assert dataset.metadata["nw_offset"] == 1
+        assert dataset.render.nw_offset == 1
 
     def test_overview_cost_sections_render_non_empty(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2857,7 +2851,7 @@ class TestBuildDecompDatasetConvergence:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        nw_conv = dataset.metadata["nw_convergence"]
+        nw_conv = dataset.render.nw_convergence
         assert nw_conv.columns == ["iteration", "lower_bound", "upper_bound_mean"]
         assert nw_conv["iteration"].to_list() == [1, 2, 3]
         # native k$ zinf/zsup reconciled to R$ (x1e3).
@@ -2875,7 +2869,7 @@ class TestBuildDecompDatasetConvergence:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        cobre_conv = dataset.metadata["cobre_convergence"]
+        cobre_conv = dataset.render.cobre_convergence
         assert cobre_conv.columns == ["iteration", "lower_bound", "upper_bound_mean"]
         assert cobre_conv["lower_bound"].to_list() == pytest.approx(
             [95.0, 145.0, 178.0]
@@ -2918,7 +2912,7 @@ class TestBuildDecompDatasetConvergence:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        nw_conv = dataset.metadata["nw_convergence"]
+        nw_conv = dataset.render.nw_convergence
         assert nw_conv.is_empty()
         assert nw_conv.columns == ["iteration", "lower_bound", "upper_bound_mean"]
 
@@ -3202,7 +3196,7 @@ class TestBuildDecompDatasetPerformance:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        assert dataset.metadata["nw_tim_stages"] == {
+        assert dataset.render.nw_tim_stages == {
             "Tempo Total": 141.0,
             "Calculo da Politica": 130.0,
         }
@@ -3214,7 +3208,7 @@ class TestBuildDecompDatasetPerformance:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        nw_tim_iterations = dataset.metadata["nw_tim_iterations"]
+        nw_tim_iterations = dataset.render.nw_tim_iterations
         assert nw_tim_iterations.columns == ["iteration", "total_seconds"]
         assert nw_tim_iterations["total_seconds"].to_list() == pytest.approx(
             [12.0, 15.0, 9.0]
@@ -3227,8 +3221,8 @@ class TestBuildDecompDatasetPerformance:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        assert dataset.metadata["cobre_training_seconds"] == 26.0
-        cobre_iter_timing = dataset.metadata["cobre_iteration_timing"]
+        assert dataset.render.cobre_training_seconds == 26.0
+        cobre_iter_timing = dataset.render.cobre_iteration_timing
         assert cobre_iter_timing["time_total_ms"].to_list() == pytest.approx(
             [10000.0, 9000.0, 8000.0]
         )
@@ -3241,7 +3235,7 @@ class TestBuildDecompDatasetPerformance:
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
         # ``_aligned_fixture``'s every level is single-stage, stage_id 0.
-        assert dataset.metadata["nw_max_stage"] == 0
+        assert dataset.render.nw_max_stage == 0
 
     def test_report_renders_metric_cards_and_time_per_iteration_section(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3265,7 +3259,7 @@ class TestBuildDecompDatasetPerformance:
         DECOMP forward/backward trace."""
         self._patch(monkeypatch)
         dataset = build_decomp_dataset(tmp_path, tmp_path)
-        assert not dataset.metadata["nw_tim_iterations"].is_empty()
+        assert not dataset.render.nw_tim_iterations.is_empty()
 
         html = build_comparison_report(dataset)  # must not raise
 
@@ -3295,8 +3289,8 @@ class TestBuildDecompDatasetPerformance:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)  # must not raise
 
-        assert dataset.metadata["nw_tim_stages"] == {}
-        assert dataset.metadata["nw_tim_iterations"].is_empty()
+        assert dataset.render.nw_tim_stages == {}
+        assert dataset.render.nw_tim_iterations.is_empty()
 
         html = build_comparison_report(dataset)  # must not raise either
         assert "Plotly.newPlot" in html
@@ -3330,8 +3324,8 @@ class TestBuildDecompDatasetPerformanceE2E:
 
         html = build_comparison_report(dataset)
 
-        assert dataset.metadata["nw_tim_stages"]
-        assert not dataset.metadata["nw_tim_iterations"].is_empty()
+        assert dataset.render.nw_tim_stages
+        assert not dataset.render.nw_tim_iterations.is_empty()
         assert "Time per Iteration" in html
         assert "Forward / Backward Split" in html
         assert "Plotly.newPlot" in html
@@ -3457,7 +3451,7 @@ class TestBuildDecompDatasetHydroDetail:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        hydro_pct = dataset.metadata["hydro"]
+        hydro_pct = dataset.render.hydro
         assert isinstance(hydro_pct, pl.DataFrame)
         assert not hydro_pct.is_empty()
         assert "generation_mw_p50" in hydro_pct.columns
@@ -3474,7 +3468,7 @@ class TestBuildDecompDatasetHydroDetail:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        hydro_pct = dataset.metadata["hydro"]
+        hydro_pct = dataset.render.hydro
         assert isinstance(hydro_pct, pl.DataFrame)
         assert hydro_pct.is_empty()
 
@@ -3490,7 +3484,7 @@ class TestBuildDecompDatasetHydroDetail:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        cobre_hydro_meta = dataset.metadata["cobre_hydro_meta"]
+        cobre_hydro_meta = dataset.render.cobre_hydro_meta
         assert set(cobre_hydro_meta) == {0, 1}
         for entry in cobre_hydro_meta.values():
             assert "bus_ids" in entry
@@ -3509,7 +3503,7 @@ class TestBuildDecompDatasetHydroDetail:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        cobre_hydro_meta = dataset.metadata["cobre_hydro_meta"]
+        cobre_hydro_meta = dataset.render.cobre_hydro_meta
         assert cobre_hydro_meta[0]["bus_ids"] == []
         assert cobre_hydro_meta[1]["bus_ids"] == []
 
@@ -3523,7 +3517,7 @@ class TestBuildDecompDatasetHydroDetail:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        bounds = dataset.metadata["cobre_hydro_per_stage_bounds"]
+        bounds = dataset.render.cobre_hydro_per_stage_bounds
         assert bounds["max_storage_hm3"].to_list() == [1000.0, 600.0]
 
     def test_nw_hydro_slacks_is_empty_decomp_has_no_slack_table(
@@ -3534,7 +3528,7 @@ class TestBuildDecompDatasetHydroDetail:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        nw_hydro_slacks = dataset.metadata["nw_hydro_slacks"]
+        nw_hydro_slacks = dataset.render.nw_hydro_slacks
         assert nw_hydro_slacks is None or nw_hydro_slacks.is_empty()
 
     def test_hydro_operation_and_detail_tabs_render_with_metadata_present(
@@ -3640,7 +3634,7 @@ class TestBuildDecompDatasetThermalDetail:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        thermal_pct = dataset.metadata["thermal"]
+        thermal_pct = dataset.render.thermal
         assert isinstance(thermal_pct, pl.DataFrame)
         assert not thermal_pct.is_empty()
         assert "generation_mw_p10" in thermal_pct.columns
@@ -3658,7 +3652,7 @@ class TestBuildDecompDatasetThermalDetail:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        thermal_pct = dataset.metadata["thermal"]
+        thermal_pct = dataset.render.thermal
         assert isinstance(thermal_pct, pl.DataFrame)
         assert thermal_pct.is_empty()
 
@@ -3899,7 +3893,7 @@ def _productivity_aligned_fixture() -> _AlignedDecompFrames:
 
 class TestBuildDecompDatasetProductivity:
     """ticket-016: fills the Productivity tab's realized per-stage half
-    (``dataset.metadata["productivity_per_stage"]``) and leaves the static
+    (``dataset.render.productivity_per_stage``) and leaves the static
     pmo-derived half (``productivity_detail``) empty -- DECOMP ships no
     pmo.dat ([ASSUMPTION] option a, no fabricated static comparison)."""
 
@@ -3910,7 +3904,7 @@ class TestBuildDecompDatasetProductivity:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        per_stage = dataset.metadata["productivity_per_stage"]
+        per_stage = dataset.render.productivity_per_stage
         assert isinstance(per_stage, pl.DataFrame)
         assert set(per_stage.columns) == {
             "plant_name",
@@ -3930,7 +3924,7 @@ class TestBuildDecompDatasetProductivity:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        per_stage = dataset.metadata["productivity_per_stage"]
+        per_stage = dataset.render.productivity_per_stage
         alpha = per_stage.filter(pl.col("newave_code") == 10)
         assert alpha["newave_value"].to_list() == [pytest.approx(2.0)]
         assert alpha["cobre_value"].to_list() == [pytest.approx(2.1)]
@@ -3945,7 +3939,7 @@ class TestBuildDecompDatasetProductivity:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        per_stage = dataset.metadata["productivity_per_stage"]
+        per_stage = dataset.render.productivity_per_stage
         assert per_stage.filter(pl.col("newave_code") == 20).is_empty()
         assert per_stage["newave_value"].null_count() == 0
 
@@ -3956,7 +3950,7 @@ class TestBuildDecompDatasetProductivity:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        assert dataset.metadata["productivity_detail"].is_empty()
+        assert dataset.render.productivity_detail.is_empty()
 
     def test_report_renders_both_the_realized_title_and_the_static_no_data_note(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -4063,9 +4057,7 @@ class TestReportBuilderProductivityGateDecoupling:
         from cobre_bridge.comparators.results import PercentileData
 
         detail_only = self._both_frames_dataset()
-        pct = PercentileData(
-            productivity_detail=detail_only.metadata["productivity_detail"]
-        )
+        pct = PercentileData(productivity_detail=detail_only.render.productivity_detail)
         dataset = build_results_dataset([], pct, 0.05)
 
         html = build_comparison_report(dataset)
@@ -4238,7 +4230,7 @@ class TestFphaMetrics:
 
 
 class TestBuildDecompDatasetFpha:
-    """ticket-017: fills ``dataset.metadata["fpha_metrics"]``;
+    """ticket-017: fills ``dataset.render.fpha_metrics``;
     ``fpha_surface``/``fpha_spill`` always stay `None` (fallback (b))."""
 
     def test_cobre_has_no_planes_fpha_metrics_absent_no_section(
@@ -4266,7 +4258,7 @@ class TestBuildDecompDatasetFpha:
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)
 
-        fpha_metrics = dataset.metadata["fpha_metrics"]
+        fpha_metrics = dataset.render.fpha_metrics
         assert isinstance(fpha_metrics, pl.DataFrame)
         assert not fpha_metrics.is_empty()
         for column in ("cobre_id", "plant_name", "nmae", "bias"):
@@ -5234,8 +5226,8 @@ class TestBuildDecompDatasetEvaporation:
     ) -> None:
         """AC: ``build_comparison_report(dataset)`` renders the Hydro Plant
         Details tab's ``evaporation_m3s`` panel content -- the exact token
-        ``charts._HYDRO_VARIABLES`` already wires into that tab, so no new
-        chart is required (ticket-020 requirement 4)."""
+        ``report_builder._HYDRO_VARIABLES`` already wires into that tab, so no
+        new chart is required (ticket-020 requirement 4)."""
         _patch_aligned_frames(monkeypatch, _evap_aligned_fixture())
         _patch_shared_case(monkeypatch, id_map=_ree_id_map())
         _patch_evap_sources(monkeypatch)
@@ -5793,9 +5785,9 @@ class TestBuildDecompDatasetConstraints:
 
         dataset = build_decomp_dataset(case_dir, output_dir)
 
-        assert dataset.metadata["gc_constraints"] == []
-        assert dataset.metadata["gc_lhs_newave"].is_empty()
-        assert dataset.metadata["gc_lhs_cobre"].is_empty()
+        assert dataset.render.gc_constraints == []
+        assert dataset.render.gc_lhs_newave.is_empty()
+        assert dataset.render.gc_lhs_cobre.is_empty()
         html = build_comparison_report(dataset)  # must not raise
         constraints_tab = _extract_tab_content(html, "tab-constraints")
         assert "Generic Constraints — LHS vs Bound" in constraints_tab
@@ -5854,13 +5846,13 @@ class TestBuildDecompDatasetConstraints:
 
         dataset = build_decomp_dataset(case_dir, output_dir)
 
-        assert dataset.metadata["gc_constraints"] == constraints
-        assert dataset.metadata["gc_bounds"].height == 1
-        nw_row = dataset.metadata["gc_lhs_newave"].row(0, named=True)
+        assert dataset.render.gc_constraints == constraints
+        assert dataset.render.gc_bounds.height == 1
+        nw_row = dataset.render.gc_lhs_newave.row(0, named=True)
         assert nw_row["constraint_id"] == 0
         assert nw_row["stage_id"] == 0
         assert nw_row["lhs_value"] == pytest.approx(2951.58)
-        cb_row = dataset.metadata["gc_lhs_cobre"].row(0, named=True)
+        cb_row = dataset.render.gc_lhs_cobre.row(0, named=True)
         assert cb_row == {"constraint_id": 0, "stage_id": 0, "lhs_value": 3000.0}
 
         html = build_comparison_report(dataset)
@@ -5881,8 +5873,8 @@ class TestBuildDecompDatasetConstraintsE2E:
     def test_constraints_tab_renders_on_the_real_deck(self) -> None:
         dataset = build_decomp_dataset(_REDUCED_DECOMP_DECK, _REDUCED_COBRE_OUTPUT)
 
-        assert dataset.metadata["gc_constraints"]
-        assert not dataset.metadata["gc_lhs_newave"].is_empty()
+        assert dataset.render.gc_constraints
+        assert not dataset.render.gc_lhs_newave.is_empty()
 
         html = build_comparison_report(dataset)
         constraints_tab = _extract_tab_content(html, "tab-constraints")

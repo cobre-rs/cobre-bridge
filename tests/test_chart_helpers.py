@@ -17,6 +17,7 @@ import polars as pl
 import pytest
 
 from cobre_bridge.comparators import charts as _cmp_charts
+from cobre_bridge.comparators import report_builder
 from cobre_bridge.comparators.results import PercentileData, ResultComparison
 from cobre_bridge.dashboard.chart_helpers import (
     COST_GROUP_COLORS,
@@ -1088,7 +1089,7 @@ def test_build_hydro_detail_tab_html_matches_golden(
     per_bus_hydro_pct: pl.DataFrame,
     detail_cobre_hydro: pl.DataFrame,
 ) -> None:
-    html = _cmp_charts.build_hydro_detail_tab(
+    html = report_builder.build_hydro_detail_tab(
         per_bus_results,
         per_bus_hydro_pct,
         detail_cobre_hydro,
@@ -1101,7 +1102,7 @@ def test_build_thermal_detail_tab_html_matches_golden(
     per_bus_results: list[ResultComparison],
     thermal_pct: pl.DataFrame,
 ) -> None:
-    html = _cmp_charts.build_thermal_detail_tab(per_bus_results, thermal_pct)
+    html = report_builder.build_thermal_detail_tab(per_bus_results, thermal_pct)
     golden = (_GOLDEN_DIR / "build_thermal_detail_tab.html").read_text(encoding="utf-8")
     assert _strip_chart_id(html) == _strip_chart_id(golden)
 
@@ -1631,62 +1632,6 @@ def test_build_comparison_report_empty_dataset_has_all_tabs() -> None:
 
     for tab_id, _ in COMPARISON_TABS:
         assert f'id="{tab_id}"' in html
-
-
-# ---------------------------------------------------------------------------
-# ticket-013: typed metadata accessors — safe-default paths
-# ---------------------------------------------------------------------------
-
-
-def test_meta_frame_missing_key_returns_empty_polars() -> None:
-    """A missing key yields an empty ``pl.DataFrame`` (never raises)."""
-    from cobre_bridge.comparators.report_builder import _meta_frame
-
-    result = _meta_frame({}, "line")
-    assert isinstance(result, pl.DataFrame)
-    assert result.is_empty()
-
-
-def test_meta_frame_ill_typed_returns_empty_polars() -> None:
-    """An ill-typed value yields the empty ``pl.DataFrame`` default."""
-    from cobre_bridge.comparators.report_builder import _meta_frame
-
-    result = _meta_frame({"line": 123}, "line")
-    assert isinstance(result, pl.DataFrame)
-    assert result.is_empty()
-
-
-def test_meta_pd_frame_missing_key_returns_empty_pandas() -> None:
-    """A missing key yields an empty ``pd.DataFrame`` (never raises)."""
-    from cobre_bridge.comparators.report_builder import _meta_pd_frame
-
-    result = _meta_pd_frame({}, "line_bounds")
-    assert isinstance(result, pd.DataFrame)
-    assert result.empty
-
-
-def test_meta_int_missing_key_returns_zero() -> None:
-    """A missing key yields the int default ``0`` (never raises)."""
-    from cobre_bridge.comparators.report_builder import _meta_int
-
-    assert _meta_int({}, "nw_offset") == 0
-    assert _meta_int({"nw_offset": "x"}, "nw_offset") == 0
-
-
-def test_meta_dict_missing_key_returns_empty_dict() -> None:
-    """A missing key yields the empty-dict default (never raises)."""
-    from cobre_bridge.comparators.report_builder import _meta_dict
-
-    assert _meta_dict({}, "cobre_bus_meta") == {}
-    assert _meta_dict({"cobre_bus_meta": 5}, "cobre_bus_meta") == {}
-
-
-def test_meta_list_missing_key_returns_empty_list() -> None:
-    """A missing key yields the empty-list default (never raises)."""
-    from cobre_bridge.comparators.report_builder import _meta_list
-
-    assert _meta_list({}, "line_meta") == []
-    assert _meta_list({"line_meta": 5}, "line_meta") == []
 
 
 # ---------------------------------------------------------------------------

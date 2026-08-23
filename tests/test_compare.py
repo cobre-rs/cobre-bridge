@@ -1208,9 +1208,9 @@ class TestCompareResultsReturnsDataset:
 
         assert isinstance(out, ComparisonDataset)
         out.validate()
-        # The render-only carry-overs are present in-memory but absent from
-        # the serialized artifact.
-        assert "results" in out.metadata
+        # The render inputs round-trip through the serialized artifact's
+        # nested render payload; "results" never appears as a top-level key.
+        assert out.render.results == []
         paths = out.to_dir(tmp_path / "artifacts")
         written = json.loads(paths[2].read_text(encoding="utf-8"))
         assert "results" not in written
@@ -1923,15 +1923,20 @@ class TestNoSenseOrSingleBoundColumnRemainsInComparators:
     `bound` column. Matches only genuine column/dict *access* patterns
     (``.col("bound")``, ``row["bound"]``, ``.get("bound"``) — column *names*
     that merely contain "bound" as a substring (``bound_lower``,
-    ``bound_upper``) and unrelated string literals (e.g. charts.py's
-    ``"legendgroup": "bound"`` trace label) are not matches.
+    ``bound_upper``) and unrelated string literals (e.g. the charts
+    package's ``"legendgroup": "bound"`` trace label) are not matches.
     """
 
     @pytest.mark.parametrize(
         "relative_path",
         [
             "src/cobre_bridge/comparators/constraints_compare.py",
-            "src/cobre_bridge/comparators/charts.py",
+            "src/cobre_bridge/comparators/charts/__init__.py",
+            "src/cobre_bridge/comparators/charts/_shared.py",
+            "src/cobre_bridge/comparators/charts/costs.py",
+            "src/cobre_bridge/comparators/charts/convergence.py",
+            "src/cobre_bridge/comparators/charts/performance.py",
+            "src/cobre_bridge/comparators/charts/spillage.py",
             "src/cobre_bridge/comparators/results.py",
         ],
     )

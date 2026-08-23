@@ -1987,7 +1987,8 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: "0.12.0"
+            "cobre_bridge.cobre_compat._installed_cobre_python_version",
+            lambda: "0.12.0",
         )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
 
@@ -3392,12 +3393,10 @@ class TestCompareDatasetWiring:
     ) -> None:
         """`compare results` WITHOUT ``-o`` still writes artifacts and exits 0.
 
-        Guards the curated-serialization contract: the bulky render-only
-        metadata (``results`` and the drained ``PercentileData`` frames) IS
-        stored in ``dataset.metadata`` but is listed in
-        ``RENDER_ONLY_METADATA_KEYS``, so the SAME dataset's ``to_dir`` (invoked
-        by ``write_artifacts``) skips it and does not choke on a non-JSON-native
-        value.
+        Guards the serialization contract: the render inputs (``results`` and
+        the drained ``PercentileData`` frames) live in ``dataset.render`` and
+        round-trip through ``to_dir`` (invoked by ``write_artifacts``) via the
+        frame-wrapping serializer, which handles their non-JSON-native values.
         """
         self._patch_results(monkeypatch)
         cobre_dir = tmp_path / "cobre"

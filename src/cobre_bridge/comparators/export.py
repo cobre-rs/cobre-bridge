@@ -9,7 +9,7 @@ workflow consumes: the tidy ``comparison.parquet`` frame, the per-variable
 ``comparison.json`` provenance manifest (always written).
 
 It composes existing primitives only: it never recomputes diffs and adds no
-renderer dependencies (no import of ``charts.py`` / ``report.py``), so the HTML
+renderer dependencies (no import of the ``charts`` package / ``report``), so the HTML
 report and console paths are unaffected. It is wired into ``cli.py`` via the
 shared ``_export_compare_artifacts`` helper used by both ``compare`` subcommands.
 """

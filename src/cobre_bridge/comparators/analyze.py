@@ -15,6 +15,7 @@ adapter emits the sentinel ``bus = -1`` / ``block = -1`` for every row.
 from __future__ import annotations
 
 import logging
+import statistics
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -24,6 +25,13 @@ from cobre_bridge.comparators.dataset import (
     SUMMARY_SCHEMA,
     TIDY_SCHEMA,
     ComparisonDataset,
+    RenderInputs,
+)
+from cobre_bridge.comparators.fpha import (
+    FPHA_METRICS_SCHEMA,
+    FPHA_SPILL_SCHEMA,
+    FPHA_SURFACE_SCHEMA,
+    dense_grid,
 )
 from cobre_bridge.comparators.results import build_results_summary
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
@@ -278,15 +286,17 @@ def build_results_dataset(
 ) -> ComparisonDataset:
     """Assemble the full canonical dataset for the results subcommand.
 
-    Combines the tidy frame from :func:`tidy_results_dataset`, the summary frame
-    from :func:`summary_frame_from_results`, and a metadata side-table carrying
-    the top divergences plus the non-tidy artifacts (cost dicts and entity-name
-    dicts from ``pct``) verbatim. The raw ``results`` list and the per-tab render
-    inputs drained from ``pct`` (overview through constraints/performance) are
-    stored in-memory under their named keys but are excluded from the serialized
-    artifact via
-    :data:`cobre_bridge.comparators.dataset.RENDER_ONLY_METADATA_KEYS`.
-    Validates before returning.
+    Combines the tidy frame from :func:`tidy_results_dataset`, the summary
+    frame from :func:`summary_frame_from_results`, a ``metadata`` dict
+    carrying provenance not read by the HTML report (top divergences, footer
+    counts, hydro names), and the typed
+    :class:`~cobre_bridge.comparators.dataset.RenderInputs` the report reads
+    (the raw ``results`` list plus every non-tidy artifact drained from
+    ``pct``). Both the NEWAVE track (this function) and the DECOMP track
+    (``decomp_results.build_decomp_dataset``, which calls this function with
+    its own populated ``pct``) construct ``render`` through this single
+    shared path, so the two tracks can never drift apart on the render
+    surface. Validates before returning.
 
     Args:
         results: The result comparisons (``newave``/``cobre`` rows + summary).
@@ -295,9 +305,11 @@ def build_results_dataset(
 
     Returns:
         A validated :class:`ComparisonDataset` whose ``metadata`` holds
-        ``top_divergences``, ``footer_counts`` (the ``total`` /
-        ``by_entity_type`` needed to render the console footer byte-identically),
-        ``nw_costs``, ``cobre_costs``, ``nw_bus_names`` and ``nw_hydro_names``.
+        ``top_divergences`` and ``footer_counts`` (the ``total`` /
+        ``by_entity_type`` needed to render the console footer
+        byte-identically) plus ``nw_hydro_names``, and whose ``render`` holds
+        every report-facing input (``nw_costs``, ``cobre_costs``,
+        ``nw_bus_names`` among them).
 
     Raises:
         SchemaError: If the assembled dataset fails :meth:`validate`.
@@ -307,76 +319,67 @@ def build_results_dataset(
     metadata: dict[str, object] = {
         "top_divergences": top_divergences_from_results(results),
         "footer_counts": results_footer_counts(results),
-        # Raw comparison rows, threaded in-memory for the chart functions that
-        # still take ``list[ResultComparison]`` directly. Render-only: excluded
-        # from the serialized artifact (see RENDER_ONLY_METADATA_KEYS).
-        "results": list(results),
-        "nw_costs": pct.nw_costs,
-        "cobre_costs": pct.cobre_costs,
-        "nw_bus_names": pct.nw_bus_names,
         "nw_hydro_names": pct.nw_hydro_names,
+    }
+    render = RenderInputs(
+        # Raw comparison rows, threaded for the chart functions that still
+        # take ``list[ResultComparison]`` directly.
+        results=list(results),
+        nw_costs=pct.nw_costs,
+        cobre_costs=pct.cobre_costs,
+        nw_bus_names=pct.nw_bus_names,
         # --- Overview/System/Energy-Balance/Network tab inputs ---
-        # The four migrated tabs read these named keys (via report_builder's
-        # typed metadata accessors) instead of the monolithic ``pct`` object.
-        # Stored as the live objects: frames as pl/pd DataFrames, the dict/list/
-        # int carry-overs as-is. The seven un-migrated tabs still read ``pct``.
-        "nw_sin": pct.nw_sin,
-        "cobre_stage_costs": pct.cobre_stage_costs,
-        "nw_offset": pct.nw_offset,
-        "nw_convergence": pct.nw_convergence,
-        "cobre_convergence": pct.cobre_convergence,
-        "bus": pct.bus,
-        "nw_market": pct.nw_market,
-        "bus_aggregates": pct.bus_aggregates,
-        "cobre_bus_meta": pct.cobre_bus_meta,
-        "nw_net_load": pct.nw_net_load,
-        "cobre_hydro_means": pct.cobre_hydro_means,
-        "hydro": pct.hydro,
-        "line": pct.line,
-        "line_bounds": pct.line_bounds,
-        "line_meta": pct.line_meta,
+        nw_sin=pct.nw_sin,
+        cobre_stage_costs=pct.cobre_stage_costs,
+        nw_offset=pct.nw_offset,
+        nw_convergence=pct.nw_convergence,
+        cobre_convergence=pct.cobre_convergence,
+        bus=pct.bus,
+        nw_market=pct.nw_market,
+        bus_aggregates=pct.bus_aggregates,
+        cobre_bus_meta=pct.cobre_bus_meta,
+        nw_net_load=pct.nw_net_load,
+        cobre_hydro_means=pct.cobre_hydro_means,
+        hydro=pct.hydro,
+        line=pct.line,
+        line_bounds=pct.line_bounds,
+        line_meta=pct.line_meta,
         # --- Hydro Operation / Hydro Details tab inputs ---
-        # The two hydro tabs read these named keys (via report_builder's typed
-        # metadata accessors). ``cobre_hydro_meta`` is a dict[int, dict];
-        # ``nw_hydro_slacks`` and ``cobre_hydro_per_stage_bounds`` are frames.
-        # The remaining un-migrated tabs still read ``pct``.
-        "cobre_hydro_meta": pct.cobre_hydro_meta,
-        "nw_hydro_slacks": pct.nw_hydro_slacks,
-        "cobre_hydro_per_stage_bounds": pct.cobre_hydro_per_stage_bounds,
+        cobre_hydro_meta=pct.cobre_hydro_meta,
+        nw_hydro_slacks=pct.nw_hydro_slacks,
+        cobre_hydro_per_stage_bounds=pct.cobre_hydro_per_stage_bounds,
         # --- Thermal Operation / Thermal Details / Productivity ---
-        # The thermal tabs read ``thermal``; the Productivity tab reads
-        # ``productivity_detail``. Both are live ``pl.DataFrame`` objects.
-        "thermal": pct.thermal,
-        "productivity_detail": pct.productivity_detail,
+        thermal=pct.thermal,
+        productivity_detail=pct.productivity_detail,
         # Per-(plant, stage) realized productivity, derived from the result rows
         # here in the analyze layer so the chart consumes a frame, not raw rows.
-        "productivity_per_stage": productivity_per_stage_frame(results),
-        # --- Production-function (FPHA) comparison --- The Productivity tab's
-        # FPHA section reads these. ``fpha_metrics`` is the per-(plant, stage)
-        # fidelity conclusion; ``fpha_surface``/``fpha_spill`` are the dense
-        # render substrate. All three are ``None`` for constant-productivity
-        # cases. Render-only (excluded from the serialized artifact).
-        "fpha_metrics": pct.fpha_metrics,
-        "fpha_surface": pct.fpha_surface,
-        "fpha_spill": pct.fpha_spill,
+        productivity_per_stage=productivity_per_stage_frame(results),
+        # --- Production-function (FPHA) comparison --- ``pct.fpha_metrics``/
+        # ``fpha_surface``/``fpha_spill`` are ``None`` for constant-productivity
+        # cases; ``RenderInputs`` has no ``None`` frame state, so a miss
+        # coerces to the field's own empty-frame default.
+        fpha_metrics=pct.fpha_metrics
+        if pct.fpha_metrics is not None
+        else pl.DataFrame(),
+        fpha_surface=pct.fpha_surface
+        if pct.fpha_surface is not None
+        else pl.DataFrame(),
+        fpha_spill=pct.fpha_spill if pct.fpha_spill is not None else pl.DataFrame(),
         # --- Constraints / Performance tab inputs ---
-        # The final two tabs read these named keys (via report_builder's typed
-        # metadata accessors). ``gc_constraints`` is a ``list[dict]``;
-        # ``nw_max_stage`` is ``int | None``; ``cobre_training_seconds`` is a
-        # ``float``; ``nw_tim_stages`` is a ``dict[str, float]``; the rest are
-        # frames. All are render-only carry-overs (excluded from the artifact).
-        "gc_constraints": pct.gc_constraints,
-        "gc_bounds": pct.gc_bounds,
-        "gc_lhs_newave": pct.gc_lhs_newave,
-        "gc_lhs_cobre": pct.gc_lhs_cobre,
-        "nw_max_stage": pct.nw_max_stage,
-        "nw_tim_iterations": pct.nw_tim_iterations,
-        "nw_tim_stages": pct.nw_tim_stages,
-        "cobre_training_seconds": pct.cobre_training_seconds,
-        "cobre_iteration_timing": pct.cobre_iteration_timing,
-    }
+        gc_constraints=pct.gc_constraints,
+        gc_bounds=pct.gc_bounds,
+        gc_lhs_newave=pct.gc_lhs_newave,
+        gc_lhs_cobre=pct.gc_lhs_cobre,
+        nw_max_stage=pct.nw_max_stage,
+        nw_tim_iterations=pct.nw_tim_iterations,
+        nw_tim_stages=pct.nw_tim_stages,
+        cobre_training_seconds=pct.cobre_training_seconds,
+        cobre_iteration_timing=pct.cobre_iteration_timing,
+    )
 
-    dataset = ComparisonDataset(tidy=tidy, summary=summary, metadata=metadata)
+    dataset = ComparisonDataset(
+        tidy=tidy, summary=summary, metadata=metadata, render=render
+    )
     dataset.validate()
     return dataset
 
@@ -531,7 +534,7 @@ def per_stage_sum_from_frame(
     return {int(r["stage_id"]): float(r["v"]) for r in agg.iter_rows(named=True)}
 
 
-#: Fictitious bus names skipped by the per-bus roll-up (mirrors charts.py).
+#: Fictitious bus names skipped by the per-bus roll-up (mirrors the charts package).
 _FICTITIOUS_BUSES: frozenset[str] = frozenset({"NOFICT1", "NOFICT2", "NOFICT3"})
 
 
@@ -875,8 +878,8 @@ def plant_percentile_arrays(
     variable carries its OWN stage axis, so the single per-plant filter is
     reused across every variable. Variables whose columns are absent — and every
     variable when the plant has no rows — contribute no entry. The in-place
-    ``js_plants`` mutation stays in ``charts.py``; this function only computes
-    the arrays.
+    ``js_plants`` mutation stays in the detail-tab assemblers
+    (``report_builder``); this function only computes the arrays.
 
     Args:
         pct_df: A per-entity percentile frame with ``entity_id``, ``stage_id``
@@ -1069,6 +1072,71 @@ def spillage_lookups(
     return nw_lookup, cb_lookup
 
 
+def plant_max_reldiff_ranking(
+    results: Sequence[ResultComparison],
+    entity_type: str,
+    variables: Sequence[tuple[str, str]],
+) -> tuple[
+    dict[tuple[str, int, str], float], list[tuple[str, int]], dict[str, float | None]
+]:
+    """Per-``(plant, code, variable)`` max relative-difference ranking.
+
+    Pure numeric core of ``charts._shared._plant_max_reldiff_table``. For each
+    row with a non-``None`` ``rel_diff`` in ``entity_type``, keeps the max
+    ``rel_diff`` per ``(entity_name, newave_code, variable)``. Plants are
+    ordered worst-overall-first (the per-row max across *variables*, falling
+    back to name), then a per-variable median is taken over that plant order.
+
+    Args:
+        results: The comparison rows; consumed verbatim (read-only).
+        entity_type: The ``entity_type`` to keep (``"hydro"`` or ``"thermal"``).
+        variables: ``(var_key, label)`` pairs; only ``var_key`` is used.
+
+    Returns:
+        ``(max_rd, plant_keys, medians)``: ``max_rd`` maps ``(name, code,
+        var_key)`` to the max ``rel_diff``; ``plant_keys`` is the ordered
+        ``(name, code)`` list (worst first); ``medians`` maps each ``var_key``
+        to ``statistics.median`` of its column values over ``plant_keys``, or
+        ``None`` when that column has no eligible plant.
+    """
+    rows = [r for r in results if r.entity_type == entity_type]
+
+    max_rd: dict[tuple[str, int, str], float] = {}
+    for r in rows:
+        if r.rel_diff is None:
+            continue
+        key = (r.entity_name, r.newave_code, r.variable)
+        cur = max_rd.get(key)
+        if cur is None or r.rel_diff > cur:
+            max_rd[key] = r.rel_diff
+
+    plant_keys = sorted(
+        {(name, code) for name, code, _ in max_rd},
+        key=lambda k: (
+            -max(
+                (
+                    max_rd[(k[0], k[1], v)]
+                    for v, _ in variables
+                    if (k[0], k[1], v) in max_rd
+                ),
+                default=0.0,
+            ),
+            k[0],
+        ),
+    )
+
+    medians: dict[str, float | None] = {}
+    for var_key, _ in variables:
+        col_values = [
+            max_rd[(name, code, var_key)]
+            for name, code in plant_keys
+            if (name, code, var_key) in max_rd
+        ]
+        medians[var_key] = statistics.median(col_values) if col_values else None
+
+    return max_rd, plant_keys, medians
+
+
 def _tidy_one_percentile_frame(
     entity_type: str,
     frame: pl.DataFrame,
@@ -1205,105 +1273,13 @@ def _conform(frame: pl.DataFrame) -> pl.DataFrame:
 # ---------------------------------------------------------------------------
 # Production-function (FPHA) comparison
 #
-# Both solvers fit a piecewise-linear production surface GH(V, Q, S) as a set of
-# hyperplanes whose lower envelope (the minimum over planes) is what the LP
-# consumes. The two fits use different plane counts and philosophies, so they
-# are NOT comparable plane-by-plane; instead both envelopes are evaluated on a
-# shared (V, Q) grid (at S = 0) and the resulting surfaces are compared. A
-# separate spillage slice (GH vs S at the max corner) covers the S dimension the
-# (V, Q) grid holds fixed.
+# The source model's fit and Cobre's fit use different plane counts and
+# philosophies, so they are NOT comparable plane-by-plane; instead both
+# envelopes (:func:`cobre_bridge.comparators.fpha.dense_grid`) are evaluated
+# on a shared (V, Q) grid (at S = 0) and the resulting surfaces are compared.
+# A separate spillage slice (GH vs S at the max corner) covers the S
+# dimension the (V, Q) grid holds fixed.
 # ---------------------------------------------------------------------------
-
-#: Output schema of the per-(plant, stage) FPHA fidelity metrics frame (the
-#: comparison conclusion: how close Cobre's fitted surface is to the source
-#: model's, normalized to the plant's max generation).
-_FPHA_METRICS_SCHEMA: dict[str, type[pl.DataType]] = {
-    "cobre_id": pl.Int64,
-    "plant_name": pl.Utf8,
-    "stage": pl.Int64,
-    "n_planes_newave": pl.Int64,
-    "n_planes_cobre": pl.Int64,
-    "n_v": pl.Int64,
-    "nmae": pl.Float64,
-    "bias": pl.Float64,
-    "max_abs_dev": pl.Float64,
-    "gh_max_ratio": pl.Float64,
-}
-
-#: Output schema of the dense (V, Q) production-surface frame (the render
-#: substrate for the heatmaps; one row per grid point per source).
-_FPHA_SURFACE_SCHEMA: dict[str, type[pl.DataType]] = {
-    "cobre_id": pl.Int64,
-    "plant_name": pl.Utf8,
-    "stage": pl.Int64,
-    "v_hm3": pl.Float64,
-    "q_m3s": pl.Float64,
-    "source": pl.Utf8,
-    "gh_mw": pl.Float64,
-}
-
-#: Output schema of the spillage-slice frame (GH vs spill at the max V/Q corner).
-_FPHA_SPILL_SCHEMA: dict[str, type[pl.DataType]] = {
-    "cobre_id": pl.Int64,
-    "plant_name": pl.Utf8,
-    "stage": pl.Int64,
-    "s_m3s": pl.Float64,
-    "source": pl.Utf8,
-    "gh_mw": pl.Float64,
-}
-
-
-def _evaluate_fpha_envelope(
-    gamma_0: np.ndarray,
-    gamma_v: np.ndarray,
-    gamma_q: np.ndarray,
-    gamma_s: np.ndarray,
-    multiplier: np.ndarray,
-    v: np.ndarray,
-    q: np.ndarray,
-    s: np.ndarray,
-    *,
-    volume_offset: float = 0.0,
-) -> np.ndarray:
-    """Evaluate a min-over-planes FPHA envelope on a grid of operating points.
-
-    Each plane contributes ``multiplier * (gamma_0 + gamma_v * (v -
-    volume_offset) + gamma_q * q + gamma_s * s)``; the envelope is the minimum
-    across planes — the value the operating model's LP consumes. ``v``, ``q``,
-    ``s`` are broadcast together, so passing a meshgrid evaluates a whole
-    surface in one call.
-
-    ``volume_offset`` subtracts the plant minimum storage so a useful-volume
-    coefficient is applied to absolute volume; pass ``0.0`` for a coefficient
-    that already multiplies absolute volume. ``multiplier`` is the per-plane
-    correction (the source model's ``fator_correcao``, Cobre's ``kappa``).
-
-    Args:
-        gamma_0: Per-plane constant term, shape ``(P,)``.
-        gamma_v: Per-plane volume coefficient, shape ``(P,)``.
-        gamma_q: Per-plane turbined-flow coefficient, shape ``(P,)``.
-        gamma_s: Per-plane spilled-flow coefficient, shape ``(P,)``.
-        multiplier: Per-plane scalar multiplier, shape ``(P,)``.
-        v: Volume coordinate(s), broadcastable with ``q`` and ``s``.
-        q: Turbined-flow coordinate(s), broadcastable with ``v`` and ``s``.
-        s: Spilled-flow coordinate(s), broadcastable with ``v`` and ``q``.
-        volume_offset: Storage subtracted from ``v`` before applying ``gamma_v``.
-
-    Returns:
-        The envelope generation, shaped like the broadcast of ``v``/``q``/``s``.
-    """
-    shape = np.broadcast_shapes(np.shape(v), np.shape(q), np.shape(s))
-    vv = np.broadcast_to(v, shape).reshape(-1)
-    qq = np.broadcast_to(q, shape).reshape(-1)
-    ss = np.broadcast_to(s, shape).reshape(-1)
-    useful_v = vv - volume_offset
-    planes = multiplier[:, None] * (
-        gamma_0[:, None]
-        + gamma_v[:, None] * useful_v[None, :]
-        + gamma_q[:, None] * qq[None, :]
-        + gamma_s[:, None] * ss[None, :]
-    )
-    return planes.min(axis=0).reshape(shape)
 
 
 def _plane_arrays(
@@ -1349,14 +1325,16 @@ def build_fpha_comparison(
 
     Returns:
         ``(metrics, surface, spill)`` frames conforming to
-        :data:`_FPHA_METRICS_SCHEMA`, :data:`_FPHA_SURFACE_SCHEMA`, and
-        :data:`_FPHA_SPILL_SCHEMA`. All three are empty (but typed) when either
-        side lacks fitted planes or no plant is fitted on both sides.
+        :data:`cobre_bridge.comparators.fpha.FPHA_METRICS_SCHEMA`,
+        :data:`~cobre_bridge.comparators.fpha.FPHA_SURFACE_SCHEMA`, and
+        :data:`~cobre_bridge.comparators.fpha.FPHA_SPILL_SCHEMA`. All three
+        are empty (but typed) when either side lacks fitted planes or no
+        plant is fitted on both sides.
     """
     empty = (
-        pl.DataFrame(schema=_FPHA_METRICS_SCHEMA),
-        pl.DataFrame(schema=_FPHA_SURFACE_SCHEMA),
-        pl.DataFrame(schema=_FPHA_SPILL_SCHEMA),
+        pl.DataFrame(schema=FPHA_METRICS_SCHEMA),
+        pl.DataFrame(schema=FPHA_SURFACE_SCHEMA),
+        pl.DataFrame(schema=FPHA_SPILL_SCHEMA),
     )
     if (
         nw_planes is None
@@ -1427,8 +1405,8 @@ def build_fpha_comparison(
 
         nw_arr = _plane_arrays(nw_sub, "fator_correcao")
         cb_arr = _plane_arrays(cb_sub, "kappa")
-        nw_gh = _evaluate_fpha_envelope(*nw_arr, vv, qq, ss, volume_offset=v_min)
-        cb_gh = _evaluate_fpha_envelope(*cb_arr, vv, qq, ss, volume_offset=0.0)
+        nw_gh = dense_grid(*nw_arr, vv, qq, ss, volume_offset=v_min)
+        cb_gh = dense_grid(*cb_arr, vv, qq, ss, volume_offset=0.0)
 
         flat_v = vv.reshape(-1)
         n = flat_v.size
@@ -1447,12 +1425,8 @@ def build_fpha_comparison(
         )
         v_fix = np.full_like(s_axis, v_max)
         q_fix = np.full_like(s_axis, q_max)
-        nw_sp = _evaluate_fpha_envelope(
-            *nw_arr, v_fix, q_fix, s_axis, volume_offset=v_min
-        )
-        cb_sp = _evaluate_fpha_envelope(
-            *cb_arr, v_fix, q_fix, s_axis, volume_offset=0.0
-        )
+        nw_sp = dense_grid(*nw_arr, v_fix, q_fix, s_axis, volume_offset=v_min)
+        cb_sp = dense_grid(*cb_arr, v_fix, q_fix, s_axis, volume_offset=0.0)
         ns = s_axis.size
         sp_cid.append(np.full(ns, cobre_id, dtype=np.int64))
         sp_stage.append(np.full(ns, stage, dtype=np.int64))
@@ -1507,8 +1481,8 @@ def build_fpha_comparison(
     surface = (
         pl.concat([_stack_surface(gh_nw, "newave"), _stack_surface(gh_cb, "cobre")])
         .join(names, on="cobre_id", how="left")
-        .select(list(_FPHA_SURFACE_SCHEMA))
-        .cast({col: dtype() for col, dtype in _FPHA_SURFACE_SCHEMA.items()})
+        .select(list(FPHA_SURFACE_SCHEMA))
+        .cast({col: dtype() for col, dtype in FPHA_SURFACE_SCHEMA.items()})
         .sort(["cobre_id", "stage", "source", "v_hm3", "q_m3s"])
     )
 
@@ -1525,15 +1499,49 @@ def build_fpha_comparison(
     spill = (
         pl.concat([_stack_spill(sp_gh_nw, "newave"), _stack_spill(sp_gh_cb, "cobre")])
         .join(names, on="cobre_id", how="left")
-        .select(list(_FPHA_SPILL_SCHEMA))
-        .cast({col: dtype() for col, dtype in _FPHA_SPILL_SCHEMA.items()})
+        .select(list(FPHA_SPILL_SCHEMA))
+        .cast({col: dtype() for col, dtype in FPHA_SPILL_SCHEMA.items()})
         .sort(["cobre_id", "stage", "source", "s_m3s"])
     )
 
-    metrics = pl.DataFrame(metric_rows, schema=_FPHA_METRICS_SCHEMA).sort(
+    metrics = pl.DataFrame(metric_rows, schema=FPHA_METRICS_SCHEMA).sort(
         ["cobre_id", "stage"]
     )
     return metrics, surface, spill
+
+
+def fpha_metric_summary(metrics: pl.DataFrame) -> pl.DataFrame:
+    """Aggregate per-(plant, stage) FPHA metrics into one row per plant.
+
+    Pure numeric core of ``charts.fpha.fpha_metrics_table``: the mean and worst
+    surface NMAE, the mean bias (all as % via ``* 100.0``), and the min/max
+    GHmax ratio across stages, sorted worst-``worst_nmae``-first.
+
+    Args:
+        metrics: The per-(plant, stage) frame from :func:`build_fpha_comparison`
+            (non-empty; the render function handles the empty case).
+
+    Returns:
+        One row per ``cobre_id`` with columns ``plant_name``, ``n_v``,
+        ``planes_nw``, ``planes_cb``, ``mean_nmae``, ``worst_nmae``,
+        ``mean_bias``, ``ghr_min``, ``ghr_max``, sorted by ``worst_nmae``
+        descending (nulls last).
+    """
+    return (
+        metrics.group_by("cobre_id")
+        .agg(
+            pl.col("plant_name").first().alias("plant_name"),
+            pl.col("n_v").first().alias("n_v"),
+            pl.col("n_planes_newave").max().alias("planes_nw"),
+            pl.col("n_planes_cobre").max().alias("planes_cb"),
+            (pl.col("nmae").mean() * 100.0).alias("mean_nmae"),
+            (pl.col("nmae").max() * 100.0).alias("worst_nmae"),
+            (pl.col("bias").mean() * 100.0).alias("mean_bias"),
+            pl.col("gh_max_ratio").min().alias("ghr_min"),
+            pl.col("gh_max_ratio").max().alias("ghr_max"),
+        )
+        .sort("worst_nmae", descending=True, nulls_last=True)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1729,3 +1737,77 @@ def productivity_per_stage_frame(results: Sequence[ResultComparison]) -> pl.Data
     if not rows:
         return pl.DataFrame(schema=_PRODUCTIVITY_PER_STAGE_SCHEMA)
     return pl.DataFrame(rows, schema=_PRODUCTIVITY_PER_STAGE_SCHEMA)
+
+
+def productivity_scatter_errors(
+    nw_vals: Sequence[float], cb_vals: Sequence[float]
+) -> tuple[float, float]:
+    """Mean/max relative error for a static productivity-fidelity scatter.
+
+    Pure numeric core of ``charts.productivity.productivity_comparison_scatter``.
+    Pairs ``nw_vals``/``cb_vals`` positionally and keeps
+    ``abs(cb - nw) / abs(nw)`` only where ``abs(nw) > 1e-12`` (the source-model
+    reference is otherwise too close to zero for a relative error to be
+    meaningful).
+
+    Args:
+        nw_vals: The source-model reference values.
+        cb_vals: The cobre-bridge values, aligned positionally with *nw_vals*.
+
+    Returns:
+        ``(mean_rel, max_rel)``; both ``0.0`` when no pair clears the
+        ``1e-12`` guard (including empty input).
+    """
+    rel_errs = [
+        abs(cb - nw) / abs(nw) for nw, cb in zip(nw_vals, cb_vals) if abs(nw) > 1e-12
+    ]
+    mean_rel = sum(rel_errs) / len(rel_errs) if rel_errs else 0.0
+    max_rel = max(rel_errs) if rel_errs else 0.0
+    return mean_rel, max_rel
+
+
+# ---------------------------------------------------------------------------
+# Cost breakdown (per-category Δ/Δ% + totals)
+# ---------------------------------------------------------------------------
+
+
+def cost_percent_deltas(
+    categories: Sequence[tuple[str, float, float, str]],
+) -> tuple[
+    list[tuple[str, float, float, float, float | None, str]],
+    float,
+    float,
+    float,
+    float | None,
+]:
+    """Per-category Δ/Δ% rows (worst-``|Δ|``-first) plus the totals row.
+
+    Pure numeric core of ``charts.costs.cost_breakdown_table``. *categories* is
+    the ``(label, newave_sum, cobre_sum, color)`` list from
+    ``charts.costs._resolve_cost_categories``. Each row's ``pct`` — and the
+    totals row's ``total_pct`` — is ``None`` where the source-model
+    denominator's magnitude is ``<= 0.01`` (division would be undefined).
+
+    Args:
+        categories: The resolved cost categories to diff.
+
+    Returns:
+        ``(rows, total_nw, total_cb, total_diff, total_pct)`` where each row is
+        ``(label, nw_v, cb_v, diff, pct, color)``, sorted by descending
+        ``abs(diff)``.
+    """
+    rows: list[tuple[str, float, float, float, float | None, str]] = []
+    total_nw = 0.0
+    total_cb = 0.0
+    for label, nw_v, cb_v, color in categories:
+        diff = cb_v - nw_v
+        pct = (diff / nw_v * 100.0) if abs(nw_v) > 0.01 else None
+        rows.append((label, nw_v, cb_v, diff, pct, color))
+        total_nw += nw_v
+        total_cb += cb_v
+    rows.sort(key=lambda r: -abs(r[3]))
+
+    total_diff = total_cb - total_nw
+    total_pct = (total_diff / total_nw * 100.0) if abs(total_nw) > 0.01 else None
+
+    return rows, total_nw, total_cb, total_diff, total_pct

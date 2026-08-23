@@ -14,10 +14,13 @@ from cobre_bridge.comparators.dataset import (
     TIDY_SCHEMA,
     VALID_SOURCES,
     ComparisonDataset,
+    RenderInputs,
     SchemaError,
     _metadata_from_json,
     _metadata_to_json,
 )
+from cobre_bridge.comparators.results import ResultComparison
+from tests.test_chart_helpers import _strip_chart_id
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -137,11 +140,7 @@ def test_roundtrip_tidy_and_summary_equal(tmp_path: Path) -> None:
 
 
 def test_roundtrip_polars_metadata_frame(tmp_path: Path) -> None:
-    """A ``pl.DataFrame`` stored in metadata survives the round-trip.
-
-    Uses a non-render-only key (``"summary_counts_frame"``) because keys in
-    :data:`RENDER_ONLY_METADATA_KEYS` are intentionally dropped on serialize.
-    """
+    """A ``pl.DataFrame`` stored in metadata survives the round-trip."""
     frame = pl.DataFrame({"line_id": [0, 1], "limit": [100.0, 200.0]})
     dataset = ComparisonDataset(
         tidy=_one_row_tidy("cobre"),
@@ -281,3 +280,167 @@ def test_validate_rejects_wrong_summary_dtype() -> None:
     dataset = ComparisonDataset(tidy=_one_row_tidy("newave"), summary=summary)
     with pytest.raises(SchemaError, match="count"):
         dataset.validate()
+
+
+# -------------------------------------------------------------------
+# CMP-04: RenderInputs round-trip
+# -------------------------------------------------------------------
+
+
+def _make_result_comparison() -> ResultComparison:
+    return ResultComparison(
+        entity_type="hydro",
+        entity_name="ITAIPU",
+        newave_code=10,
+        cobre_id=0,
+        stage=0,
+        variable="generation_mw",
+        newave_value=100.0,
+        cobre_value=110.0,
+        abs_diff=10.0,
+        rel_diff=0.1,
+    )
+
+
+def _populated_render() -> RenderInputs:
+    """A ``RenderInputs`` exercising every field kind: frames (polars and
+    pandas), int-keyed and str-keyed dicts, a list of dicts, scalars, and the
+    ``results`` object-graph list."""
+    return RenderInputs(
+        results=[_make_result_comparison()],
+        nw_costs={"deficit": 1.0},
+        cobre_costs={"deficit": 2.0},
+        nw_bus_names={0: "SUDESTE"},
+        cobre_bus_meta={0: {"name": "SUDESTE"}},
+        cobre_hydro_meta={0: {"name": "ITAIPU", "bus_ids": [0]}},
+        bus=pl.DataFrame({"entity_id": [0], "stage_id": [0]}),
+        line_bounds=pd.DataFrame({"line_id": [0], "max_flow_mw": [100.0]}),
+        gc_constraints=[{"id": 1, "name": "c1"}],
+        nw_offset=1,
+        nw_max_stage=5,
+        cobre_training_seconds=2.5,
+    )
+
+
+def test_roundtrip_render_frame_fields_preserve_type_and_values(
+    tmp_path: Path,
+) -> None:
+    """A polars and a pandas render field each keep their frame type/values."""
+    dataset = ComparisonDataset(
+        tidy=_one_row_tidy("newave"),
+        summary=_small_summary(),
+        render=_populated_render(),
+    )
+    reloaded = ComparisonDataset.from_dir(dataset.to_dir(tmp_path)[0].parent)
+
+    assert isinstance(reloaded.render.bus, pl.DataFrame)
+    assert_frame_equal(reloaded.render.bus, dataset.render.bus)
+    assert isinstance(reloaded.render.line_bounds, pd.DataFrame)
+    pd.testing.assert_frame_equal(
+        reloaded.render.line_bounds, dataset.render.line_bounds
+    )
+
+
+def test_roundtrip_render_int_keyed_dicts_restore_int_keys(tmp_path: Path) -> None:
+    """``nw_bus_names``/``cobre_bus_meta``/``cobre_hydro_meta`` keep ``int`` keys.
+
+    Unlike a generic ``metadata`` dict (whose non-string-key coercion on
+    round-trip is accepted, see
+    ``test_roundtrip_int_keyed_metadata_coerces_to_string_keys``), these three
+    render fields are looked up by ``int`` id downstream
+    (``report_builder``/``analyze._bus_name_lookups``) — a stringified key
+    there is a silent lookup miss, so :func:`_render_from_json` restores them.
+    """
+    dataset = ComparisonDataset(
+        tidy=_one_row_tidy("newave"),
+        summary=_small_summary(),
+        render=_populated_render(),
+    )
+    reloaded = ComparisonDataset.from_dir(dataset.to_dir(tmp_path)[0].parent)
+
+    assert reloaded.render.nw_bus_names == {0: "SUDESTE"}
+    assert reloaded.render.cobre_bus_meta == {0: {"name": "SUDESTE"}}
+    assert reloaded.render.cobre_hydro_meta == {0: {"name": "ITAIPU", "bus_ids": [0]}}
+
+
+def test_roundtrip_render_results_list_reconstructs_result_comparisons(
+    tmp_path: Path,
+) -> None:
+    """``results`` round-trips as a ``list[ResultComparison]``, not raw dicts."""
+    dataset = ComparisonDataset(
+        tidy=_one_row_tidy("newave"),
+        summary=_small_summary(),
+        render=_populated_render(),
+    )
+    reloaded = ComparisonDataset.from_dir(dataset.to_dir(tmp_path)[0].parent)
+
+    assert reloaded.render.results == [_make_result_comparison()]
+    assert all(isinstance(r, ResultComparison) for r in reloaded.render.results)
+
+
+def test_roundtrip_render_scalars_and_list_fields(tmp_path: Path) -> None:
+    """The remaining scalar / list-of-dict render fields survive verbatim."""
+    dataset = ComparisonDataset(
+        tidy=_one_row_tidy("newave"),
+        summary=_small_summary(),
+        render=_populated_render(),
+    )
+    reloaded = ComparisonDataset.from_dir(dataset.to_dir(tmp_path)[0].parent)
+
+    assert reloaded.render.nw_costs == {"deficit": 1.0}
+    assert reloaded.render.cobre_costs == {"deficit": 2.0}
+    assert reloaded.render.gc_constraints == [{"id": 1, "name": "c1"}]
+    assert reloaded.render.nw_offset == 1
+    assert reloaded.render.nw_max_stage == 5
+    assert reloaded.render.cobre_training_seconds == 2.5
+
+
+def test_render_from_json_malformed_result_record_raises() -> None:
+    """A ``results`` record missing a ``ResultComparison`` field raises by key."""
+    from cobre_bridge.comparators.dataset import _render_from_json
+
+    view = {"results": [{"entity_type": "hydro"}]}
+    with pytest.raises(TypeError, match="results"):
+        _render_from_json(view)
+
+
+def test_empty_render_reproduces_report_byte_identically(tmp_path: Path) -> None:
+    """``to_dir`` -> ``from_dir`` reproduces an empty-render report exactly.
+
+    Compared via :func:`_strip_chart_id` (the repo-wide golden-comparison
+    normalizer) because each chart div gets a fresh random id per
+    ``build_comparison_report`` call, regardless of round-tripping — see
+    ``test_chart_helpers``'s own golden tests for the same normalization.
+    """
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    dataset = ComparisonDataset(tidy=_one_row_tidy("newave"), summary=_small_summary())
+    html_before = build_comparison_report(dataset)
+
+    reloaded = ComparisonDataset.from_dir(dataset.to_dir(tmp_path)[0].parent)
+    html_after = build_comparison_report(reloaded)
+
+    assert _strip_chart_id(html_after) == _strip_chart_id(html_before)
+
+
+def test_render_round_trip_reproduces_report_byte_identically(tmp_path: Path) -> None:
+    """``to_dir`` -> ``from_dir`` -> ``build_comparison_report`` reproduces the
+    in-memory report byte-identically (the CMP-04 closer): a reloaded
+    dataset's render inputs are not degraded relative to the in-memory ones.
+    Compared via :func:`_strip_chart_id` for the same reason as
+    :func:`test_empty_render_reproduces_report_byte_identically`.
+    """
+    from cobre_bridge.comparators.report_builder import build_comparison_report
+
+    dataset = ComparisonDataset(
+        tidy=_one_row_tidy("newave"),
+        summary=_small_summary(),
+        metadata={"footer_counts": {"total": 1, "by_entity_type": {"hydro": 1}}},
+        render=_populated_render(),
+    )
+    html_before = build_comparison_report(dataset)
+
+    reloaded = ComparisonDataset.from_dir(dataset.to_dir(tmp_path)[0].parent)
+    html_after = build_comparison_report(reloaded)
+
+    assert _strip_chart_id(html_after) == _strip_chart_id(html_before)

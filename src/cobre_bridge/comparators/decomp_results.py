@@ -55,7 +55,7 @@ import pandas as pd
 import polars as pl
 
 from cobre_bridge.cobre_io import case_dir_for
-from cobre_bridge.comparators import cobre_readers
+from cobre_bridge.comparators import cobre_readers, fpha
 from cobre_bridge.comparators.decomp_readers import (
     read_dec_desvfpha,
     read_dec_estatfpha,
@@ -1033,7 +1033,7 @@ def _energy_balance_frames(
 
     Returns ``(nw_market, nw_net_load, nw_sin)`` — the long
     ``newave_code``/``stage``/``variable``/``value`` frames
-    :func:`~cobre_bridge.comparators.charts.build_energy_balance_tab` and
+    :func:`~cobre_bridge.comparators.report_builder.build_energy_balance_tab` and
     :func:`~cobre_bridge.comparators.charts.cobre_aggregate_chart` read.
     *probabilities* is forwarded to the single :func:`_scenario_mean` fold
     below (see :func:`_hydro_side` for its scenario-weighting contract).
@@ -1782,53 +1782,6 @@ def _decomp_fpha_grid_nv(
     )
 
 
-def _evaluate_cobre_fpha_at_points(
-    cb_planes: pl.DataFrame, points: pl.DataFrame
-) -> pl.DataFrame:
-    """Evaluate Cobre's min-over-planes FPHA envelope at the source model's
-    own realized (hydro, stage, v, q, s) operating points.
-
-    ``points`` carries one row per realized sample, with columns
-    ``_point_id`` (a stable row identity), ``cobre_id``, ``stage``,
-    ``v_hm3``, ``q_m3s``, ``s_m3s``. ``cb_planes`` is
-    `cobre_readers.read_cobre_fpha_planes`'s own ``hydro_id``/``stage_id``/
-    ``gamma_0``/``gamma_v``/``gamma_q``/``gamma_s``/``kappa`` frame (multiple
-    plane rows per (hydro_id, stage_id)). Mirrors
-    `cobre_bridge.comparators.analyze._evaluate_fpha_envelope`'s own
-    ``kappa * (gamma_0 + gamma_v * v + gamma_q * q + gamma_s * s)``
-    min-over-planes definition (``gamma_v`` already multiplies *absolute*
-    volume for Cobre's own coefficients, so no volume offset applies here --
-    the source model's own ``volume_total_hm3`` is likewise absolute, not
-    useful, volume), expressed as a join + group-by rather than a numpy
-    broadcast since this evaluates a scattered point cloud, not a dense grid.
-
-    Returns one row per ``_point_id`` with the envelope value in
-    ``cobre_gh_mw``; a point whose (hydro, stage) has no Cobre planes drops
-    out of the join rather than null-keeping.
-    """
-    keyed_planes = cb_planes.rename({"hydro_id": "cobre_id", "stage_id": "stage"}).cast(
-        {"cobre_id": pl.Int64, "stage": pl.Int64}
-    )
-    joined = points.join(keyed_planes, on=["cobre_id", "stage"], how="inner")
-    if joined.is_empty():
-        return pl.DataFrame(schema={"_point_id": pl.Int64, "cobre_gh_mw": pl.Float64})
-    return (
-        joined.with_columns(
-            (
-                pl.col("kappa")
-                * (
-                    pl.col("gamma_0")
-                    + pl.col("gamma_v") * pl.col("v_hm3")
-                    + pl.col("gamma_q") * pl.col("q_m3s")
-                    + pl.col("gamma_s") * pl.col("s_m3s")
-                )
-            ).alias("plane_value")
-        )
-        .group_by("_point_id")
-        .agg(pl.col("plane_value").min().alias("cobre_gh_mw"))
-    )
-
-
 def _fpha_metrics(
     decomp_dir: Path,
     cobre_output_dir: Path,
@@ -1845,9 +1798,9 @@ def _fpha_metrics(
     absent/empty, or no realized point resolves onto a Cobre hydro with
     fitted planes. `build_decomp_dataset` passes ``None`` straight through
     to `~cobre_bridge.comparators.results.PercentileData.fpha_metrics`; the
-    report's FPHA section gate (`report_builder`) treats that identically
-    to an empty frame via its own ``_meta_frame``
-    helper, so the section is omitted, never a crash.
+    report's FPHA section gate (`report_builder`) reads it as the empty
+    `RenderInputs.fpha_metrics` default, so the section is omitted, never a
+    crash.
     """
     cb_planes = cobre_readers.read_cobre_fpha_planes(cobre_output_dir)
     if cb_planes is None or id_map is None:
@@ -1881,7 +1834,10 @@ def _fpha_metrics(
         .with_columns(pl.col("_point_id").cast(pl.Int64))
     )
 
-    envelope = _evaluate_cobre_fpha_at_points(cb_planes, points)
+    # Cobre's own kappa/gamma_v already multiply absolute volume, and the
+    # source model's own volume_total_hm3 is likewise absolute (not useful)
+    # volume -- fpha.point_cloud's default volume_offset=0.0 applies here.
+    envelope = fpha.point_cloud(cb_planes, points)
     if envelope.is_empty():
         return None
 
@@ -1930,18 +1886,7 @@ def _fpha_metrics(
             .alias("plant_name"),
             pl.lit(None).cast(pl.Int64).alias("n_planes_newave"),
         )
-        .select(
-            "cobre_id",
-            "plant_name",
-            "stage",
-            "n_planes_newave",
-            "n_planes_cobre",
-            "n_v",
-            "nmae",
-            "bias",
-            "max_abs_dev",
-            "gh_max_ratio",
-        )
+        .select(list(fpha.FPHA_METRICS_SCHEMA))
         .sort(["cobre_id", "stage"])
     )
     return metrics if not metrics.is_empty() else None
