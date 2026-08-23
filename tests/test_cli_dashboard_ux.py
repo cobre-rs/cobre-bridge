@@ -16,7 +16,9 @@ import json
 import subprocess
 import sys
 import typing
+import webbrowser
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from rich.console import Console
@@ -175,3 +177,262 @@ class TestDashboardNoColor:
         # no_color=True, not merely non-TTY-quiet (see _spy_print_status).
         assert len(captured) == 2
         assert all(console.no_color is True for console in captured)
+
+
+class TestDashboardOpen:
+    """ticket-016: ``dashboard --open`` launches the written HTML in a browser.
+
+    Runs ``dashboard`` in-process via ``cli.main`` with the real dashboard build
+    stubbed (``cobre_bridge.dashboard.build_dashboard``) so it only writes a tiny
+    file at the output path — enough for the ``output_path.stat()`` size line to
+    succeed without building a real dashboard. ``webbrowser.open`` is patched at
+    its ``cobre_bridge.cli`` import site so no actual browser is launched.
+    """
+
+    def _invoke_main(
+        self,
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[int, str, str]:
+        import io
+
+        from cobre_bridge import cli
+
+        monkeypatch.setattr(sys, "argv", ["cobre-bridge", *argv])
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        exit_code = 0
+
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                exit_code = int(exc.code) if exc.code is not None else 0
+
+        return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    @staticmethod
+    def _make_case_dir(tmp_path: Path) -> Path:
+        """Create a case dir whose ``output/simulation`` path exists."""
+        case_dir = tmp_path / "case"
+        (case_dir / "output" / "simulation").mkdir(parents=True)
+        return case_dir
+
+    @staticmethod
+    def _stub_build_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stub ``build_dashboard`` to write a tiny file at the output path.
+
+        The real build is skipped; a 1-byte file keeps the ``stat()`` size line
+        in ``_run_dashboard`` from raising.
+        """
+
+        def _fake_build(_case_dir: Path, output_path: Path) -> None:
+            output_path.write_text("x", encoding="utf-8")
+
+        monkeypatch.setattr("cobre_bridge.dashboard.build_dashboard", _fake_build)
+
+    def test_dashboard_open_calls_webbrowser_with_file_uri(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+        expected_uri = (case_dir / "dashboard.html").resolve().as_uri()
+
+        with patch("cobre_bridge.cli.webbrowser.open", return_value=True) as mock_open:
+            exit_code, _stdout, _stderr = self._invoke_main(
+                ["dashboard", str(case_dir), "--open"], monkeypatch
+            )
+
+        assert exit_code == 0
+        mock_open.assert_called_once_with(expected_uri)
+
+    def test_dashboard_without_open_does_not_call_webbrowser(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        with patch("cobre_bridge.cli.webbrowser.open") as mock_open:
+            exit_code, _stdout, _stderr = self._invoke_main(
+                ["dashboard", str(case_dir)], monkeypatch
+            )
+
+        assert exit_code == 0
+        mock_open.assert_not_called()
+
+    def test_dashboard_open_swallows_webbrowser_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        with patch(
+            "cobre_bridge.cli.webbrowser.open",
+            side_effect=webbrowser.Error("no browser"),
+        ):
+            exit_code, _stdout, stderr = self._invoke_main(
+                ["dashboard", str(case_dir), "--open"], monkeypatch
+            )
+
+        assert exit_code == 0
+        assert "could not open a browser" in stderr
+
+    def test_dashboard_open_swallows_false_return(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        with patch("cobre_bridge.cli.webbrowser.open", return_value=False):
+            exit_code, _stdout, stderr = self._invoke_main(
+                ["dashboard", str(case_dir), "--open"], monkeypatch
+            )
+
+        assert exit_code == 0
+        assert "could not open a browser" in stderr
+
+
+class TestDashboardJson:
+    """ticket-021: ``dashboard --json`` emits the unified verdict envelope.
+
+    Reuses ``TestDashboardOpen``'s in-process driver and build stub: the real
+    dashboard build is replaced by a stub that writes a tiny file at the output
+    path (so ``output_path.stat()`` succeeds), the CLI runs via ``cli.main`` with
+    ``sys.stdout``/``sys.stderr`` captured, and the stdout is parsed as JSON. The
+    file is STILL built under ``--json``; only the two Rich status lines are
+    suppressed.
+    """
+
+    def _invoke_main(
+        self,
+        argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[int, str, str]:
+        import io
+
+        from cobre_bridge import cli
+
+        monkeypatch.setattr(sys, "argv", ["cobre-bridge", *argv])
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        exit_code = 0
+
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                exit_code = int(exc.code) if exc.code is not None else 0
+
+        return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    @staticmethod
+    def _make_case_dir(tmp_path: Path) -> Path:
+        """Create a case dir whose ``output/simulation`` path exists."""
+        case_dir = tmp_path / "case"
+        (case_dir / "output" / "simulation").mkdir(parents=True)
+        return case_dir
+
+    @staticmethod
+    def _stub_build_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stub ``build_dashboard`` to write a tiny file at the output path."""
+
+        def _fake_build(_case_dir: Path, output_path: Path) -> None:
+            output_path.write_text("x", encoding="utf-8")
+
+        monkeypatch.setattr("cobre_bridge.dashboard.build_dashboard", _fake_build)
+
+    def test_dashboard_json_success_shape_and_exit_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        exit_code, stdout, _stderr = self._invoke_main(
+            ["dashboard", str(case_dir), "--json"], monkeypatch
+        )
+
+        assert exit_code == 0
+        document = json.loads(stdout)
+        assert list(document.keys()) == [
+            "schema_version",
+            "command",
+            "status",
+            "summary",
+            "diagnostics",
+        ]
+        assert document["command"] == "dashboard"
+        assert document["status"] == "ok"
+        assert document["summary"]["output"].endswith("dashboard.html")
+        assert isinstance(document["summary"]["size_kb"], (int, float))
+        assert document["diagnostics"] == []
+
+    def test_dashboard_json_suppresses_status_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        exit_code, stdout, _stderr = self._invoke_main(
+            ["dashboard", str(case_dir), "--json"], monkeypatch
+        )
+
+        assert exit_code == 0
+        assert "Building dashboard from" not in stdout
+        assert "Dashboard written to" not in stdout
+        # stdout parses as exactly one JSON object.
+        assert json.loads(stdout)["command"] == "dashboard"
+
+    def test_dashboard_json_no_simulation_exits_1_emits_error_envelope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A case dir WITHOUT output/simulation fires the exit-1 guard FIRST, so no
+        # build happens; the guard now routes through ``_fail``, so stdout carries
+        # one error envelope instead of staying empty (CLI-02).
+        case_dir = tmp_path / "case"
+        case_dir.mkdir()
+        self._stub_build_dashboard(monkeypatch)
+
+        exit_code, stdout, _stderr = self._invoke_main(
+            ["dashboard", str(case_dir), "--json"], monkeypatch
+        )
+
+        assert exit_code == 1
+        document = json.loads(stdout)
+        assert document["command"] == "dashboard"
+        assert document["status"] == "error"
+        assert "no simulation output found" in document["diagnostics"][0]["summary"]
+
+    def test_dashboard_json_open_advisory_stays_on_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+
+        with patch("cobre_bridge.cli.webbrowser.open", return_value=False):
+            exit_code, stdout, stderr = self._invoke_main(
+                ["dashboard", str(case_dir), "--json", "--open"], monkeypatch
+            )
+
+        assert exit_code == 0
+        # stdout is exactly one verdict — no browser advisory leaked onto it.
+        document = json.loads(stdout)
+        assert document["command"] == "dashboard"
+        assert "could not open a browser" not in stdout
+        assert "could not open a browser" in stderr
+
+    def test_dashboard_json_custom_output_path_in_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = self._make_case_dir(tmp_path)
+        self._stub_build_dashboard(monkeypatch)
+        out_path = tmp_path / "OUT.html"
+
+        exit_code, stdout, _stderr = self._invoke_main(
+            ["dashboard", str(case_dir), "-o", str(out_path), "--json"], monkeypatch
+        )
+
+        assert exit_code == 0
+        document = json.loads(stdout)
+        assert document["summary"]["output"] == str(out_path)

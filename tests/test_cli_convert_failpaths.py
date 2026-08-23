@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import subprocess
-import sys
 import typing
 from pathlib import Path
 
@@ -21,6 +19,7 @@ import pytest
 
 from cobre_bridge.cli import _run_decomp_conversion, _run_newave_conversion
 from cobre_bridge.cli_args import ConvertArgs
+from tests.conftest import _make_fake_newave_dir, _run_cli_subprocess
 
 _ZEROED_CONVERT_SUMMARY = {
     "hydros": 0,
@@ -29,15 +28,6 @@ _ZEROED_CONVERT_SUMMARY = {
     "lines": 0,
     "stages": 0,
 }
-
-
-def _run_cli_subprocess(*args: str) -> subprocess.CompletedProcess[str]:
-    """Invoke the cobre-bridge entry point as a real subprocess."""
-    return subprocess.run(
-        [sys.executable, "-m", "cobre_bridge.cli", *args],
-        capture_output=True,
-        text=True,
-    )
 
 
 class TestConvertNewaveSourceMissingFailpath:
@@ -127,3 +117,80 @@ class TestConvertHandlerSignatures:
         self, func: typing.Callable[..., None]
     ) -> None:
         assert "SimpleNamespace" not in inspect.getsource(func)
+
+
+class TestCliExitCodes:
+    """Subprocess-based tests for error paths that don't require inewave I/O."""
+
+    def test_exit_code_1_when_src_missing(self, tmp_path: Path) -> None:
+        dst = tmp_path / "dst"
+        result = _run_cli_subprocess(
+            "convert",
+            "newave",
+            str(tmp_path / "nonexistent"),
+            str(dst),
+        )
+        assert result.returncode == 1
+        assert "does not exist" in result.stderr
+
+    def test_exit_code_1_when_dst_nonempty_no_force(self, tmp_path: Path) -> None:
+        src = _make_fake_newave_dir(tmp_path)
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        (dst / "existing.txt").write_text("hello")
+
+        result = _run_cli_subprocess("convert", "newave", str(src), str(dst))
+        assert result.returncode == 1
+        assert "not empty" in result.stderr
+
+    def test_exit_code_1_when_required_file_missing(self, tmp_path: Path) -> None:
+        src = _make_fake_newave_dir(tmp_path)
+        (src / "hidr.dat").unlink()
+        dst = tmp_path / "dst"
+
+        result = _run_cli_subprocess("convert", "newave", str(src), str(dst))
+        assert result.returncode == 1
+        assert "hidr.dat" in result.stderr
+
+    def test_convert_missing_file_renders_error_diagnostic_subprocess(
+        self, tmp_path: Path
+    ) -> None:
+        """A real discovery failure renders an ERROR diagnostic (✖) naming the file."""
+        src = _make_fake_newave_dir(tmp_path)
+        (src / "hidr.dat").unlink()
+        dst = tmp_path / "dst"
+
+        result = _run_cli_subprocess("convert", "newave", str(src), str(dst))
+        assert result.returncode == 1
+        assert "✖" in result.stderr
+        assert "hidr.dat" in result.stderr
+
+    def test_convert_json_missing_source_emits_error_json_subprocess(
+        self, tmp_path: Path
+    ) -> None:
+        """``--json`` on a source missing a required file emits error JSON to stdout."""
+        src = _make_fake_newave_dir(tmp_path)
+        (src / "hidr.dat").unlink()
+        dst = tmp_path / "dst"
+
+        result = _run_cli_subprocess("convert", "newave", str(src), str(dst), "--json")
+
+        assert result.returncode == 1
+        doc = json.loads(result.stdout)
+        assert doc["schema_version"] == 1
+        assert doc["command"] == "convert newave"
+        assert doc["status"] == "error"
+        assert doc["summary"]["hydros"] == 0
+        assert doc["diagnostics"]
+        # The Rich diagnostic block must not also render on stderr.
+        assert "✖" not in result.stderr
+
+    def test_convert_without_source_exits_nonzero(self) -> None:
+        """``convert`` with no SOURCE must error (exit 2), not silently succeed."""
+        result = _run_cli_subprocess("convert")
+        assert result.returncode == 2
+
+    def test_compare_without_source_exits_nonzero(self) -> None:
+        """``compare`` with no SOURCE must error (exit 2), not silently succeed."""
+        result = _run_cli_subprocess("compare")
+        assert result.returncode == 2

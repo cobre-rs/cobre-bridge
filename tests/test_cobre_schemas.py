@@ -20,8 +20,7 @@ import pytest
 
 from cobre_bridge import cobre_schemas
 from cobre_bridge.id_map import NewaveIdMap
-from tests.conftest import make_case
-from tests.test_cli import _all_converter_patches, _make_fake_newave_dir
+from tests.conftest import _all_converter_patches, _make_fake_newave_dir, make_case
 
 _CANONICAL_PREFIX = (
     "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/"

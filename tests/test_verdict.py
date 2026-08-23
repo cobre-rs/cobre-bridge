@@ -14,7 +14,9 @@ from cobre_bridge.verdict import (
     compare_summary,
     convert_summary,
     dashboard_summary,
+    decomp_dataset_summary,
 )
+from tests.conftest import _empty_fake_dataset, _fake_dataset
 
 
 def _info_diagnostic() -> Diagnostic:
@@ -165,3 +167,84 @@ class TestCoerceUnmappedCode:
         # pair, not a scalar code — it must survive as a list, not raise.
         assert _coerce_unmapped_code([-1, 1]) == [-1, 1]
         assert _coerce_unmapped_code((2, -1)) == [2, -1]
+
+
+class TestDecompDatasetSummary:
+    """``decomp_dataset_summary`` -- the ``compare decomp --json`` payload
+    builder, sourced entirely from the canonical ``ComparisonDataset``."""
+
+    def test_returns_the_superset_shape_in_the_documented_key_order(self) -> None:
+        dataset = _fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert list(summary.keys()) == [
+            "within_tol",
+            "total",
+            "worst_variable",
+            "worst_smape",
+            "all_within_tol",
+            "stages",
+            "variables",
+            "unmapped",
+        ]
+
+    def test_headline_fields_match_build_compare_verdict(self) -> None:
+        dataset = _fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["within_tol"] == 1
+        assert summary["total"] == 2
+        assert summary["worst_variable"] == "turbined_m3s"
+        assert summary["worst_smape"] == pytest.approx(0.12)
+        assert summary["all_within_tol"] is False
+
+    def test_stages_counts_distinct_tidy_stage_values(self) -> None:
+        dataset = _fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["stages"] == 2
+
+    def test_variables_is_the_dataset_summary_verbatim(self) -> None:
+        dataset = _fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["variables"] == dataset.summary.to_dicts()
+
+    def test_unmapped_is_sourced_from_dataset_metadata_with_int_codes(self) -> None:
+        dataset = _fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["unmapped"] == {"hydro": [], "thermal": [86, 224], "bus": []}
+        assert all(
+            isinstance(code, int)
+            for codes in summary["unmapped"].values()
+            for code in codes
+        )
+
+    def test_all_within_tol_dataset_reports_no_worst_clause(self) -> None:
+        dataset = _fake_dataset(all_within_tol=True)
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["within_tol"] == 2
+        assert summary["total"] == 2
+        assert summary["all_within_tol"] is True
+        assert summary["worst_variable"] is None
+        assert summary["worst_smape"] == 0.0
+
+    def test_empty_dataset_reports_zero_totals_and_no_stages(self) -> None:
+        dataset = _empty_fake_dataset()
+
+        summary = decomp_dataset_summary(dataset, tolerance=1e-2)
+
+        assert summary["within_tol"] == 0
+        assert summary["total"] == 0
+        assert summary["all_within_tol"] is False
+        assert summary["stages"] == 0
+        assert summary["variables"] == []
+        assert summary["unmapped"] == {"hydro": [], "thermal": [], "bus": []}

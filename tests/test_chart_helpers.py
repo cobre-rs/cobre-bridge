@@ -10,7 +10,6 @@ from __future__ import annotations
 import dataclasses
 import math
 import re
-from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -32,6 +31,7 @@ from cobre_bridge.dashboard.chart_helpers import (
     make_chart_card,
     stage_hours_weighted_mean,
 )
+from tests.golden_utils import assert_html_golden
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -753,23 +753,9 @@ def test_cost_group_colors_keys() -> None:
 # part of the output is the random ``chart-<hex>`` div id emitted by
 # ``plotly_div`` (a fresh uuid per render, unrelated to this ticket); it is
 # normalised away by ``_strip_chart_id`` before comparison so the assertion
-# tests the numeric/structural payload only.
-#
-# To REGENERATE the goldens (only when an intentional, reviewed output change is
-# made): check out the legacy ``charts.py`` (``git show HEAD:...`` or stash the
-# re-point), then for each chart below write
-# ``charts.<fn>(...).`` to ``tests/golden/<fn>.html`` and restore your edits.
-# Equivalently, since the re-point is behaviour-preserving, rendering with the
-# current code and writing the result reproduces byte-identical goldens.
+# tests the numeric/structural payload only. Regenerate via
+# ``scripts/regen-goldens.sh``.
 # ---------------------------------------------------------------------------
-
-_GOLDEN_DIR = Path(__file__).parent / "golden"
-
-
-def _strip_chart_id(html: str) -> str:
-    """Normalise the random ``chart-<hex>`` div id and the plotly.js CDN version."""
-    html = re.sub(r"chart-[0-9a-f]+", "chart-XXXX", html)
-    return re.sub(r"plotly-[0-9.]+\.min\.js", "plotly-XXXX.min.js", html)
 
 
 def _rc(
@@ -858,8 +844,7 @@ def test_thermal_generation_chart_html_matches_golden(
     thermal_pct: pl.DataFrame,
 ) -> None:
     html = _cmp_charts.thermal_generation_chart(parity_results, thermal_pct)
-    golden = (_GOLDEN_DIR / "thermal_generation_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "thermal_generation_chart.html")
 
 
 def test_hydro_aggregate_chart_html_matches_golden(
@@ -869,8 +854,7 @@ def test_hydro_aggregate_chart_html_matches_golden(
     html = _cmp_charts.hydro_aggregate_chart(
         parity_results, "storage_final_hm3", "Hydro Storage", hydro_pct
     )
-    golden = (_GOLDEN_DIR / "hydro_aggregate_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "hydro_aggregate_chart.html")
 
 
 def test_system_comparison_chart_html_matches_golden(
@@ -880,8 +864,7 @@ def test_system_comparison_chart_html_matches_golden(
     html = _cmp_charts.system_comparison_chart(
         parity_results, "marginal_cost", "Bus Marginal Cost", bus_pct
     )
-    golden = (_GOLDEN_DIR / "system_comparison_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "system_comparison_chart.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1023,8 +1006,7 @@ def test_hydro_per_bus_chart_html_matches_golden(
         per_bus_hydro_meta,
         per_bus_bus_meta,
     )
-    golden = (_GOLDEN_DIR / "hydro_per_bus_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "hydro_per_bus_chart.html")
 
 
 def test_hydro_slack_per_bus_chart_html_matches_golden(
@@ -1044,10 +1026,7 @@ def test_hydro_slack_per_bus_chart_html_matches_golden(
         per_bus_bus_meta,
         {0, 1, 2},
     )
-    golden = (_GOLDEN_DIR / "hydro_slack_per_bus_chart.html").read_text(
-        encoding="utf-8"
-    )
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "hydro_slack_per_bus_chart.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1179,8 +1158,7 @@ def test_line_summary_chart_html_matches_golden(
         line_summary_bounds,
         line_summary_meta,
     )
-    golden = (_GOLDEN_DIR / "line_summary_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "line_summary_chart.html")
 
 
 def test_build_hydro_detail_tab_html_matches_golden(
@@ -1193,8 +1171,7 @@ def test_build_hydro_detail_tab_html_matches_golden(
         per_bus_hydro_pct,
         detail_cobre_hydro,
     )
-    golden = (_GOLDEN_DIR / "build_hydro_detail_tab.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "build_hydro_detail_tab.html")
 
 
 def test_build_thermal_detail_tab_html_matches_golden(
@@ -1202,8 +1179,7 @@ def test_build_thermal_detail_tab_html_matches_golden(
     thermal_pct: pl.DataFrame,
 ) -> None:
     html = report_builder.build_thermal_detail_tab(per_bus_results, thermal_pct)
-    golden = (_GOLDEN_DIR / "build_thermal_detail_tab.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "build_thermal_detail_tab.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1272,8 +1248,7 @@ def test_cobre_aggregate_chart_html_matches_golden(
         nw_offset=1,
         matched_ids=None,
     )
-    golden = (_GOLDEN_DIR / "cobre_aggregate_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "cobre_aggregate_chart.html")
 
 
 @pytest.fixture()
@@ -1307,8 +1282,7 @@ def test_system_per_bus_chart_html_matches_golden(
     html = _cmp_charts.system_per_bus_chart(
         per_bus_system_results, "deficit_mw", "Bus Deficit", per_bus_system_pct
     )
-    golden = (_GOLDEN_DIR / "system_per_bus_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "system_per_bus_chart.html")
 
 
 @pytest.fixture()
@@ -1340,10 +1314,7 @@ def test_system_spillage_energy_chart_html_matches_golden(
     cobre_spill_energy: pl.DataFrame,
 ) -> None:
     html = _cmp_charts.system_spillage_energy_chart(spill_results, cobre_spill_energy)
-    golden = (_GOLDEN_DIR / "system_spillage_energy_chart.html").read_text(
-        encoding="utf-8"
-    )
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "system_spillage_energy_chart.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1464,10 +1435,7 @@ def test_build_comparison_report_dataset_golden() -> None:
     dataset = build_results_dataset(results, pct, 0.05)
     html = build_comparison_report(dataset)
 
-    golden = (_GOLDEN_DIR / "build_comparison_report_full.html").read_text(
-        encoding="utf-8"
-    )
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "build_comparison_report_full.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1516,8 +1484,7 @@ def test_report_tab_matches_golden(tab_id: str, golden_name: str) -> None:
     html = build_comparison_report(dataset)
     content = _extract_tab_content(html, tab_id)
 
-    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
-    assert _strip_chart_id(content) == _strip_chart_id(golden)
+    assert_html_golden(content, golden_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1552,8 +1519,7 @@ def test_report_hydro_tab_matches_golden(tab_id: str, golden_name: str) -> None:
     html = build_comparison_report(dataset)
     content = _extract_tab_content(html, tab_id)
 
-    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
-    assert _strip_chart_id(content) == _strip_chart_id(golden)
+    assert_html_golden(content, golden_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1592,8 +1558,7 @@ def test_report_thermal_productivity_tab_matches_golden(
     html = build_comparison_report(dataset)
     content = _extract_tab_content(html, tab_id)
 
-    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
-    assert _strip_chart_id(content) == _strip_chart_id(golden)
+    assert_html_golden(content, golden_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1699,8 +1664,7 @@ def test_report_constraints_performance_tab_matches_golden(
     html = build_comparison_report(dataset)
     content = _extract_tab_content(html, tab_id)
 
-    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
-    assert _strip_chart_id(content) == _strip_chart_id(golden)
+    assert_html_golden(content, golden_name)
 
 
 def test_report_productivity_tab_empty_detail_renders_fallback() -> None:

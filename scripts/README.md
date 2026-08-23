@@ -9,6 +9,10 @@ Helper scripts for cobre-bridge, grouped by role.
   `ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`.
 - **`gen-cli-docs.sh`** — regenerates `docs/cli.md` from the Typer app
   (content-guarded by `tests/test_docs.py`; never hand-edit the output).
+- **`regen-goldens.sh`** — regenerates the `tests/golden/` snapshots by running
+  their consumer tests with `COBRE_BRIDGE_UPDATE_GOLDENS=1`. Goldens are
+  regenerated via this path, never hand-edited; review the resulting
+  `git diff tests/golden/` before committing.
 - **`analyze_results.py`**, **`presentation_charts.py`** — local analysis
   utilities, not gates.
 

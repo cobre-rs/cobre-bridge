@@ -25,12 +25,13 @@ from cobre_bridge.converters.hydro import (
 )
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.productivity import fpha_efficiency
-from tests.conftest import make_case, make_nw_files
-from tests.test_entity_conversion import (
+from tests.conftest import (
     _make_confhd_df,
     _make_hidr_cadastro,
     _make_prod_model_dger_mock,
     _make_ree_df,
+    make_case,
+    make_nw_files,
 )
 
 # cobre's phi = K * eta * q * h_net with K = g/1000.

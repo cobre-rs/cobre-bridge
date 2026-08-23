@@ -46,6 +46,17 @@ packages = ["src/cobre_bridge"]
 testpaths = ["tests"]
 addopts = "--tb=short"
 
+[tool.coverage.run]
+source = [
+    "cobre_bridge.comparators.newave_readers",
+    "cobre_bridge.comparators.alignment",
+    "cobre_bridge.comparators.constraints_compare",
+]
+
+[tool.coverage.report]
+fail_under = 83
+# Ratchet: raise as coverage improves, never lower to dodge a regression — this is the combined aggregate over the 3 `source` modules above, not a per-module threshold.
+
 [tool.pyright]
 # Editor aid only — CI gates ruff (ruff.toml) and `ty`. Point at the venv so the
 # typed first-party deps (idecomp/inewave ship py.typed) resolve instead of
