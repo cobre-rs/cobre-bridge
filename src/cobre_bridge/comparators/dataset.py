@@ -7,8 +7,7 @@ a typed :class:`RenderInputs` side-table for the non-tidy artifacts the HTML
 report reads, and a ``metadata`` dict for provenance not read by the report.
 
 This is a leaf module: it must not import from any other comparator (notably
-``results.py`` or ``bounds.py``) so that callers can wire it in without
-creating import cycles.
+``results.py``) so that callers can wire it in without creating import cycles.
 """
 
 from __future__ import annotations

@@ -1473,7 +1473,7 @@ def build_results_summary(
     """Compute aggregate statistics from comparison results.
 
     ``tolerance`` is the relative tolerance used for the per-variable
-    within-tolerance match rate (mirrors ``compare bounds``).
+    within-tolerance match rate.
     """
     summary = ResultsSummary(total=len(results))
 

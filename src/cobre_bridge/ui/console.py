@@ -213,7 +213,7 @@ def render_compare_verdict(
 ) -> None:
     """Render the one-line compare headline on stdout (green ✓ / amber ⚠ on a TTY).
 
-    Leads ``compare bounds`` / ``compare results`` so the user gets the answer
+    Leads ``compare results`` so the user gets the answer
     first: ``✓ N/M variables within tol`` when every variable is within tolerance,
     or ``⚠ N/M variables within tol — worst: <var> sMAPE <pct>%`` otherwise. An
     empty dataset renders ``⚠ no variables compared`` with no worst clause. The
