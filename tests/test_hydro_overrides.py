@@ -2,19 +2,45 @@
 
 from __future__ import annotations
 
-import logging
 import math
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
+from cobre_bridge import diagnostics as dx
+from cobre_bridge.diagnostics import Severity, finalize_diagnostics
 from tests.conftest import (
     _make_hidr_cadastro,
     _make_penalid_df,
     make_case,
     make_nw_files,
 )
+
+# The title/summary/remediation/notes strings overrides.py emits reach a
+# pip-installed user with no repo checkout — none may leak a repo-internal
+# reference (mirrors test_constraints.py's own marker scan).
+_REPO_INTERNAL_LEAKS = (
+    "docs/",
+    "plans/",
+    "~/git",
+    "feat/",
+    "ticket-",
+    "epic-",
+    "src/",
+    ".py",
+)
+
+
+def _assert_no_repo_internal_leaks(collected: list[dx.Diagnostic]) -> None:
+    for diag in collected:
+        strings = [diag.title, diag.summary, *diag.notes]
+        if diag.remediation is not None:
+            strings.append(diag.remediation)
+        for s in strings:
+            for leak in _REPO_INTERNAL_LEAKS:
+                assert leak not in s, f"diagnostic {diag.code!r} leaks {leak!r}: {s!r}"
+
 
 # ---------------------------------------------------------------------------
 # _apply_permanent_overrides unit tests  (ticket-004)
@@ -117,8 +143,8 @@ class TestApplyPermanentOverrides:
         assert int(result.loc[1, "numero_conjuntos_maquinas"]) == 2
         assert int(result.loc[1, "maquinas_conjunto_2"]) == 3
 
-    def test_volcota_override_warns_and_skips(self, tmp_path, caplog) -> None:
-        """VOLCOTA records produce a warning and are skipped gracefully."""
+    def test_volcota_override_warns_and_skips(self, tmp_path) -> None:
+        """VOLCOTA records produce a diagnostic and are skipped gracefully."""
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
 
         volcota_rec = MagicMock()
@@ -131,17 +157,21 @@ class TestApplyPermanentOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = [volcota_rec]
 
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.converters.hydro"):
+        with dx.collect() as collected:
             result = _apply_permanent_overrides(
                 self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
             )
 
         # Values must be unchanged (dtype may differ due to float cast for safety).
         pd.testing.assert_frame_equal(result, self._base_cadastro(), check_dtype=False)
-        assert any("VOLCOTA" in msg for msg in caplog.messages)
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.code == "modif-permanent-override-unsupported"
+        assert diag.table is not None
+        assert diag.table.rows == [[1, "VOLCOTA"]]
 
-    def test_unknown_plant_code_skipped(self, tmp_path, caplog) -> None:
-        """Plant code not in cadastro: warning logged, no crash."""
+    def test_unknown_plant_code_skipped(self, tmp_path) -> None:
+        """Plant code not in cadastro: diagnostic emitted, no crash."""
         from cobre_bridge.converters.hydro import _apply_permanent_overrides
 
         usina_rec = MagicMock()
@@ -151,13 +181,22 @@ class TestApplyPermanentOverrides:
         mock_modif.usina.return_value = [usina_rec]
         mock_modif.modificacoes_usina.return_value = []
 
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.converters.hydro"):
+        with dx.collect() as collected:
             result = _apply_permanent_overrides(
                 self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
             )
 
         pd.testing.assert_frame_equal(result, self._base_cadastro(), check_dtype=False)
-        assert any("999" in msg for msg in caplog.messages)
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.code == "modif-override-plant-uncadastred"
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Cadastro overrides"
+        assert diag.table is not None
+        assert diag.table.columns == ["Code"]
+        assert diag.table.rows == [[999]]
+
+        _assert_no_repo_internal_leaks(collected)
 
     def test_temporal_records_skipped_in_permanent_pass(self, tmp_path) -> None:
         """Temporal override types are ignored in _apply_permanent_overrides."""
@@ -590,3 +629,277 @@ class TestReadPenalid:
         result = _read_penalid(self._penalid_case(tmp_path, mock_penalid))
 
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Structured-diagnostic coverage for the MODIF.DAT override readers
+# ---------------------------------------------------------------------------
+
+
+class TestApplyPermanentOverridesDiagnostics:
+    """Emission-shape coverage for the two ``_apply_permanent_overrides``
+    diagnostics: uncadastred plants and unsupported/unknown permanent types."""
+
+    def _base_cadastro(self) -> pd.DataFrame:
+        return _make_hidr_cadastro()
+
+    def _modif_case(self, tmp_path, mock_modif):
+        return make_case(
+            make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            modif=mock_modif,
+        )
+
+    def test_unknown_permanent_type_folds_into_same_code_as_volcota(
+        self, tmp_path
+    ) -> None:
+        """VOLCOTA and a genuinely unknown type both land in
+        ``modif-permanent-override-unsupported`` — the Type column is what
+        distinguishes them, not the code."""
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        volcota_rec = MagicMock()
+        type(volcota_rec).__name__ = "VOLCOTA"
+        unknown_rec = MagicMock()
+        type(unknown_rec).__name__ = "SOME_FUTURE_TYPE"
+
+        usina_rec_1 = MagicMock()
+        usina_rec_1.codigo = 1
+        usina_rec_2 = MagicMock()
+        usina_rec_2.codigo = 2
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec_1, usina_rec_2]
+        mock_modif.modificacoes_usina.side_effect = lambda code: (
+            [volcota_rec] if code == 1 else [unknown_rec]
+        )
+
+        with dx.collect() as collected:
+            _apply_permanent_overrides(
+                self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+            )
+
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.code == "modif-permanent-override-unsupported"
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Cadastro overrides"
+        assert diag.table is not None
+        assert diag.table.columns == ["Code", "Type"]
+        assert diag.table.rows == [[1, "VOLCOTA"], [2, "SOME_FUTURE_TYPE"]]
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_defaultregister_stays_debug_and_emits_no_diagnostic(
+        self, tmp_path, caplog
+    ) -> None:
+        """DefaultRegister (the inewave unmodeled-record sentinel) is a
+        deliberate keep-as-log exception: DEBUG only, never a Diagnostic."""
+        import logging
+
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        default_rec = MagicMock()
+        type(default_rec).__name__ = "DefaultRegister"
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [default_rec]
+
+        with (
+            dx.collect() as collected,
+            caplog.at_level(
+                logging.DEBUG, logger="cobre_bridge.converters.hydro.overrides"
+            ),
+        ):
+            _apply_permanent_overrides(
+                self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+            )
+
+        assert collected == []
+        assert any(
+            r.levelno == logging.DEBUG and "DefaultRegister" in r.message
+            for r in caplog.records
+        )
+
+    def test_no_sink_fallback_logs_one_warning(self, tmp_path, caplog) -> None:
+        """With no active collect() sink, emit() degrades to a single logging
+        record — the pre-migration caplog contract keeps working."""
+        import logging
+
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 999  # not in cadastro
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = []
+
+        with caplog.at_level(logging.WARNING):
+            _apply_permanent_overrides(
+                self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+            )
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+
+    def test_no_findings_emits_nothing(self, tmp_path) -> None:
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        volmax_rec = MagicMock()
+        type(volmax_rec).__name__ = "VOLMAX"
+        volmax_rec.volume = 2000.0
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [volmax_rec]
+
+        with dx.collect() as collected:
+            _apply_permanent_overrides(
+                self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+            )
+
+        assert collected == []
+
+
+class TestExtractTemporalOverridesDiagnostics:
+    """Emission-shape coverage for the unknown-temporal-type diagnostic.
+
+    ``_TEMPORAL_OVERRIDE_TYPES`` gates entry to the type-dispatch chain, and
+    every one of its current members is handled there, so the ``else``
+    branch is unreachable through the real frozenset — it is defensive
+    against a future member added to the set without a matching dispatch
+    arm. These tests patch the frozenset to admit a type the chain does not
+    handle, exercising exactly that defensive path.
+    """
+
+    def _modif_case(self, tmp_path, mock_modif):
+        return make_case(
+            make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            modif=mock_modif,
+        )
+
+    def test_unknown_temporal_type_emits_table(self, tmp_path) -> None:
+        from cobre_bridge.converters.hydro import _extract_temporal_overrides
+
+        unknown_rec = MagicMock()
+        type(unknown_rec).__name__ = "SOME_FUTURE_TEMPORAL_TYPE"
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [unknown_rec]
+
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.overrides._TEMPORAL_OVERRIDE_TYPES",
+                frozenset({"SOME_FUTURE_TEMPORAL_TYPE"}),
+            ),
+            dx.collect() as collected,
+        ):
+            result = _extract_temporal_overrides(
+                self._modif_case(tmp_path, mock_modif), [1]
+            )
+
+        assert result == {}
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.code == "modif-temporal-override-unknown"
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Cadastro overrides"
+        assert diag.table is not None
+        assert diag.table.columns == ["Code", "Type"]
+        assert diag.table.rows == [[1, "SOME_FUTURE_TEMPORAL_TYPE"]]
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_no_unknown_types_emits_nothing(self, tmp_path) -> None:
+        import datetime
+
+        from cobre_bridge.converters.hydro import _extract_temporal_overrides
+
+        vazmint_rec = MagicMock()
+        type(vazmint_rec).__name__ = "VAZMINT"
+        vazmint_rec.data_inicio = datetime.datetime(2025, 1, 1)
+        vazmint_rec.vazao = 50.0
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [vazmint_rec]
+
+        with dx.collect() as collected:
+            _extract_temporal_overrides(self._modif_case(tmp_path, mock_modif), [1])
+
+        assert collected == []
+
+    def test_no_sink_fallback_logs_one_warning(self, tmp_path, caplog) -> None:
+        """With no active collect() sink, emit() degrades to a single logging
+        record — the pre-migration caplog contract keeps working."""
+        import logging
+
+        from cobre_bridge.converters.hydro import _extract_temporal_overrides
+
+        unknown_rec = MagicMock()
+        type(unknown_rec).__name__ = "SOME_FUTURE_TEMPORAL_TYPE"
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [unknown_rec]
+
+        with (
+            patch(
+                "cobre_bridge.converters.hydro.overrides._TEMPORAL_OVERRIDE_TYPES",
+                frozenset({"SOME_FUTURE_TEMPORAL_TYPE"}),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            _extract_temporal_overrides(self._modif_case(tmp_path, mock_modif), [1])
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+
+
+class TestOverridesResidualLegacyWarning:
+    """OQ3: none of the four codes this module now emits leaks through the
+    generic ``legacy-warning`` bridge, and the residual bridge itself (shared
+    by every not-yet-migrated module) still works for an unrelated string."""
+
+    def test_hydro_finding_carries_no_legacy_warning(self, tmp_path) -> None:
+        from cobre_bridge.converters.hydro import _apply_permanent_overrides
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 999  # not in cadastro
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = []
+
+        with dx.collect() as collected:
+            _apply_permanent_overrides(
+                _make_hidr_cadastro(),
+                make_case(
+                    make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+                    modif=mock_modif,
+                ),
+            )
+
+        assert not any(d.code == "legacy-warning" for d in collected)
+
+    def test_finalize_diagnostics_still_wraps_an_unrelated_legacy_string(self) -> None:
+        result = finalize_diagnostics([], ["some other warning"])
+
+        assert len(result) == 1
+        assert result[0].code == "legacy-warning"
+        assert result[0].summary == "some other warning"

@@ -6,7 +6,33 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
+from cobre_bridge import diagnostics as dx
+from cobre_bridge.diagnostics import Severity
 from cobre_bridge.id_map import NewaveIdMap
+
+# The title/summary/remediation/notes strings geometry.py emits reach a
+# pip-installed user with no repo checkout — none may leak a repo-internal
+# reference (mirrors test_constraints.py's own marker scan).
+_REPO_INTERNAL_LEAKS = (
+    "docs/",
+    "plans/",
+    "~/git",
+    "feat/",
+    "ticket-",
+    "epic-",
+    "src/",
+    ".py",
+)
+
+
+def _assert_no_repo_internal_leaks(collected: list[dx.Diagnostic]) -> None:
+    for diag in collected:
+        strings = [diag.title, diag.summary, *diag.notes]
+        if diag.remediation is not None:
+            strings.append(diag.remediation)
+        for s in strings:
+            for leak in _REPO_INTERNAL_LEAKS:
+                assert leak not in s, f"diagnostic {diag.code!r} leaks {leak!r}: {s!r}"
 
 
 def _make_geometry_cadastro() -> pd.DataFrame:
@@ -176,3 +202,83 @@ class TestGenerateHydroGeometry:
         areas = table.column("area_km2").to_pylist()
         assert all(h >= 0.0 for h in heights), "Heights must be >= 0"
         assert all(a >= 0.0 for a in areas), "Areas must be >= 0"
+
+
+class TestGenerateHydroGeometryDiagnostics:
+    """Structured-diagnostic coverage for the loop-accumulated geometry skips."""
+
+    def test_skips_emit_one_table_distinguishing_both_causes(self) -> None:
+        """Both skip causes fold into one ``hydro-geometry-skipped`` table."""
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        cadastro = _make_geometry_cadastro().copy()
+        for i in range(5):
+            cadastro.loc[1, f"a{i}_volume_cota"] = 0.0
+        cadastro.loc[1, "nome_usina"] = "PLANT ONE"
+
+        # Code 3 is referenced by id_map but absent from cadastro entirely.
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 3], thermal_codes=[])
+
+        with dx.collect() as collected:
+            table = generate_hydro_geometry(cadastro, id_map)
+
+        assert len(table) == 0
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.code == "hydro-geometry-skipped"
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Hydro geometry"
+        assert diag.table is not None
+        assert diag.table.columns == ["Plant", "Code", "Reason"]
+        assert len(diag.table.rows) == 2
+
+        by_code = {row[1]: row for row in diag.table.rows}
+        assert by_code[1][0] == "PLANT ONE"
+        assert "polynomial" in by_code[1][2]
+        assert by_code[3][0] == "?"
+        assert "cadastro" in by_code[3][2]
+        assert by_code[1][2] != by_code[3][2]
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_no_skips_emits_no_diagnostic(self) -> None:
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        cadastro = _make_geometry_cadastro()
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
+
+        with dx.collect() as collected:
+            generate_hydro_geometry(cadastro, id_map)
+
+        assert collected == []
+
+    def test_skips_carry_no_legacy_warning_under_collect(self) -> None:
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        cadastro = _make_geometry_cadastro().copy()
+        for i in range(5):
+            cadastro.loc[1, f"a{i}_volume_cota"] = 0.0
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
+
+        with dx.collect() as collected:
+            generate_hydro_geometry(cadastro, id_map)
+
+        assert not any(d.code == "legacy-warning" for d in collected)
+
+    def test_no_sink_fallback_logs_one_warning(self, caplog) -> None:
+        """With no active collect() sink, emit() degrades to a single logging
+        record — the pre-migration caplog contract keeps working."""
+        import logging
+
+        from cobre_bridge.converters.hydro import generate_hydro_geometry
+
+        cadastro = _make_geometry_cadastro().copy()
+        for i in range(5):
+            cadastro.loc[1, f"a{i}_volume_cota"] = 0.0
+        id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
+
+        with caplog.at_level(logging.WARNING):
+            generate_hydro_geometry(cadastro, id_map)
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1

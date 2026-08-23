@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from cobre_bridge import diagnostics as dx
+from cobre_bridge.diagnostics import Severity
 from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import (
     _make_cfuga_rec,
@@ -17,6 +19,31 @@ from tests.conftest import (
     make_case,
     make_nw_files,
 )
+
+# The title/summary/remediation/notes strings productivity.py emits reach a
+# pip-installed user with no repo checkout — none may leak a repo-internal
+# reference (mirrors test_constraints.py's own marker scan).
+_REPO_INTERNAL_LEAKS = (
+    "docs/",
+    "plans/",
+    "~/git",
+    "feat/",
+    "ticket-",
+    "epic-",
+    "src/",
+    ".py",
+)
+
+
+def _assert_no_repo_internal_leaks(collected: list[dx.Diagnostic]) -> None:
+    for diag in collected:
+        strings = [diag.title, diag.summary, *diag.notes]
+        if diag.remediation is not None:
+            strings.append(diag.remediation)
+        for s in strings:
+            for leak in _REPO_INTERNAL_LEAKS:
+                assert leak not in s, f"diagnostic {diag.code!r} leaks {leak!r}: {s!r}"
+
 
 # ---------------------------------------------------------------------------
 # _per_stage_productivities: sazonaliza_cfuga_cmont behaviour
@@ -1357,3 +1384,86 @@ class TestConvertHydroEnergyProductivity:
             "specific_productivity_mw_per_m3s_per_m",
         ):
             assert all(v is None for v in table[col].to_pylist())
+
+
+# ---------------------------------------------------------------------------
+# _parse_fpha_plane_reduction: structured-diagnostic coverage
+# ---------------------------------------------------------------------------
+#
+# The parsing behaviour itself (angle/distance methods, commented lines, no
+# file present) is covered by TestParseFphaPlaneReduction in
+# tests/test_fpha_conversion.py, the established home for the FPHA converters;
+# this class covers only the multiple-active-methods diagnostic this ticket adds.
+
+
+class TestParseFphaPlaneReductionDiagnostics:
+    """Structured-diagnostic coverage for the multiple-active-methods warning."""
+
+    def _case_with_text(self, tmp_path: Path, text: str):
+        path = tmp_path / "tratamento-fpha.csv"
+        path.write_text(text, encoding="utf-8")
+        return make_case(make_nw_files(tmp_path, tratamento_fpha=path))
+
+    _MULTI_METHOD_TEXT = (
+        "HIDRELETRICA-FPHA-METODO-REDUCAO-CORTES-ANGULO-PADRAO; 1.0\n"
+        "HIDRELETRICA-FPHA-METODO-REDUCAO-CORTES-DISTANCIA-PADRAO; 0.002\n"
+    )
+
+    def test_multiple_methods_emits_one_diagnostic_using_the_first(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.converters.hydro import _parse_fpha_plane_reduction
+
+        case = self._case_with_text(tmp_path, self._MULTI_METHOD_TEXT)
+
+        with dx.collect() as collected:
+            result = _parse_fpha_plane_reduction(case)
+
+        assert result == {"method": "angle", "tolerance_deg": 1.0}
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.code == "fpha-plane-reduction-multiple-methods"
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Production model"
+        assert diag.table is None
+        assert "tratamento-fpha.csv" in diag.summary
+        assert "angle" in diag.summary
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_single_method_emits_no_diagnostic(self, tmp_path: Path) -> None:
+        from cobre_bridge.converters.hydro import _parse_fpha_plane_reduction
+
+        case = self._case_with_text(
+            tmp_path, "HIDRELETRICA-FPHA-METODO-REDUCAO-CORTES-ANGULO-PADRAO; 1.0\n"
+        )
+
+        with dx.collect() as collected:
+            _parse_fpha_plane_reduction(case)
+
+        assert collected == []
+
+    def test_multiple_methods_carries_no_legacy_warning(self, tmp_path: Path) -> None:
+        from cobre_bridge.converters.hydro import _parse_fpha_plane_reduction
+
+        case = self._case_with_text(tmp_path, self._MULTI_METHOD_TEXT)
+
+        with dx.collect() as collected:
+            _parse_fpha_plane_reduction(case)
+
+        assert not any(d.code == "legacy-warning" for d in collected)
+
+    def test_no_sink_fallback_logs_one_warning(self, tmp_path: Path, caplog) -> None:
+        """With no active collect() sink, emit() degrades to a single logging
+        record — the pre-migration caplog contract keeps working."""
+        import logging
+
+        from cobre_bridge.converters.hydro import _parse_fpha_plane_reduction
+
+        case = self._case_with_text(tmp_path, self._MULTI_METHOD_TEXT)
+
+        with caplog.at_level(logging.WARNING):
+            _parse_fpha_plane_reduction(case)
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1

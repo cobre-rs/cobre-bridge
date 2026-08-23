@@ -12,6 +12,7 @@ import logging
 import pandas as pd
 
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
 from cobre_bridge.horizon import POST_STUDY_YEAR
 
 _LOG = logging.getLogger(__name__)
@@ -68,14 +69,15 @@ def _apply_permanent_overrides(
     if not usina_records:
         return result
 
+    # Loop-accumulate-then-emit-once: one record per skipped plant/record,
+    # emitted after the loop (see the module's finalize_diagnostics de-dup).
+    uncadastred: list[int] = []
+    unsupported_perm: list[tuple[int, str]] = []
+
     for usina_rec in usina_records:
         code = int(usina_rec.codigo)
         if code not in result.index:
-            _LOG.warning(
-                "MODIF.DAT references plant code %d which is not in hidr.dat;"
-                " skipping.",
-                code,
-            )
+            uncadastred.append(code)
             continue
 
         for rec in modif.modificacoes_usina(code):
@@ -103,16 +105,10 @@ def _apply_permanent_overrides(
                 result.loc[code, f"maquinas_conjunto_{set_num}"] = n_maq
 
             elif type_name in ("VOLCOTA", "COTARE"):
-                # VOLCOTA/COTARE are not present in the example case.
-                # The spec mentions them but the inewave API does not expose
-                # them as separate methods in the tested version.  Log a
-                # warning if they appear so the operator knows to investigate.
-                _LOG.warning(
-                    "MODIF.DAT contains unsupported permanent override type"
-                    " '%s' for plant %d; skipping.",
-                    type_name,
-                    code,
-                )
+                # VOLCOTA/COTARE are not present in the example case; the spec
+                # mentions them but the inewave API does not expose them as
+                # separate methods in the tested version.
+                unsupported_perm.append((code, type_name))
 
             elif type_name == "DefaultRegister":
                 # inewave emits DefaultRegister for records it does not model
@@ -125,12 +121,48 @@ def _apply_permanent_overrides(
                 )
 
             else:
-                _LOG.warning(
-                    "MODIF.DAT contains unknown permanent override type '%s'"
-                    " for plant %d; skipping.",
-                    type_name,
-                    code,
-                )
+                unsupported_perm.append((code, type_name))
+
+    if uncadastred:
+        emit(
+            Diagnostic(
+                code="modif-override-plant-uncadastred",
+                severity=Severity.WARNING,
+                category="Cadastro overrides",
+                title=(f"MODIF.DAT references {len(uncadastred)} uncadastred plant(s)"),
+                summary=(
+                    f"MODIF.DAT references {len(uncadastred)} plant code(s) "
+                    "not present in hidr.dat; skipping their overrides."
+                ),
+                table=DiagnosticTable(
+                    columns=["Code"],
+                    rows=[[code] for code in uncadastred],
+                    justify=["right"],
+                ),
+            ),
+            logger=_LOG,
+        )
+    if unsupported_perm:
+        emit(
+            Diagnostic(
+                code="modif-permanent-override-unsupported",
+                severity=Severity.WARNING,
+                category="Cadastro overrides",
+                title=(
+                    f"Unsupported permanent override type(s) ({len(unsupported_perm)})"
+                ),
+                summary=(
+                    f"MODIF.DAT contains {len(unsupported_perm)} unsupported "
+                    "or unknown permanent override record(s); skipping."
+                ),
+                table=DiagnosticTable(
+                    columns=["Code", "Type"],
+                    rows=[[code, type_name] for code, type_name in unsupported_perm],
+                    justify=["right", "left"],
+                ),
+            ),
+            logger=_LOG,
+        )
 
     return result
 
@@ -194,6 +226,9 @@ def _extract_temporal_overrides(
     if not usina_records:
         return result
 
+    # Loop-accumulate-then-emit-once (see _apply_permanent_overrides above).
+    unknown_temporal: list[tuple[int, str]] = []
+
     for usina_rec in usina_records:
         code = int(usina_rec.codigo)
         if code not in confhd_set:
@@ -218,11 +253,7 @@ def _extract_temporal_overrides(
             elif type_name in ("TURBMINT", "TURBMAXT"):
                 value = float(rec.turbinamento)
             else:
-                _LOG.warning(
-                    "Unknown temporal override type '%s' for plant %d; skipping.",
-                    type_name,
-                    code,
-                )
+                unknown_temporal.append((code, type_name))
                 continue
 
             plant_overrides.append(
@@ -231,6 +262,26 @@ def _extract_temporal_overrides(
 
         if plant_overrides:
             result[code] = plant_overrides
+
+    if unknown_temporal:
+        emit(
+            Diagnostic(
+                code="modif-temporal-override-unknown",
+                severity=Severity.WARNING,
+                category="Cadastro overrides",
+                title=f"Unknown temporal override type(s) ({len(unknown_temporal)})",
+                summary=(
+                    f"MODIF.DAT contains {len(unknown_temporal)} unknown "
+                    "temporal override record(s); skipping."
+                ),
+                table=DiagnosticTable(
+                    columns=["Code", "Type"],
+                    rows=[[code, type_name] for code, type_name in unknown_temporal],
+                    justify=["right", "left"],
+                ),
+            ),
+            logger=_LOG,
+        )
 
     return result
 

@@ -9,6 +9,8 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
+from cobre_bridge import diagnostics as dx
+from cobre_bridge.diagnostics import Severity
 from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import (
     _hydro_case,
@@ -25,6 +27,31 @@ from tests.conftest import (
     make_case,
     make_nw_files,
 )
+
+# The title/summary/remediation/notes strings bounds.py emits reach a
+# pip-installed user with no repo checkout — none may leak a repo-internal
+# reference (mirrors test_constraints.py's own marker scan).
+_REPO_INTERNAL_LEAKS = (
+    "docs/",
+    "plans/",
+    "~/git",
+    "feat/",
+    "ticket-",
+    "epic-",
+    "src/",
+    ".py",
+)
+
+
+def _assert_no_repo_internal_leaks(collected: list[dx.Diagnostic]) -> None:
+    for diag in collected:
+        strings = [diag.title, diag.summary, *diag.notes]
+        if diag.remediation is not None:
+            strings.append(diag.remediation)
+        for s in strings:
+            for leak in _REPO_INTERNAL_LEAKS:
+                assert leak not in s, f"diagnostic {diag.code!r} leaks {leak!r}: {s!r}"
+
 
 # ---------------------------------------------------------------------------
 # max_turbined_m3s envelope declaration  (ticket-015b)
@@ -1144,3 +1171,100 @@ class TestWaterWithdrawalConversion:
         assert result.num_rows == 1
         row = result.to_pydict()
         assert row["water_withdrawal_m3s"][0] == pytest.approx(4.0)
+
+
+class TestClampOutagePctDiagnostics:
+    """Structured-diagnostic coverage for the TEIF/IP > 100 clamp (option B:
+    a per-plant/per-field emit relying on ``(code, summary)`` de-dup, not a
+    threaded accumulator)."""
+
+    def test_value_within_range_emits_no_diagnostic(self) -> None:
+        from cobre_bridge.converters.hydro.bounds import _clamp_outage_pct
+
+        with dx.collect() as collected:
+            result = _clamp_outage_pct(50.0, "teif", "USINA_A")
+
+        assert result == 50.0
+        assert collected == []
+
+    def test_above_100_emits_clamped_diagnostic(self) -> None:
+        from cobre_bridge.converters.hydro.bounds import _clamp_outage_pct
+
+        with dx.collect() as collected:
+            result = _clamp_outage_pct(150.0, "teif", "USINA_A")
+
+        assert result == 100.0
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.code == "hydro-outage-rate-clamped"
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Hydro bounds"
+        assert diag.table is None
+        assert "USINA_A" in diag.summary
+        assert "teif" in diag.summary
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_same_plant_field_clamped_on_two_paths_dedups_to_one(self) -> None:
+        """TEIF > 100 clamped on both ``_compute_max_turbined_simple`` and
+        ``_compute_max_turbined_head_corrected`` — the two real computation
+        paths ``_clamp_outage_pct`` sits on — collapses to one diagnostic once
+        ``finalize_diagnostics`` applies its ``(code, summary)`` de-dup (the
+        raw ``collect()`` sink itself holds both emits verbatim)."""
+        from cobre_bridge.converters.hydro.bounds import (
+            _compute_max_turbined_head_corrected,
+            _compute_max_turbined_simple,
+        )
+
+        cadastro = _head_corrected_two_plant_cadastro()
+        cadastro.loc[1, "teif"] = 150.0
+        hreg = cadastro.loc[1]
+
+        with dx.collect() as collected:
+            _compute_max_turbined_simple(hreg, "USINA_A")
+            _compute_max_turbined_head_corrected(hreg, "USINA_A")
+
+        assert len(collected) == 2  # both call sites emitted, verbatim
+        finalized = dx.finalize_diagnostics(collected, [])
+        teif_diags = [d for d in finalized if d.code == "hydro-outage-rate-clamped"]
+        assert len(teif_diags) == 1
+        assert "USINA_A" in teif_diags[0].summary
+        assert "teif" in teif_diags[0].summary
+
+    def test_different_fields_stay_distinct(self) -> None:
+        """TEIF and IP both overshoot -> two DISTINCT diagnostics, not de-duped
+        against each other (the summary differs by field)."""
+        from cobre_bridge.converters.hydro.bounds import _clamp_outage_pct
+
+        with dx.collect() as collected:
+            _clamp_outage_pct(150.0, "teif", "USINA_A")
+            _clamp_outage_pct(200.0, "ip", "USINA_A")
+
+        assert len(collected) == 2
+        codes_and_fields = {(d.code, "teif" in d.summary) for d in collected}
+        assert codes_and_fields == {
+            ("hydro-outage-rate-clamped", True),
+            ("hydro-outage-rate-clamped", False),
+        }
+
+    def test_carries_no_legacy_warning_under_collect(self) -> None:
+        from cobre_bridge.converters.hydro.bounds import _clamp_outage_pct
+
+        with dx.collect() as collected:
+            _clamp_outage_pct(150.0, "teif", "USINA_A")
+
+        assert not any(d.code == "legacy-warning" for d in collected)
+
+    def test_no_sink_fallback_logs_one_warning_and_returns_100(self, caplog) -> None:
+        """With no active collect() sink, emit() degrades to a single logging
+        record — the pre-migration caplog contract keeps working."""
+        import logging
+
+        from cobre_bridge.converters.hydro.bounds import _clamp_outage_pct
+
+        with caplog.at_level(logging.WARNING):
+            result = _clamp_outage_pct(150.0, "teif", "USINA_A")
+
+        assert result == 100.0
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1

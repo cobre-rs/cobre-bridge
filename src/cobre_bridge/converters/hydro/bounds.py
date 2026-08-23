@@ -29,6 +29,7 @@ from cobre_bridge.converters.hydro.productivity import (
     _per_stage_productivities,
     _total_study_stages,
 )
+from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 from cobre_bridge.filling import filling_schedule, online_machines
 from cobre_bridge.filling import stage_id as filling_stage_id
 from cobre_bridge.horizon import seasonal_step_function
@@ -46,16 +47,31 @@ _LOG = logging.getLogger(__name__)
 
 
 def _clamp_outage_pct(value: float, label: str, plant_name: str) -> float:
-    """Clamp TEIF/IP percentages into ``[0, 100]`` and warn on overshoot."""
+    """Clamp TEIF/IP percentages into ``[0, 100]``, reporting an overshoot.
+
+    A leaf helper on multiple call paths (``_compute_max_turbined_simple`` and
+    ``_compute_max_turbined_head_corrected``, from both ``convert_hydros`` and
+    :func:`convert_turbined_bounds_head_corrected`): the same plant+field can
+    be clamped on more than one path in one run.  Emitting per-call and
+    relying on ``finalize_diagnostics``' ``(code, summary)`` de-dup collapses
+    that to a single diagnostic instead of threading an accumulator through
+    every call site.
+    """
     if math.isnan(value) or value < 0.0:
         return 0.0
     if value > 100.0:
-        _LOG.warning(
-            "%s exceeds 100%% for plant %s (%s=%.2f); clamping to 100.",
-            label,
-            plant_name,
-            label.lower(),
-            value,
+        emit(
+            Diagnostic(
+                code="hydro-outage-rate-clamped",
+                severity=Severity.WARNING,
+                category="Hydro bounds",
+                title="Outage rate exceeds 100%",
+                summary=(
+                    f"{label} exceeds 100% for plant {plant_name} "
+                    f"({label.lower()}={value:.2f}); clamping to 100."
+                ),
+            ),
+            logger=_LOG,
         )
         return 100.0
     return value

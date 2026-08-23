@@ -15,6 +15,7 @@ import pyarrow as pa
 
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.hydro.overrides import _apply_permanent_overrides
+from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
 from cobre_bridge.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
@@ -158,8 +159,8 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
 
     Plants where ``volume_minimo == volume_maximo`` (run-of-river with no
     reservoir) are skipped.  Plants whose volume_cota polynomial coefficients
-    are all zero are logged as a warning and skipped.  Negative height or area
-    values produced by the polynomials are clamped to 0.0.
+    are all zero are skipped and reported via a diagnostic.  Negative height
+    or area values produced by the polynomials are clamped to 0.0.
 
     Parameters
     ----------
@@ -184,6 +185,10 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
     heights: list[float] = []
     areas: list[float] = []
 
+    # Loop-accumulate-then-emit-once: one record per skipped plant, emitted
+    # after the loop so both skip causes survive finalize_diagnostics' de-dup.
+    geometry_skips: list[tuple[str, int, str]] = []
+
     def _eval_poly(coeffs: list[float], x: np.ndarray) -> np.ndarray:
         """Evaluate a 4th-degree polynomial: c0 + c1*x + ... + c4*x^4."""
         return (
@@ -196,10 +201,7 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
 
     for newave_code in id_map.all_hydro_codes:
         if newave_code not in cadastro.index:
-            _LOG.warning(
-                "Plant code %d in id_map is not present in cadastro; skipping.",
-                newave_code,
-            )
+            geometry_skips.append(("?", newave_code, "plant not in cadastro"))
             continue
 
         hreg = cadastro.loc[newave_code]
@@ -209,10 +211,9 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
         # Polynomial coefficients for volume -> height (hm3 -> m).
         vc_coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
         if all(c == 0.0 for c in vc_coeffs):
-            _LOG.warning(
-                "All a0..a4_volume_cota coefficients are zero for plant %d;"
-                " skipping geometry generation.",
-                newave_code,
+            name = str(hreg.get("nome_usina", "?"))
+            geometry_skips.append(
+                (name, newave_code, "all volume-to-height polynomial coefficients zero")
             )
             continue
 
@@ -246,6 +247,29 @@ def generate_hydro_geometry(cadastro: pd.DataFrame, id_map: NewaveIdMap) -> pa.T
         volumes.extend(vol_grid.tolist())
         heights.extend(height_arr.tolist())
         areas.extend(area_arr.tolist())
+
+    if geometry_skips:
+        emit(
+            Diagnostic(
+                code="hydro-geometry-skipped",
+                severity=Severity.WARNING,
+                category="Hydro geometry",
+                title=f"Hydro geometry skipped ({len(geometry_skips)} plant(s))",
+                summary=(
+                    f"{len(geometry_skips)} plant(s) had no geometry generated: "
+                    "not present in the cadastro, or an all-zero "
+                    "volume-to-height polynomial."
+                ),
+                table=DiagnosticTable(
+                    columns=["Plant", "Code", "Reason"],
+                    rows=[
+                        [name, code, reason] for name, code, reason in geometry_skips
+                    ],
+                    justify=["left", "right", "left"],
+                ),
+            ),
+            logger=_LOG,
+        )
 
     schema = pa.schema(
         [

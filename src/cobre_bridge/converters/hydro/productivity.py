@@ -27,6 +27,7 @@ from cobre_bridge.converters.hydro.overrides import (
     _extract_temporal_overrides,
     _per_stage_drop_overrides,
 )
+from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.productivity import (
     compute_productivity,
@@ -104,10 +105,18 @@ def _parse_fpha_plane_reduction(case: NewaveCase) -> dict | None:
     if not methods:
         return None
     if len(methods) > 1:
-        _LOG.warning(
-            "Multiple active FPHA plane-reduction methods in %s; using the first (%s).",
-            path.name,
-            methods[0]["method"],
+        emit(
+            Diagnostic(
+                code="fpha-plane-reduction-multiple-methods",
+                severity=Severity.WARNING,
+                category="Production model",
+                title="Multiple active FPHA plane-reduction methods",
+                summary=(
+                    f"{path.name} has multiple active FPHA plane-reduction "
+                    f"methods; using the first ({methods[0]['method']})."
+                ),
+            ),
+            logger=_LOG,
         )
     return methods[0]
 
