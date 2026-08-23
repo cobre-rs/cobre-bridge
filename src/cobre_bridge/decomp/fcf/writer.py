@@ -5,7 +5,7 @@ of :class:`~cobre_bridge.decomp.fcf.mapper.MappedCut`, each already aligned
 to the terminal manifest's state-vector layout (``fcf/bootstrap.py``).
 This module assembles that pair into the plain-dict payload and
 metadata shapes ``cobre.write_policy_checkpoint`` expects, then calls it to
-produce ``boundary/{metadata.json, cuts/<pool>.bin, basis/}`` — a raw,
+produce ``boundary/{manifest.bin, cuts/<pool>.bin, basis/}`` — a raw,
 one-pool checkpoint (cobre 0.14 keys the cut file by pool id, not the old
 ``stage_NNN.bin``) the target case's ``config.json -> policy.boundary``
 loads.
@@ -35,6 +35,9 @@ def build_stage_cuts_payload(
     manifest: TerminalManifest,
     *,
     stage_id: int,
+    cost_scale_factor: float | None,
+    node_id: int,
+    graph_stage_id: int,
 ) -> dict[str, Any]:
     """Assemble one ``stage_cuts`` entry from `mapping` over `manifest`.
 
@@ -46,14 +49,34 @@ def build_stage_cuts_payload(
     copied verbatim (never re-derived) so a future cobre layout change breaks
     loudly at load, not silently. ``active_cut_indices`` lists the pool
     positions whose `MappedCut.is_active` is `True`; ``populated_count`` is
-    `len(cuts)`.
+    `len(cuts)`. ``cost_scale_factor``, ``node_id``, and ``graph_stage_id``
+    are copied verbatim into the payload — the boundary loader reads them
+    per pool to resolve `source_stage -> pool` and to reject a legacy
+    (pre-self-describing) checkpoint.
 
     Raises
     ------
     ValueError
-        If any `MappedCut.coefficients` length disagrees with
-        `manifest.state_dimension` — checked before any cobre call.
+        If `node_id == -1` (the shared-pool sentinel is not a real single
+        node), or if any `MappedCut.coefficients` length disagrees with
+        `manifest.state_dimension` — the sentinel check runs before the cut
+        loop, the length check inside it, both before any cobre call.
+    RuntimeError
+        If `cost_scale_factor` is `None` — an unset marker makes cobre treat
+        this pool as legacy and silently scale every value by 10⁶.
     """
+    if cost_scale_factor is None:
+        raise RuntimeError(
+            "cost_scale_factor must not be None: an unset marker makes "
+            "cobre treat this pool as legacy and silently scale every "
+            "value by 10⁶"
+        )
+    if node_id == -1:
+        raise ValueError(
+            "node_id must not be -1: that value is the shared-pool "
+            "sentinel, not a real single node"
+        )
+
     cuts: list[dict[str, Any]] = []
     active_cut_indices: list[int] = []
     for slot_index, mapped in enumerate(mapping.cuts):
@@ -94,6 +117,9 @@ def build_stage_cuts_payload(
         "active_cut_indices": active_cut_indices,
         "populated_count": len(cuts),
         "entity_manifest": list(manifest.entity_manifest),
+        "cost_scale_factor": cost_scale_factor,
+        "node_id": node_id,
+        "graph_stage_id": graph_stage_id,
     }
 
 

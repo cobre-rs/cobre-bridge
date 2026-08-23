@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -35,11 +34,21 @@ def test_build_stage_cuts_payload_shape() -> None:
     )
     mapping = MappingResult(cuts=(active_cut, inactive_cut), dropped=())
 
-    payload = build_stage_cuts_payload(mapping, manifest, stage_id=10)
+    payload = build_stage_cuts_payload(
+        mapping,
+        manifest,
+        stage_id=10,
+        cost_scale_factor=1.0,
+        node_id=0,
+        graph_stage_id=4,
+    )
 
     assert payload["stage_id"] == 10
     assert payload["state_dimension"] == 4
     assert payload["entity_manifest"] == list(manifest.entity_manifest)
+    assert payload["cost_scale_factor"] == 1.0
+    assert payload["node_id"] == 0
+    assert payload["graph_stage_id"] == 4
     assert len(payload["cuts"]) == 2
     for cut in payload["cuts"]:
         assert len(cut["coefficients"]) == 4
@@ -83,7 +92,14 @@ def test_write_boundary_checkpoint_creates_files(tmp_path: Path) -> None:
         cuts=(make_mapped_cut(coefficients=(1.0, 2.0), cut_id=101, is_active=True),),
         dropped=(),
     )
-    payload = build_stage_cuts_payload(mapping, manifest, stage_id=10)
+    payload = build_stage_cuts_payload(
+        mapping,
+        manifest,
+        stage_id=10,
+        cost_scale_factor=1.0,
+        node_id=0,
+        graph_stage_id=10,
+    )
     metadata = build_metadata(
         num_stages=1,
         cost_scale_factor=1.0,
@@ -100,22 +116,18 @@ def test_write_boundary_checkpoint_creates_files(tmp_path: Path) -> None:
     boundary_dir = tmp_path / "boundary"
     write_boundary_checkpoint(boundary_dir, payload, metadata)
 
-    assert (boundary_dir / "metadata.json").exists()
+    assert (boundary_dir / "manifest.bin").exists()
     # cobre 0.14 keys the cut file by pool id (stage_id 10 -> "010.bin"),
     # replacing the old positional "stage_NNN.bin".
     assert (boundary_dir / "cuts" / "010.bin").exists()
     assert (boundary_dir / "basis").is_dir()
 
-    on_disk_metadata = json.loads((boundary_dir / "metadata.json").read_text())
-    assert isinstance(on_disk_metadata, dict)
-    # 0.14 nests the algorithm provenance (incl. cost_scale_factor) under a
-    # "producer" block; state_dimension is no longer a metadata field.
-    assert "state_dimension" not in on_disk_metadata
-    assert on_disk_metadata["producer"]["cost_scale_factor"] is not None
-
     reloaded = cobre.results.load_policy(
         boundary_dir.parent, policy_subdir=boundary_dir.name
     )
+    # 0.14 nests the algorithm provenance (incl. cost_scale_factor) under a
+    # "producer" block; state_dimension is no longer a metadata field.
+    assert "state_dimension" not in reloaded["metadata"]
     assert reloaded["metadata"]["producer"]["cost_scale_factor"] is not None
     reloaded_stage = reloaded["stage_cuts"][0]
     assert reloaded_stage["state_dimension"] == 2
@@ -130,7 +142,44 @@ def test_build_payload_rejects_wrong_coefficient_length() -> None:
     )
 
     with pytest.raises(ValueError, match="state_dimension"):
-        build_stage_cuts_payload(mapping, manifest, stage_id=10)
+        build_stage_cuts_payload(
+            mapping,
+            manifest,
+            stage_id=10,
+            cost_scale_factor=1.0,
+            node_id=0,
+            graph_stage_id=10,
+        )
+
+
+def test_build_stage_cuts_payload_refuses_none_cost_scale_factor() -> None:
+    manifest = make_manifest([make_slot(0, 0, 0)])
+    mapping = MappingResult(cuts=(make_mapped_cut(coefficients=(0.5,)),), dropped=())
+
+    with pytest.raises(RuntimeError, match="cost_scale_factor"):
+        build_stage_cuts_payload(
+            mapping,
+            manifest,
+            stage_id=10,
+            cost_scale_factor=None,
+            node_id=0,
+            graph_stage_id=10,
+        )
+
+
+def test_build_stage_cuts_payload_refuses_shared_pool_sentinel_node_id() -> None:
+    manifest = make_manifest([make_slot(0, 0, 0)])
+    mapping = MappingResult(cuts=(make_mapped_cut(coefficients=(0.5,)),), dropped=())
+
+    with pytest.raises(ValueError, match="shared-pool sentinel"):
+        build_stage_cuts_payload(
+            mapping,
+            manifest,
+            stage_id=10,
+            cost_scale_factor=1.0,
+            node_id=-1,
+            graph_stage_id=10,
+        )
 
 
 def test_build_stage_cuts_payload_carries_keyed_inflow_lag_coefficients() -> None:
@@ -140,7 +189,12 @@ def test_build_stage_cuts_payload_carries_keyed_inflow_lag_coefficients() -> Non
         inflow_lag_coefficients={0: (2.0, 3.0, 0.0)},
     )
     payload = build_stage_cuts_payload(
-        MappingResult(cuts=(cut,), dropped=()), manifest, stage_id=10
+        MappingResult(cuts=(cut,), dropped=()),
+        manifest,
+        stage_id=10,
+        cost_scale_factor=1.0,
+        node_id=0,
+        graph_stage_id=10,
     )
     # The keyed lag coefficients ride alongside the storage-aligned vector, as
     # lists cobre's write_policy_checkpoint consumes to place its reserved slots.
@@ -151,6 +205,11 @@ def test_build_stage_cuts_payload_empty_lag_coefficients_by_default() -> None:
     manifest = make_manifest([make_slot(0, 0, 0)])
     cut = make_mapped_cut(coefficients=(0.5,))
     payload = build_stage_cuts_payload(
-        MappingResult(cuts=(cut,), dropped=()), manifest, stage_id=10
+        MappingResult(cuts=(cut,), dropped=()),
+        manifest,
+        stage_id=10,
+        cost_scale_factor=1.0,
+        node_id=0,
+        graph_stage_id=10,
     )
     assert payload["cuts"][0]["inflow_lag_coefficients"] == {}

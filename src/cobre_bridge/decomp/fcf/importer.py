@@ -682,8 +682,8 @@ def import_boundary_fcf(
        the D3-dropped source-only plants (gated on non-empty), and — when the
        deck carries a GNL block — the per-``(submercado, lag)`` deviation the
        ring's chain-rule sum collapses.
-    6. Assembles and writes ``case_dir/boundary/{metadata.json,
-       cuts/stage_NNN.bin, basis/}``, patches ``case_dir/config.json``'s
+    6. Assembles and writes ``case_dir/boundary/{manifest.bin,
+       cuts/<pool>.bin, basis/}``, patches ``case_dir/config.json``'s
        ``["policy"]["boundary"]`` to point at it, and — when the deck carries an
        ``mlt.dat`` (so the mean fold above was applied) — patches
        ``case_dir/initial_conditions.json`` with the pre-study
@@ -710,12 +710,13 @@ def import_boundary_fcf(
         Raised directly when cut files are present but *config* or
         *initial_conditions* is ``None`` (a caller must thread the pipeline's
         own in-memory dicts once the import actually proceeds — see
-        ``convert_decomp_case``'s ``fcf_inputs_out``). Also propagated
-        verbatim from the cut reader (``fcf/cortes.py``, e.g. a
-        non-individualized deck or a nonzero SAR coefficient), the mapper
-        (``fcf/mapper.py``, e.g. no ``HydroStorage`` slots in the target
-        manifest), or the writer (``fcf/writer.py``, e.g. a mapped
-        coefficient vector length mismatch).
+        ``convert_decomp_case``'s ``fcf_inputs_out``), or when the bootstrap
+        manifest's ``graph_stage_id`` disagrees with the boundary cut file's
+        own stage. Also propagated verbatim from the cut reader
+        (``fcf/cortes.py``, e.g. a non-individualized deck or a nonzero SAR
+        coefficient), the mapper (``fcf/mapper.py``, e.g. no ``HydroStorage``
+        slots in the target manifest), or the writer (``fcf/writer.py``, e.g.
+        a mapped coefficient vector length mismatch).
     """
     if case.files.cortesh is None or case.files.cortes is None:
         _LOG.info("boundary FCF skipped — no cut files")
@@ -749,6 +750,15 @@ def import_boundary_fcf(
     # terms onto. The former state_space.inflow_lag_depth override was redundant
     # with that sizing and is rejected by cobre >= 0.14.
     manifest = bootstrap_terminal_manifest(case_dir, work_dir=work_dir)
+    if manifest.graph_stage_id != boundary_stage:
+        raise ValueError(
+            f"the bootstrap's terminal graph_stage_id ({manifest.graph_stage_id}) "
+            f"does not match the boundary cut file's own stage "
+            f"({boundary_stage}); config.json's policy.boundary.source_stage is "
+            "set to the cut file's stage, and the checkpoint's graph_stage_id "
+            "must resolve to that same pool, or a run would load the wrong "
+            "boundary pool at that source_stage"
+        )
     gnl_plan = _build_gnl_ring_plan(case_dir, case.files)
     # Inflow-lag mean fold + recent-observation seed (built together, shipped
     # together — see `_boundary_inflow_context`). The coupling month is the cut
@@ -796,7 +806,12 @@ def import_boundary_fcf(
     _emit_import_diagnostics(cuts, mapping, gnl_plan)
 
     stage_cuts_payload = build_stage_cuts_payload(
-        mapping, manifest, stage_id=boundary_stage
+        mapping,
+        manifest,
+        stage_id=boundary_stage,
+        cost_scale_factor=cost_scale_factor,
+        node_id=manifest.node_id,
+        graph_stage_id=manifest.graph_stage_id,
     )
     completed_iterations = max((cut.iteration for cut in mapping.cuts), default=0)
     metadata = build_metadata(

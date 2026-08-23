@@ -8,8 +8,10 @@ write -> load round trip rather than a version-string check: a round trip also
 catches a broken, partial, or ABI-mismatched wheel that reports a satisfying
 version yet cannot actually read back what it wrote. It authors a minimal
 synthetic checkpoint via ``cobre.write_policy_checkpoint``, reloads it via
-``cobre.results.load_policy``, and asserts the reloaded terminal
-``entity_manifest`` slot carries the CBVF-format ``delivery_date`` key.
+``cobre.results.load_policy``, and asserts the reloaded terminal pool carries
+the self-describing ``cost_scale_factor``/``node_id``/``graph_stage_id``
+fields plus the CBVF-format ``delivery_date`` key on its ``entity_manifest``
+slot.
 
 Mirrors ``fcf/bootstrap.py``'s ``ensure_writer_binding`` convention of a
 lazy, function-body-only ``import cobre`` so this module stays importable
@@ -36,7 +38,13 @@ _PROBE_SLOT: dict[str, object] = {
     "subindex": 0,
     "was_active": True,
 }
-_PROBE_MANIFEST = TerminalManifest(entity_manifest=(_PROBE_SLOT,), state_dimension=1)
+_PROBE_STAGE_ID = 0
+_PROBE_MANIFEST = TerminalManifest(
+    entity_manifest=(_PROBE_SLOT,),
+    state_dimension=1,
+    node_id=0,
+    graph_stage_id=_PROBE_STAGE_ID,
+)
 _PROBE_MAPPING = MappingResult(
     cuts=(
         MappedCut(
@@ -50,7 +58,6 @@ _PROBE_MAPPING = MappingResult(
     ),
     dropped=(),
 )
-_PROBE_STAGE_ID = 0
 _PROBE_CREATED_AT = "1970-01-01T00:00:00Z"
 
 #: Remediation text raised on any probe failure. Kept as a module-level
@@ -86,9 +93,11 @@ def ensure_boundary_fcf_capability() -> None:
 
     Writes a minimal one-slot synthetic checkpoint into a
     :class:`tempfile.TemporaryDirectory`, reloads it via
-    ``cobre.results.load_policy``, and requires the reloaded terminal
-    ``entity_manifest`` slot to carry a ``delivery_date`` key — the schema
-    break the released ``0.13.0`` wheel lacks. Leaves no artifacts on disk.
+    ``cobre.results.load_policy``, and requires the reloaded terminal pool to
+    carry a non-``None`` ``cost_scale_factor`` and the ``node_id`` and
+    ``graph_stage_id`` keys, and the reloaded terminal ``entity_manifest``
+    slot to carry a ``delivery_date`` key — the schema break the released
+    ``0.13.0`` wheel lacks. Leaves no artifacts on disk.
 
     Raises
     ------
@@ -97,7 +106,8 @@ def ensure_boundary_fcf_capability() -> None:
         message (the cobre-python install/upgrade fix plus the ``--no-fcf``
         escape hatch, with no repo-internal paths) — on any failure: cobre
         absent, no writer binding, the write/load call itself raising, or a
-        reloaded slot lacking ``delivery_date``.
+        reloaded pool/slot lacking any of ``cost_scale_factor``, ``node_id``,
+        ``graph_stage_id``, or ``delivery_date``.
     """
     try:
         _probe_cbvf_roundtrip()
@@ -111,14 +121,20 @@ def _probe_cbvf_roundtrip() -> None:
     Raises
     ------
     RuntimeError
-        If the reloaded terminal ``entity_manifest`` slot lacks
-        ``delivery_date`` — caught and re-wrapped by
-        :func:`ensure_boundary_fcf_capability`.
+        If the reloaded terminal pool lacks a non-``None``
+        ``cost_scale_factor`` or the ``node_id``/``graph_stage_id`` keys, or
+        if its ``entity_manifest`` slot lacks ``delivery_date`` — caught and
+        re-wrapped by :func:`ensure_boundary_fcf_capability`.
     """
     import cobre
 
     payload = build_stage_cuts_payload(
-        _PROBE_MAPPING, _PROBE_MANIFEST, stage_id=_PROBE_STAGE_ID
+        _PROBE_MAPPING,
+        _PROBE_MANIFEST,
+        stage_id=_PROBE_STAGE_ID,
+        cost_scale_factor=1.0,
+        node_id=0,
+        graph_stage_id=_PROBE_STAGE_ID,
     )
     metadata = build_metadata(
         num_stages=1,
@@ -140,6 +156,15 @@ def _probe_cbvf_roundtrip() -> None:
             boundary_dir.parent, policy_subdir=boundary_dir.name
         )
         terminal = max(policy["stage_cuts"], key=lambda stage: stage["stage_id"])
+        if terminal.get("cost_scale_factor") is None:
+            raise RuntimeError(
+                "reloaded terminal pool lacks a non-None cost_scale_factor"
+            )
+        if "node_id" not in terminal:
+            raise RuntimeError("reloaded terminal pool lacks node_id")
+        if "graph_stage_id" not in terminal:
+            raise RuntimeError("reloaded terminal pool lacks graph_stage_id")
+
         entity_manifest = terminal["entity_manifest"]
         if not entity_manifest or "delivery_date" not in entity_manifest[0]:
             raise RuntimeError(

@@ -80,6 +80,8 @@ def test_bootstrap_does_not_mutate_input_case(
                 "stage_id": 0,
                 "state_dimension": 1,
                 "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+                "graph_stage_id": 0,
             },
         ],
     }
@@ -111,6 +113,8 @@ def test_bootstrap_passes_single_iteration_run_contract(
                 "stage_id": 0,
                 "state_dimension": 1,
                 "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+                "graph_stage_id": 0,
             },
         ],
     }
@@ -175,6 +179,102 @@ def test_bootstrap_raises_on_empty_terminal_entity_manifest(
     monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
 
     with pytest.raises(RuntimeError, match="empty terminal entity_manifest"):
+        bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+
+def test_bootstrap_returns_node_and_graph_stage_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+                "graph_stage_id": 4,
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    manifest = bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+    assert manifest.node_id == 0
+    assert manifest.graph_stage_id == 4
+
+
+def test_bootstrap_raises_on_missing_node_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "graph_stage_id": 4,
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    with pytest.raises(RuntimeError, match="node_id"):
+        bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+
+def test_bootstrap_raises_on_missing_graph_stage_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    with pytest.raises(RuntimeError, match="graph_stage_id"):
+        bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+
+def test_bootstrap_raises_on_node_id_shared_pool_sentinel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": -1,
+                "graph_stage_id": 4,
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    with pytest.raises(RuntimeError, match="shared-pool sentinel"):
         bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
 
 

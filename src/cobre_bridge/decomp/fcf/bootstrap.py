@@ -77,11 +77,16 @@ class TerminalManifest:
     least ``entity_type``, ``entity_id``, ``subindex``); ``state_dimension``
     is the terminal stage's own slot count, cross-checked against the
     checkpoint metadata's ``state_dimension`` in
-    :func:`bootstrap_terminal_manifest`.
+    :func:`bootstrap_terminal_manifest`. ``node_id`` and ``graph_stage_id``
+    are read back from that same terminal pool — the authoritative real
+    single-node/graph-stage identity the self-describing checkpoint payload
+    carries.
     """
 
     entity_manifest: tuple[dict[str, object], ...]
     state_dimension: int
+    node_id: int
+    graph_stage_id: int
 
 
 def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalManifest:
@@ -103,8 +108,8 @@ def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalMa
     the ``state_space`` config field.)
     It then reads the emitted checkpoint back via
     :func:`cobre.results.load_policy` and returns the terminal stage's (the
-    entry whose ``stage_id`` is max) ``entity_manifest`` and
-    ``state_dimension``.
+    entry whose ``stage_id`` is max) ``entity_manifest``, ``state_dimension``,
+    ``node_id``, and ``graph_stage_id``.
 
     Depends only on ``cobre.run.run`` and ``cobre.results.load_policy`` —
     neither needs the ``write_policy_checkpoint`` binding, so this function
@@ -116,9 +121,11 @@ def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalMa
     Raises
     ------
     RuntimeError
-        If the loaded checkpoint has no stage cuts or an empty terminal
-        ``entity_manifest``. A failure inside the run itself propagates as
-        ``cobre.run.run``'s own exception.
+        If the loaded checkpoint has no stage cuts, an empty terminal
+        ``entity_manifest``, a terminal pool missing ``node_id`` or
+        ``graph_stage_id``, or a terminal pool ``node_id`` that is the ``-1``
+        shared-pool sentinel (no real single node). A failure inside the run
+        itself propagates as ``cobre.run.run``'s own exception.
     """
     import cobre
 
@@ -152,7 +159,24 @@ def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalMa
             f"checkpoint at {output_dir} has an empty terminal entity_manifest"
         )
 
+    if "node_id" not in terminal:
+        raise RuntimeError(f"checkpoint at {output_dir} terminal pool has no node_id")
+    node_id = int(terminal["node_id"])
+    if node_id == -1:
+        raise RuntimeError(
+            f"checkpoint at {output_dir} terminal pool node_id is -1, the "
+            "shared-pool sentinel (no real single node)"
+        )
+
+    if "graph_stage_id" not in terminal:
+        raise RuntimeError(
+            f"checkpoint at {output_dir} terminal pool has no graph_stage_id"
+        )
+    graph_stage_id = int(terminal["graph_stage_id"])
+
     return TerminalManifest(
         entity_manifest=entity_manifest,
         state_dimension=terminal_state_dimension,
+        node_id=node_id,
+        graph_stage_id=graph_stage_id,
     )

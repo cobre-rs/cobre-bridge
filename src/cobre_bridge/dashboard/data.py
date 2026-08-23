@@ -960,6 +960,47 @@ def load_stochastic_data(case_dir: Path) -> StochasticData:
     )
 
 
+#: Every exception type an ``output/policy`` checkpoint read can fail with,
+#: mirroring ``decomp.fcf.capability``'s CBVF round-trip probe: cobre absent
+#: or missing the ``results`` binding, a malformed reloaded pool/dict, or any
+#: ``cobre.errors.CobreError`` leaf (each subclasses one of ``ValueError``/
+#: ``OSError``/``RuntimeError``). Never a bare ``except``.
+_POLICY_READ_FAILURE_TYPES: tuple[type[Exception], ...] = (
+    ModuleNotFoundError,
+    AttributeError,
+    KeyError,
+    TypeError,
+    ValueError,
+    OSError,
+    RuntimeError,
+)
+
+
+def _load_policy_metadata(case_dir: Path) -> dict:
+    """Load ``output/policy``'s terminal ``state_dimension`` via cobre.
+
+    Returns ``{}`` immediately when ``case_dir/output/policy`` does not
+    exist, without importing cobre. Otherwise imports cobre lazily (kept out
+    of module scope so this module stays importable in a cobre-free
+    environment), reads the checkpoint via ``cobre.results.load_policy``,
+    and selects the terminal pool (max ``stage_id``). Degrades to ``{}``
+    with one ``logger.warning`` on any failure in
+    :data:`_POLICY_READ_FAILURE_TYPES` — a training-only case with no (or an
+    unreadable) policy output must still render.
+    """
+    if not (case_dir / "output" / "policy").exists():
+        return {}
+    try:
+        import cobre
+
+        policy = cobre.results.load_policy(case_dir / "output", policy_subdir="policy")
+        terminal = max(policy["stage_cuts"], key=lambda stage: stage["stage_id"])
+        return {"state_dimension": int(terminal["state_dimension"])}
+    except _POLICY_READ_FAILURE_TYPES as exc:
+        logger.warning("output/policy metadata could not be loaded: %s", exc)
+        return {}
+
+
 @dataclasses.dataclass
 class OutputMetadata:
     """``metadata.json`` from each output subdirectory."""
@@ -970,7 +1011,13 @@ class OutputMetadata:
 
 
 def load_output_metadata(case_dir: Path) -> OutputMetadata:
-    """Load output/{training,simulation,policy}/metadata.json (empty if absent)."""
+    """Load output/{training,simulation,policy} metadata (empty if absent).
+
+    ``training``/``simulation`` still read the sibling ``metadata.json``
+    file; ``policy`` reads the self-describing ``manifest.bin`` checkpoint
+    instead (see :func:`_load_policy_metadata`) — that subdirectory carries
+    no ``metadata.json`` of its own.
+    """
 
     def _load_metadata(subdir: str) -> dict:
         meta_path = case_dir / "output" / subdir / "metadata.json"
@@ -986,7 +1033,7 @@ def load_output_metadata(case_dir: Path) -> OutputMetadata:
     return OutputMetadata(
         training=read_cobre_training_metadata(case_dir / "output"),
         simulation=_load_metadata("simulation"),
-        policy=_load_metadata("policy"),
+        policy=_load_policy_metadata(case_dir),
     )
 
 

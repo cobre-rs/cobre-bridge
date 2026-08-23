@@ -1376,20 +1376,6 @@ def test_load_training_metadata_present(_v2_case: Path) -> None:
     )
 
 
-def test_load_policy_metadata_present(_v2_case: Path) -> None:
-    """policy_metadata is populated from output/policy/metadata.json."""
-    from cobre_bridge.dashboard.data import DashboardData
-
-    _write_json(
-        _v2_case / "output" / "policy" / "metadata.json",
-        {"state_dimension": 1106},
-    )
-
-    data = DashboardData.load(_v2_case)
-
-    assert data.policy_metadata["state_dimension"] == 1106
-
-
 def test_load_stages_data_preserved(_v2_case: Path) -> None:
     """stages_data contains the raw stages list from stages.json."""
     from cobre_bridge.dashboard.data import DashboardData

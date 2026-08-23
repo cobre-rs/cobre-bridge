@@ -18,6 +18,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,7 +51,7 @@ from tests._fcf_fixtures import (
     make_mapped_cut,
     make_slot,
 )
-from tests.conftest import make_decomp_case
+from tests.conftest import make_decomp_case, make_decomp_files
 
 
 def _has_writer_binding() -> bool:
@@ -150,6 +151,152 @@ def test_import_boundary_fcf_no_cut_files_is_noop(
     assert result is None
     assert not (case_dir / "boundary").exists()
     assert "boundary FCF skipped" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ticket-003: thread node_id/graph_stage_id from the bootstrap manifest into
+# `build_stage_cuts_payload`, and the R3 graph_stage_id/boundary_stage
+# mismatch escalation. Every cut-reader/cobre-import seam is monkeypatched
+# (mirrors `test_decomp_fcf_injection.py`'s seam-stubbing convention, kept
+# local per the one-home-per-source-module test convention) — no real deck,
+# cobre binary, or installed cobre wheel needed.
+# ---------------------------------------------------------------------------
+
+
+def _stub_import_seams(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_cuts: BoundaryCuts
+) -> DecompCase:
+    """Monkeypatch the deck/cut-reader/cobre-import seams shared by the
+    node_id/graph_stage_id threading tests below, returning the
+    ``DecompCase`` the importer reads instead of re-parsing a deck."""
+    monkeypatch.setitem(sys.modules, "cobre", SimpleNamespace(__version__="0.13.0"))
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.Cortesh",
+        SimpleNamespace(read=lambda _path: object()),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.read_cortes",
+        lambda *_args, **_kwargs: fake_cuts,
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.ensure_writer_binding", lambda: None
+    )
+
+    files = make_decomp_files(
+        tmp_path,
+        cortesh=tmp_path / "deck" / "cortesh.dat",
+        cortes=tmp_path / "deck" / "cortes-010.dat",
+    )
+    return make_decomp_case(
+        files,
+        dadger=object(),
+        id_map=make_id_map(()),
+        hidr=object(),
+        calendar=[],
+    )
+
+
+def test_import_boundary_fcf_threads_node_and_graph_stage_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 1 — given a bootstrap manifest with node_id=0/graph_stage_id=4 and
+    a cuts file whose boundary_stage=4, `build_stage_cuts_payload` is called
+    with `cost_scale_factor=1.0`, `node_id=0`, `graph_stage_id=4`."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+
+    fake_cuts = make_boundary_cuts(
+        plant_codes=(1,),
+        records=(make_cut_record(pi_varm=(1.5,), rhs=10.0, forward_pass_index=0),),
+        boundary_stage=4,
+    )
+    case = _stub_import_seams(monkeypatch, tmp_path, fake_cuts)
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer._final_stage_block_hours",
+        lambda _case_dir: [648.0],
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.bootstrap_terminal_manifest",
+        lambda *_args, **_kwargs: make_manifest(
+            [make_slot(0, 0, 0)], node_id=0, graph_stage_id=4
+        ),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.map_boundary_cuts",
+        lambda *_args, **_kwargs: MappingResult(
+            cuts=(make_mapped_cut(coefficients=(1.5,)),), dropped=()
+        ),
+    )
+    calls: list[dict[str, object]] = []
+
+    def _spy_build_stage_cuts_payload(
+        *_args: object, **kwargs: object
+    ) -> dict[str, object]:
+        calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.build_stage_cuts_payload",
+        _spy_build_stage_cuts_payload,
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.write_boundary_checkpoint",
+        lambda *_args, **_kwargs: None,
+    )
+
+    import_boundary_fcf(
+        case_dir,
+        case,
+        work_dir=tmp_path / "work",
+        cost_scale_factor=1.0,
+        config={},
+        initial_conditions={},
+    )
+
+    assert len(calls) == 1
+    assert calls[0] == {
+        "stage_id": 4,
+        "cost_scale_factor": 1.0,
+        "node_id": 0,
+        "graph_stage_id": 4,
+    }
+
+
+def test_import_boundary_fcf_graph_stage_id_mismatch_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 2 (the R3 escalation) — a bootstrap manifest whose graph_stage_id
+    disagrees with the cut file's own boundary_stage is a real
+    inconsistency, never resolved by preferring one value: `import_
+    boundary_fcf` raises `ValueError` naming both."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+
+    fake_cuts = make_boundary_cuts(
+        plant_codes=(1,),
+        records=(make_cut_record(pi_varm=(1.5,), rhs=10.0, forward_pass_index=0),),
+        boundary_stage=4,
+    )
+    case = _stub_import_seams(monkeypatch, tmp_path, fake_cuts)
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.bootstrap_terminal_manifest",
+        lambda *_args, **_kwargs: make_manifest(
+            [make_slot(0, 0, 0)], node_id=0, graph_stage_id=3
+        ),
+    )
+
+    with pytest.raises(ValueError, match="graph_stage_id") as exc_info:
+        import_boundary_fcf(
+            case_dir,
+            case,
+            work_dir=tmp_path / "work",
+            cost_scale_factor=1.0,
+            config={},
+            initial_conditions={},
+        )
+
+    assert "3" in str(exc_info.value)
+    assert "4" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -1015,7 +1162,7 @@ def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
         f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
     )
 
-    assert (dst / "boundary" / "metadata.json").is_file()
+    assert (dst / "boundary" / "manifest.bin").is_file()
     config = json.loads((dst / "config.json").read_text(encoding="utf-8"))
     assert config["policy"]["boundary"] == {"path": "boundary", "source_stage": 4}
 

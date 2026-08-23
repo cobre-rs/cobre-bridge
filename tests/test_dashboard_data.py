@@ -7,9 +7,13 @@ surfacing through the ``dashboard`` CLI command's diagnostics sink.
 
 from __future__ import annotations
 
+import builtins
 import dataclasses
 import json
+import logging
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pyarrow as pa
@@ -18,8 +22,16 @@ import pytest
 from typer.testing import CliRunner
 
 from cobre_bridge import diagnostics as dx
-from cobre_bridge.dashboard.data import DashboardData, load_temporal_context
-from tests.conftest import hydro_with_group
+from cobre_bridge.dashboard.data import (
+    DashboardData,
+    _load_policy_metadata,
+    load_temporal_context,
+)
+from tests.conftest import (
+    hydro_with_group,
+    requires_cobre_python,
+    requires_writer_binding,
+)
 
 _DIAG_CODE = "dashboard-unweighted-tree-averages"
 
@@ -729,3 +741,171 @@ class TestLoadStochasticDataPartialDirectory:
 
         assert isinstance(html, str)
         assert html
+
+
+# ---------------------------------------------------------------------------
+# _load_policy_metadata: repoints the policy read onto the self-describing
+# manifest.bin checkpoint instead of the (now-gone) output/policy/metadata.json.
+# ---------------------------------------------------------------------------
+
+
+class TestLoadPolicyMetadataAbsent:
+    """AC: an absent ``output/policy`` degrades to ``{}`` with no cobre import."""
+
+    def test_absent_policy_dir_returns_empty_without_importing_cobre(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        case_dir = tmp_path / "case"
+        (case_dir / "output").mkdir(parents=True)
+
+        real_import = builtins.__import__
+
+        def _guarded_import(name: str, *args: object, **kwargs: object) -> object:
+            if name == "cobre":
+                raise AssertionError(
+                    "cobre must not be imported when output/policy is absent"
+                )
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(builtins, "__import__", _guarded_import)
+
+        assert _load_policy_metadata(case_dir) == {}
+
+
+class TestLoadPolicyMetadataFailureDegrades:
+    """AC: a failing ``cobre.results.load_policy`` degrades to ``{}`` + one warning.
+
+    Stubs ``sys.modules['cobre']`` (the ``fcf/bootstrap.py`` test convention)
+    so this exercises the failure path without a real cobre install or a
+    real checkpoint on disk.
+    """
+
+    def test_load_policy_raising_degrades_and_warns(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        case_dir = tmp_path / "case"
+        (case_dir / "output" / "policy").mkdir(parents=True)
+
+        def _raise_load_policy(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("checkpoint format not recognized")
+
+        stub_cobre = SimpleNamespace(
+            results=SimpleNamespace(load_policy=_raise_load_policy)
+        )
+        monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
+
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge.dashboard.data"):
+            result = _load_policy_metadata(case_dir)
+
+        assert result == {}
+        assert any("output/policy" in record.message for record in caplog.records)
+
+    def test_malformed_pool_state_dimension_degrades_and_warns(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A reloaded pool whose ``state_dimension`` is not int-able degrades to
+        ``{}`` rather than crashing: ``int(None)`` raises ``TypeError``, which is
+        in :data:`_POLICY_READ_FAILURE_TYPES`.
+        """
+        case_dir = tmp_path / "case"
+        (case_dir / "output" / "policy").mkdir(parents=True)
+
+        def _load_malformed(*_args: object, **_kwargs: object) -> dict:
+            return {"stage_cuts": [{"stage_id": 0, "state_dimension": None}]}
+
+        stub_cobre = SimpleNamespace(
+            results=SimpleNamespace(load_policy=_load_malformed)
+        )
+        monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
+
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge.dashboard.data"):
+            result = _load_policy_metadata(case_dir)
+
+        assert result == {}
+        assert any("output/policy" in record.message for record in caplog.records)
+
+
+@requires_cobre_python
+@requires_writer_binding
+class TestLoadPolicyMetadataHappyPath:
+    """AC: a real ``write_policy_checkpoint`` output yields the terminal
+    ``state_dimension``.
+
+    Mirrors ``decomp.fcf.capability``'s synthetic-checkpoint construction: a
+    minimal one-cut, one-pool checkpoint with ``state_dimension=7`` (a
+    slot count deliberately unlike the neighbouring fixtures' ``1``, so a
+    test that accidentally reads a wrong/default value fails loudly).
+    """
+
+    def test_state_dimension_extracted_from_real_checkpoint(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
+        from cobre_bridge.decomp.fcf.mapper import MappedCut, MappingResult
+        from cobre_bridge.decomp.fcf.writer import (
+            build_metadata,
+            build_stage_cuts_payload,
+            write_boundary_checkpoint,
+        )
+
+        state_dimension = 7
+        manifest = TerminalManifest(
+            entity_manifest=tuple(
+                {
+                    "entity_type": 0,
+                    "entity_id": slot,
+                    "subindex": 0,
+                    "was_active": True,
+                }
+                for slot in range(state_dimension)
+            ),
+            state_dimension=state_dimension,
+            node_id=0,
+            graph_stage_id=0,
+        )
+        mapping = MappingResult(
+            cuts=(
+                MappedCut(
+                    intercept=0.0,
+                    coefficients=tuple(0.0 for _ in range(state_dimension)),
+                    cut_id=0,
+                    iteration=0,
+                    forward_pass_index=0,
+                    is_active=True,
+                ),
+            ),
+            dropped=(),
+        )
+        payload = build_stage_cuts_payload(
+            mapping,
+            manifest,
+            stage_id=0,
+            cost_scale_factor=1.0,
+            node_id=0,
+            graph_stage_id=0,
+        )
+        metadata = build_metadata(
+            num_stages=1,
+            cost_scale_factor=1.0,
+            completed_iterations=0,
+            final_lower_bound=0.0,
+            max_iterations=0,
+            forward_passes=0,
+            warm_start_cuts=0,
+            rng_seed=0,
+            created_at="1970-01-01T00:00:00Z",
+            cobre_version="0.0.0",
+        )
+
+        case_dir = tmp_path / "case"
+        write_boundary_checkpoint(case_dir / "output" / "policy", payload, metadata)
+
+        result = _load_policy_metadata(case_dir)
+
+        assert result == {"state_dimension": state_dimension}
