@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from cobre_bridge.id_map import NewaveIdMap
@@ -16,6 +17,7 @@ from tests.conftest import (
     _make_ne_exph_mock,
     _ne_filling_id_map,
     make_case,
+    make_nw_files,
 )
 
 # ---------------------------------------------------------------------------
@@ -378,3 +380,59 @@ class TestAnticipatedCommitmentSeeding:
         assert _delivery_window(2024, 11, 2) == ("2025-01-01", "2025-02-01")
         # A multi-year lead stays aligned.
         assert _delivery_window(2024, 11, 14) == ("2026-01-01", "2026-02-01")
+
+
+class TestReadAnticipatedDispatchHorizonTruncation:
+    """``read_anticipated_dispatch`` has no post-horizon surface.
+
+    Evidence for the twin-track decision recorded in
+    ``decomp/anticipated.py``: adterm.dat commits dispatch only through the
+    study horizon, so a lag beyond it is truncated and warned, never carried
+    past the horizon as a post-study surface (unlike the DECOMP GNL model's
+    já-comandada/signaled post-horizon windows).
+    """
+
+    def test_lag_beyond_horizon_truncated_and_warned(self, tmp_path, caplog) -> None:
+        from cobre_bridge.converters.anticipated import read_anticipated_dispatch
+
+        adterm_path = tmp_path / "adterm.dat"
+        adterm_path.touch()
+        files = make_nw_files(tmp_path, adterm=adterm_path)
+
+        mock_dger = MagicMock()
+        mock_dger.despacho_antecipado_gnl = 1
+        mock_dger.ano_inicio_estudo = 2024
+        mock_dger.mes_inicio_estudo = 1
+        mock_dger.num_anos_estudo = 1
+        mock_dger.num_anos_pos_estudo = 0  # 12-stage horizon, no post-study tail
+
+        mock_patamar = MagicMock()
+        mock_patamar.numero_patamares = 1
+        mock_patamar.duracao_mensal_patamares = None
+
+        mock_adterm = MagicMock()
+        mock_adterm.despachos = pd.DataFrame(
+            {
+                "codigo_usina": [86, 86],
+                "lag": [1, 15],
+                "patamar": [1, 1],
+                "valor": [50.0, 999.0],
+            }
+        )
+
+        case = make_case(
+            files, dger=mock_dger, patamar=mock_patamar, adterm=mock_adterm
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="cobre_bridge.converters.anticipated"
+        ):
+            result = read_anticipated_dispatch(case)
+
+        # lag=15 exceeds the 12-stage horizon -> truncated to it; the source
+        # model surfaces nothing beyond the study horizon.
+        assert result[86].lead_stages == 12
+        assert len(result[86].values_mw) == 12
+        assert result[86].values_mw[0] == pytest.approx(50.0)
+        assert "lag=15" in caplog.text
+        assert "truncating to 12" in caplog.text

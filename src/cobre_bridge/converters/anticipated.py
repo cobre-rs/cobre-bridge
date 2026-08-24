@@ -162,7 +162,11 @@ def read_anticipated_dispatch(
     docstring).  Plants whose maximum lag exceeds the study horizon are
     truncated to the horizon length and a warning is emitted — Cobre's
     semantic validator otherwise rejects ``entry_stage_id +
-    lead_stages > n_stages``.
+    lead_stages > n_stages``. This in-study-only ceiling matches the source
+    model's own data availability; the sibling conversion track's
+    post-horizon anticipated-delivery surface
+    (:mod:`cobre_bridge.decomp.anticipated`) has no analog here — a
+    registered asymmetry, not an unported feature.
     """
     dger = case.dger
     if not is_anticipated_dispatch_enabled(dger):

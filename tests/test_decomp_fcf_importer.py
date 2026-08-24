@@ -1055,7 +1055,7 @@ def test_import_boundary_fcf_mar26rv2_run_loads_boundary(
     horizon) makes every delivery's decider land in-study, so a fresh
     ``cobre run <dst> --output <dst>`` (the C8 recipe, 1-iteration) loads the
     boundary cleanly: no LP-builder panic, no "no resolved delivery interval",
-    no K=0 warning, no dropped ``future_anticipated_deliveries``.
+    no K=0 warning, no dropped post-horizon delivery.
 
     Everything asserted here is printed at setup / boundary-load, which is fast;
     the subsequent SDDP iteration over the terminal leaf is expensive, so the

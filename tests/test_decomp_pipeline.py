@@ -852,10 +852,10 @@ def _run_cadastro_pipeline(
 # ticket-004 (epic-03): two hand-built ``GnlEmission`` fixtures driving
 # ``TestGnlWiring`` below via ``_run_cadastro_pipeline``'s ``gnl_emission``
 # param — no real ``dadgnl`` deck, no ``convert_gnl`` execution (it is
-# mocked). "Populated" carries a non-empty right boundary (a pinned,
-# post-horizon delivery); "empty-right-boundary" mirrors a GS-calendar-only
-# plant (e.g. PSERGIPE I) that declares free deliveries in-study but commits
-# none post-horizon.
+# mocked). "Populated" carries a non-empty post-study ``thermal_bounds``
+# carrier; "empty" mirrors a GS-calendar-only plant (e.g. PSERGIPE I) whose
+# post-study stages are all class-4 já-comandada, so none get a
+# ``thermal_bounds`` row.
 _POPULATED_GNL_EMISSION = GnlEmission(
     thermals=[
         {"id": 1, "name": "GNL A", "anticipated_config": {"lead_time_hours": 168.0}},
@@ -865,22 +865,17 @@ _POPULATED_GNL_EMISSION = GnlEmission(
         {"thermal_id": 1, "stage_id": 0, "mw": 50.0},
         {"thermal_id": 2, "stage_id": 0, "mw": 30.0},
     ],
-    future_anticipated_deliveries=[
-        {"thermal_id": 1, "stage_id": 12, "min_mw": 50.0, "max_mw": 50.0},
-        {"thermal_id": 2, "stage_id": 12, "min_mw": 0.0, "max_mw": 100.0},
-    ],
     post_study_stages={
         "stages": [{"id": 12, "start_date": "2027-07-06"}],
         "thermal_bounds": [{"thermal_id": 1, "stage_id": 12, "max_mw": 50.0}],
     },
 )
 
-_EMPTY_RIGHT_BOUNDARY_GNL_EMISSION = GnlEmission(
+_EMPTY_THERMAL_BOUNDS_GNL_EMISSION = GnlEmission(
     thermals=[
         {"id": 1, "name": "GNL A", "anticipated_config": {"lead_time_hours": 168.0}},
     ],
     past_anticipated_commitments=[{"thermal_id": 1, "stage_id": 0, "mw": 20.0}],
-    future_anticipated_deliveries=[],
     post_study_stages={
         "stages": [{"id": 12, "start_date": "2027-07-06"}],
         "thermal_bounds": [],
@@ -921,12 +916,14 @@ class TestGnlWiring:
         written_stages = json.loads((dst / "stages.json").read_text())["stages"]
         assert call_kwargs["stages"] == written_stages
 
-    def test_populated_emission_routes_thermals_and_both_boundaries(
+    def test_populated_emission_routes_thermals_and_past_boundary(
         self, tmp_path: Path
     ) -> None:
         """Every created GNL thermal id lands in ``thermals.json``, sorted
-        ascending; both boundaries land in ``initial_conditions.json``
-        verbatim."""
+        ascending; the past boundary lands in ``initial_conditions.json``
+        verbatim, with no ``future_anticipated_deliveries`` key (retired);
+        the post-study ``thermal_bounds`` carrier is still written and
+        non-empty."""
         dst = _run_cadastro_pipeline(
             tmp_path, ac_volmax_frame=None, gnl_emission=_POPULATED_GNL_EMISSION
         )
@@ -945,50 +942,54 @@ class TestGnlWiring:
             initial_conditions["past_anticipated_commitments"]
             == _POPULATED_GNL_EMISSION.past_anticipated_commitments
         )
-        assert (
-            initial_conditions["future_anticipated_deliveries"]
-            == _POPULATED_GNL_EMISSION.future_anticipated_deliveries
-        )
+        assert "future_anticipated_deliveries" not in initial_conditions
 
-    def test_empty_right_boundary_writes_post_study_stages_and_omits_key(
+        post_study = json.loads((dst / "post_study_stages.json").read_text())
+        assert post_study["thermal_bounds"]
+
+    def test_empty_thermal_bounds_still_writes_post_study_stages(
         self, tmp_path: Path
     ) -> None:
-        """A GS-calendar-only plant (empty ``future_anticipated_deliveries``,
-        empty ``post_study_stages["thermal_bounds"]``) still gets
-        ``post_study_stages.json`` (non-``None`` calendar), but
+        """A GS-calendar-only plant whose post-study stages are all class-4
+        (empty ``post_study_stages["thermal_bounds"]``) still gets
+        ``post_study_stages.json`` (non-``None`` calendar);
         ``initial_conditions.json`` carries no
-        ``future_anticipated_deliveries`` key at all (the block only sets it
-        when truthy)."""
+        ``future_anticipated_deliveries`` key (retired)."""
         dst = _run_cadastro_pipeline(
             tmp_path,
             ac_volmax_frame=None,
-            gnl_emission=_EMPTY_RIGHT_BOUNDARY_GNL_EMISSION,
+            gnl_emission=_EMPTY_THERMAL_BOUNDS_GNL_EMISSION,
         )
 
         post_study = json.loads((dst / "post_study_stages.json").read_text())
         assert post_study["thermal_bounds"] == []
-        expected_post_study = _EMPTY_RIGHT_BOUNDARY_GNL_EMISSION.post_study_stages
+        expected_post_study = _EMPTY_THERMAL_BOUNDS_GNL_EMISSION.post_study_stages
         assert expected_post_study is not None
         assert post_study["stages"] == expected_post_study["stages"]
 
         initial_conditions = json.loads((dst / "initial_conditions.json").read_text())
         assert "future_anticipated_deliveries" not in initial_conditions
 
-    def test_summary_log_names_future_anticipated_not_post_horizon(
+    def test_summary_log_names_only_thermal_count(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The summary log's future-delivery count is worded "future
-        anticipated deliver(y/ies)" (it counts free + pinned deliveries),
-        never the old "post-horizon deliver(y/ies)"."""
+        """The summary log names only the emitted GNL thermal count -- no
+        "future anticipated deliver(y/ies)" clause (the retired free lane)
+        and no "post-horizon deliver(y/ies)" wording (an older phrasing)."""
         with caplog.at_level(logging.INFO, logger="cobre_bridge.decomp.pipeline"):
             _run_cadastro_pipeline(
                 tmp_path, ac_volmax_frame=None, gnl_emission=_POPULATED_GNL_EMISSION
             )
 
-        future_matches = [
-            r for r in caplog.records if "future anticipated deliver" in r.message
+        thermal_matches = [
+            r
+            for r in caplog.records
+            if "emitted 2 GNL anticipated thermal(s) from dadgnl" in r.message
         ]
-        assert len(future_matches) == 1
+        assert len(thermal_matches) == 1
+        assert not any(
+            "future anticipated deliver" in r.message for r in caplog.records
+        )
         assert not any("post-horizon deliver" in r.message for r in caplog.records)
 
 

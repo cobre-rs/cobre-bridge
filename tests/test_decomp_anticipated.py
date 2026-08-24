@@ -9,21 +9,29 @@ DataFrames (their fixed shapes make ``df=True`` well-formed).
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
+from collections.abc import Mapping
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
+from cobre_bridge.decomp import anticipated
 from cobre_bridge.decomp.anticipated import (
+    GnlClassification,
     GnlCommitment,
     GnlCommitmentModel,
+    GnlEmission,
+    GnlPlantClassification,
     GnlStageCommitment,
     GnlThermal,
     _build_post_study_calendar,
-    _calendar_stage_span,
-    _cobre_safe_lead_hours,
+    _month_end_duration_hours,
     _study_lead_hours,
+    classify_gnl_windows,
     convert_gnl,
     is_gnl_enabled,
     read_gnl_model,
@@ -232,7 +240,67 @@ def test_nl_lags_empty_when_block_absent() -> None:
 
 
 # --------------------------------------------------------------------------
-# Study lead H + mirror-shift post-study calendar
+# classify_gnl_windows: já-comandada (class-4) vs signaled (class-3)
+# --------------------------------------------------------------------------
+
+
+def _stage_model(
+    code: int, stages: tuple[GnlStageCommitment, ...]
+) -> GnlCommitmentModel:
+    return GnlCommitmentModel(
+        thermals=(),
+        commitments={code: GnlCommitment(code, stages)},
+        weeks_per_month={},
+        nl_lag_months={},
+    )
+
+
+def test_classify_gnl_windows_happy_path() -> None:
+    # Reference-shaped: SANTA CRUZ's two post-horizon já-comandada weeks
+    # (168 h each), horizon ending mid-week (2026-05-01, a Friday).
+    stages = (
+        GnlStageCommitment(8, date(2026, 5, 2), 0.0, 168.0),
+        GnlStageCommitment(9, date(2026, 5, 9), 500.0, 168.0),
+    )
+    result = classify_gnl_windows(
+        _stage_model(86, stages), horizon_end=date(2026, 5, 1)
+    )
+
+    santa = result.plants[86]
+    assert santa.class4_windows == (
+        (date(2026, 5, 1), date(2026, 5, 2), 0.0),
+        (date(2026, 5, 2), date(2026, 5, 9), 0.0),
+        (date(2026, 5, 9), date(2026, 5, 16), 500.0),
+    )
+    assert santa.class4_end == date(2026, 5, 16)
+    assert isinstance(result, GnlClassification)
+
+
+def test_classify_gnl_windows_no_post_horizon_weeks_is_free() -> None:
+    stages = (GnlStageCommitment(1, date(2026, 3, 14), 0.0, 168.0),)
+    result = classify_gnl_windows(
+        _stage_model(86, stages), horizon_end=date(2026, 5, 1)
+    )
+
+    santa = result.plants[86]
+    assert santa.class4_windows == ()
+    assert santa.class4_end == date(2026, 5, 1)
+
+
+def test_classify_gnl_windows_ragged_run_raises_ambiguous() -> None:
+    # 05-02 then 05-16 skips 05-09: not one operative week apart.
+    stages = (
+        GnlStageCommitment(8, date(2026, 5, 2), 0.0, 0.0),
+        GnlStageCommitment(10, date(2026, 5, 16), 500.0, 0.0),
+    )
+    with pytest.raises(ValueError, match="ambiguous"):
+        classify_gnl_windows(_stage_model(86, stages), horizon_end=date(2026, 5, 1))
+
+
+# --------------------------------------------------------------------------
+# Study lead H (the class-2 tile-sizing lead, unrelated to the per-plant
+# emitted anticipated_config lead) + the grid-anchored post-study calendar
+# (independent of H)
 # --------------------------------------------------------------------------
 
 # decomp-mar-26-rv2's operative study calendar: 3 weekly March stages (168 h
@@ -244,14 +312,6 @@ _STUDY_SPANS = [
     (date(2026, 3, 28), date(2026, 4, 4)),
     (date(2026, 4, 4), date(2026, 5, 1)),
 ]
-# Ideal mirror lead H = (GS over the study's 2 months) x 168 = (3 + 4) x 168 =
-# 1176 h (49 days) — the faithful full-week calendar (used post-cobre-fix).
-_LEAD_H = 1176.0
-# Cobre-safe emitted lead: the ideal is >= the 1152 h horizon, so it is capped to
-# the largest operative-week multiple strictly below it = 6 x 168 = 1008 h
-# (TRACKED COBRE-GAP WORKAROUND C13). This is what convert_gnl actually emits.
-_CAPPED_H = 1008.0
-_HORIZON_H = 1152.0
 
 
 def test_study_lead_hours_sums_study_months() -> None:
@@ -261,80 +321,88 @@ def test_study_lead_hours_sums_study_months() -> None:
     assert _study_lead_hours(_STUDY_SPANS, {}) == 0.0
 
 
-def test_cobre_safe_lead_hours_caps_at_horizon(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # TRACKED COBRE-GAP WORKAROUND C13 (dev-facing only): an ideal lead >= the
-    # horizon is capped to the largest operative-week multiple strictly below it
-    # (1176 -> 1008), with a neutral INFO note (no cobre-limitation exposed); a
-    # lead already below the horizon passes through untouched.
-    with caplog.at_level(logging.INFO, logger="cobre_bridge.decomp.anticipated"):
-        assert _cobre_safe_lead_hours(_LEAD_H, _HORIZON_H) == _CAPPED_H
-    assert any("operative weeks" in r.message for r in caplog.records)
-    # The neutral note must not leak the cobre limitation into user-facing logs.
-    assert not any(
-        "k_max" in r.message
-        or "panic" in r.message
-        or "workaround" in r.message.lower()
-        for r in caplog.records
-    )
-    assert _cobre_safe_lead_hours(1008.0, _HORIZON_H) == 1008.0
-    assert _cobre_safe_lead_hours(0.0, _HORIZON_H) == 0.0
+def test_month_end_duration_hours_uses_month_last_day_not_next_month_start() -> None:
+    # 2026-06 has 30 days: 30 - 6 = 24 d = 576 h, not the 25 d/600 h a
+    # next-month-start boundary would give.
+    assert _month_end_duration_hours(date(2026, 6, 6)) == 576.0
+    # 2026 is not a leap year: February has 28 days.
+    assert _month_end_duration_hours(date(2026, 2, 1)) == 648.0
 
 
-def test_build_post_study_calendar_mirror_shift() -> None:
-    # The post-study calendar is the study stages shifted forward by H = 1176 h:
-    # post-study stage m ends at study_stage_end[m] + 49 days.
-    stages = _build_post_study_calendar(_STUDY_SPANS, _LEAD_H)
+def test_build_post_study_calendar_matches_cobre_e2e_oracle() -> None:
+    # class4_end = 2026-05-16 (both plants' shared já-comandada cutoff): a
+    # 24 h stub + 2 operative weeks fill class-4 up to it, then one
+    # class-3 stage per study stage (3 weekly mirrors + the trailing
+    # monthly mirror, spanning to the end of ITS OWN calendar month, June)
+    # -- the exact 7-stage shape cobre's own post-study e2e fixture pins.
+    stages = _build_post_study_calendar(_STUDY_SPANS, date(2026, 5, 16))
 
-    assert [s["start_date"] for s in stages] == [
-        "2026-05-01",  # study horizon end (Friday); stub-absorbing first stage
-        "2026-05-09",  # 03-21 + 49 d (Saturday)
-        "2026-05-16",  # 03-28 + 49 d (Saturday)
-        "2026-05-23",  # 04-04 + 49 d (Saturday)
+    assert [(s["start_date"], s["duration_hours"]) for s in stages] == [
+        ("2026-05-01", 24.0),
+        ("2026-05-02", 168.0),
+        ("2026-05-09", 168.0),
+        ("2026-05-16", 168.0),
+        ("2026-05-23", 168.0),
+        ("2026-05-30", 168.0),
+        ("2026-06-06", 576.0),
     ]
-    assert [s["duration_hours"] for s in stages] == [192.0, 168.0, 168.0, 648.0]
-    # The trailing monthly stage mirrors the study monthly stage: 05-01 + 49 d.
-    last = stages[-1]
-    last_end = date.fromisoformat(last["start_date"]) + timedelta(
-        hours=last["duration_hours"]
-    )
-    assert last_end == date(2026, 6, 19)
-    # One post-study stage per study stage.
-    assert len(stages) == len(_STUDY_SPANS)
+    # One class-3 mirror stage per study stage, plus the class-4 fill.
+    assert len(stages) == 3 + len(_STUDY_SPANS)
 
 
 def test_build_post_study_calendar_is_contiguous() -> None:
-    stages = _build_post_study_calendar(_STUDY_SPANS, _LEAD_H)
+    stages = _build_post_study_calendar(_STUDY_SPANS, date(2026, 5, 16))
 
     assert stages[0]["start_date"] == "2026-05-01"  # the study horizon end
     for cur, nxt in zip(stages, stages[1:]):
         start = date.fromisoformat(cur["start_date"])
         end = start + timedelta(hours=cur["duration_hours"])
         assert end == date.fromisoformat(nxt["start_date"])
-    # Every stage after the stub-absorbing first starts on a Saturday — inherited
-    # from the (Saturday-aligned) study weekly-stage ends + a week-multiple shift.
+    # Every stage after the grid-alignment stub starts on a Saturday --
+    # both the class-4 fill and the class-3 mirror tile in exact 168 h
+    # steps from a Saturday-aligned point.
     for stage in stages[1:]:
         assert date.fromisoformat(stage["start_date"]).weekday() == 5
 
 
-def test_build_post_study_calendar_no_stub_for_all_weekly_study() -> None:
-    # An all-weekly study (last stage a full 168 h week ending Saturday) shifted by
-    # a whole number of weeks -> the mirror's first stage is a clean 168 h week
-    # (no stub). The monthly last stage is what offsets the real deck onto a stub.
+def test_build_post_study_calendar_no_stub_when_horizon_end_already_saturday() -> None:
+    # An all-weekly study whose last stage ends on a Saturday is already on
+    # the grid -- the class-4 fill's one já-comandada week needs no stub,
+    # and the class-3 mirror that follows starts exactly on the grid too.
     spans = [
         (date(2026, 3, 14), date(2026, 3, 21)),
         (date(2026, 3, 21), date(2026, 3, 28)),
     ]
     assert spans[-1][1].weekday() == 5  # 2026-03-28 is a Saturday
-    stages = _build_post_study_calendar(spans, 336.0)  # shift by 2 whole weeks
+    stages = _build_post_study_calendar(spans, date(2026, 4, 4))
 
-    assert stages[0]["start_date"] == "2026-03-28"  # study horizon end (Saturday)
-    assert [s["duration_hours"] for s in stages] == [168.0, 168.0]
+    assert [(s["start_date"], s["duration_hours"]) for s in stages] == [
+        ("2026-03-28", 168.0),  # class-4 fill: one já-comandada week
+        ("2026-04-04", 168.0),  # class-3 mirror starts at class4_end
+        ("2026-04-11", 168.0),
+    ]
 
 
-def test_build_post_study_calendar_empty_gs_returns_empty() -> None:
-    assert _build_post_study_calendar(_STUDY_SPANS, 0.0) == []
+def test_build_post_study_calendar_no_class4_fill_when_class4_end_is_horizon_end() -> (
+    None
+):
+    # No já-comandada run at all (class4_end == horizon_end): the class-4
+    # fill is empty and the class-3 mirror starts immediately at
+    # horizon_end, even though 2026-05-01 (Friday) is off the Saturday grid
+    # -- there is nothing left to align to.
+    stages = _build_post_study_calendar(_STUDY_SPANS, date(2026, 5, 1))
+
+    assert [(s["start_date"], s["duration_hours"]) for s in stages] == [
+        ("2026-05-01", 168.0),
+        ("2026-05-08", 168.0),
+        ("2026-05-15", 168.0),
+        ("2026-05-22", 216.0),  # May has 31 days: 31 - 22 = 9 d = 216 h
+    ]
+    assert len(stages) == len(_STUDY_SPANS)
+
+
+def test_build_post_study_calendar_empty_when_no_stage_spans() -> None:
+    assert _build_post_study_calendar([], date(2026, 5, 16)) == []
 
 
 # --------------------------------------------------------------------------
@@ -368,14 +436,165 @@ _BUS_OF = {1: 0, 3: 2}.get
 
 
 def _emit_model() -> GnlCommitmentModel:
-    """SANTA CRUZ (86): a prior-revision 500 MW post-horizon commitment
-    (2026-05-09) that the mirror-shift emission does NOT re-emit (accepted loss),
-    plus PSERGIPE I (224): registry-only, no committed delivery. Both share the
-    2-month anticipation lag and both get one free forward decision per study
-    stage synthesised onto the mirror calendar."""
+    """SANTA CRUZ (86) and PSERGIPE I (224) each declare a post-horizon
+    já-comandada run (class-4): SANTA CRUZ's is a 0 MW stub then 500 MW;
+    PSERGIPE's is all-zero. Both share the 2-month anticipation lag and both
+    get a ``thermal_bounds`` row for every mirror-calendar stage."""
     santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
     pserg = GnlThermal(224, "PSERGIPE I", 3, 321.26, 0.0, 1593.0)
     return GnlCommitmentModel(
+        thermals=(santa, pserg),
+        commitments={
+            86: GnlCommitment(
+                86,
+                (
+                    GnlStageCommitment(1, date(2026, 3, 14), 0.0, 168.0),
+                    GnlStageCommitment(8, date(2026, 5, 2), 0.0, 0.0),
+                    GnlStageCommitment(9, date(2026, 5, 9), 500.0, 0.0),
+                ),
+            ),
+            224: GnlCommitment(
+                224,
+                (
+                    GnlStageCommitment(1, date(2026, 3, 14), 0.0, 168.0),
+                    GnlStageCommitment(8, date(2026, 5, 2), 0.0, 0.0),
+                    GnlStageCommitment(9, date(2026, 5, 9), 0.0, 0.0),
+                ),
+            ),
+        },
+        weeks_per_month=_EMIT_WEEKS_PER_MONTH,
+        nl_lag_months={86: 2, 224: 2},
+    )
+
+
+def test_gnl_emission_has_no_future_anticipated_deliveries_field() -> None:
+    field_names = {f.name for f in dataclasses.fields(GnlEmission)}
+    assert "future_anticipated_deliveries" not in field_names
+
+
+def test_convert_gnl_emitted_lead_reaches_each_plants_class4_end() -> None:
+    e = convert_gnl(
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+    )
+    assert [(t["id"], t["name"]) for t in e.thermals] == [
+        (94, "SANTA CRUZ"),
+        (95, "PSERGIPE I"),
+    ]
+    # The emitted lead is per plant -- (class4_end - horizon_start).days * 24 --
+    # not the tile-sizing global H: both plants share the same já-comandada run
+    # here (class4_end = 2026-05-16), so both land on the same 1512 h (63 days),
+    # but the value tracks each plant's own class4_end, not a shared constant.
+    assert all(
+        t["anticipated_config"] == {"lead_time_hours": 1512.0} for t in e.thermals
+    )
+    santa = e.thermals[0]
+    assert santa["bus_id"] == 0
+    assert santa["cost_per_mwh"] == 199.22
+    assert santa["generation"] == {"min_mw": 0.0, "max_mw": 500.0}
+
+
+def test_convert_gnl_left_boundary_tiles_the_h_derived_leading_stages() -> None:
+    # The uncapped lead 1176 h exceeds the horizon (1152 h), so
+    # lead_delivery_stage_count = every study stage — cobre's
+    # check_commitment_coverage requires exactly these. Both plants tile all 4
+    # (0 MW: no in-horizon gl commitment folds in), followed by each plant's
+    # class-4 já-comandada run (asserted separately).
+    e = convert_gnl(
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+    )
+    for tid in (94, 95):
+        past = [p for p in e.past_anticipated_commitments if p["thermal_id"] == tid]
+        class2 = past[:4]
+        assert [p["start_date"] for p in class2] == [
+            "2026-03-14",
+            "2026-03-21",
+            "2026-03-28",
+            "2026-04-04",
+        ]
+        assert all(p["value_mw"] == 0.0 for p in class2)
+
+
+def test_convert_gnl_post_study_stages_carry_grid_calendar() -> None:
+    e = convert_gnl(
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+    )
+    pss = e.post_study_stages
+    assert pss is not None
+    # post_study_stages carries the calendar verbatim (cross-checked against
+    # the helper directly, anchored at both plants' shared class4_end).
+    assert pss["stages"] == _build_post_study_calendar(_STUDY_SPANS, date(2026, 5, 16))
+
+
+def _calendar_stage_span(stage: Mapping) -> tuple[date, date]:
+    """A calendar stage's ``[start, end)`` as parsed dates."""
+    start = date.fromisoformat(stage["start_date"])
+    return start, start + timedelta(hours=float(stage["duration_hours"]))
+
+
+def test_convert_gnl_thermal_bounds_cover_only_class3_stages() -> None:
+    # _emit_model()'s shared class4_end (2026-05-16) is exactly where the
+    # class-3 study-mirror starts on the 7-stage calendar, so stages 0-2
+    # (the class-4 já-comandada fill) get no thermal_bounds row -- their
+    # delivery is already fixed by past_anticipated_commitments -- while
+    # stages 3-6 (one per study stage) do, matching cobre's own post-study
+    # e2e fixture.
+    e = convert_gnl(
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+    )
+    pss = e.post_study_stages
+    assert pss is not None
+    stage_spans = {_calendar_stage_span(s) for s in pss["stages"]}
+    assert len(stage_spans) == len(pss["stages"])  # every stage distinct
+
+    for tid in (94, 95):
+        indices = sorted(
+            b["post_study_stage_index"]
+            for b in pss["thermal_bounds"]
+            if b["thermal_id"] == tid
+        )
+        assert indices == [3, 4, 5, 6]
+
+
+def test_convert_gnl_thermal_bounds_cover_every_stage_when_no_class4_run() -> None:
+    # No já-comandada commitment at all -> class4_end defaults to
+    # horizon_end, so the class-4 fill is empty and the class-3 mirror (one
+    # stage per study stage) starts immediately: every calendar stage is
+    # class-3 and gets a thermal_bounds row. The complementary boundary to
+    # test_convert_gnl_thermal_bounds_cover_only_class3_stages -- the class-3
+    # mirror always starts exactly at class4_end, so a calendar with every
+    # stage class-4 is not constructible.
+    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
+    model = GnlCommitmentModel(
+        thermals=(santa,),
+        commitments={
+            86: GnlCommitment(
+                86, (GnlStageCommitment(1, date(2026, 3, 14), 0.0, 168.0),)
+            )
+        },
+        weeks_per_month=_EMIT_WEEKS_PER_MONTH,
+        nl_lag_months={86: 2},
+    )
+    e = convert_gnl(model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES)
+
+    pss = e.post_study_stages
+    assert pss is not None
+    assert [(s["start_date"], s["duration_hours"]) for s in pss["stages"]] == [
+        ("2026-05-01", 168.0),
+        ("2026-05-08", 168.0),
+        ("2026-05-15", 168.0),
+        ("2026-05-22", 216.0),
+    ]
+    indices = sorted(b["post_study_stage_index"] for b in pss["thermal_bounds"])
+    assert indices == [0, 1, 2, 3]
+
+
+def test_convert_gnl_raises_on_differing_class4_end_across_plants() -> None:
+    # post_study_stages is emitted once, globally: SANTA CRUZ's já-comandada
+    # run through 05-16 and PSERGIPE's total absence of one (class4_end
+    # defaults to horizon_end) can't share a single calendar boundary.
+    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
+    pserg = GnlThermal(224, "PSERGIPE I", 3, 321.26, 0.0, 1593.0)
+    model = GnlCommitmentModel(
         thermals=(santa, pserg),
         commitments={
             86: GnlCommitment(
@@ -393,162 +612,32 @@ def _emit_model() -> GnlCommitmentModel:
         weeks_per_month=_EMIT_WEEKS_PER_MONTH,
         nl_lag_months={86: 2, 224: 2},
     )
+    with pytest.raises(ValueError, match="differing já-comandada cutoffs"):
+        convert_gnl(model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES)
 
 
-def test_convert_gnl_single_global_lead() -> None:
-    e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
-    )
-    assert [(t["id"], t["name"]) for t in e.thermals] == [
-        (94, "SANTA CRUZ"),
-        (95, "PSERGIPE I"),
-    ]
-    # A single global lead for EVERY plant — the fix replacing the per-plant leads
-    # (1344 / 168) that dropped windows + K=0'd. Emitted value is the cobre-safe
-    # cap (1008 h, C13), not the ideal 1176 h that panics cobre.
-    assert all(
-        t["anticipated_config"] == {"lead_time_hours": _CAPPED_H} for t in e.thermals
-    )
-    santa = e.thermals[0]
-    assert santa["bus_id"] == 0
-    assert santa["cost_per_mwh"] == 199.22
-    assert santa["generation"] == {"min_mw": 0.0, "max_mw": 500.0}
-
-
-def test_convert_gnl_left_boundary_tiles_the_h_derived_leading_stages() -> None:
-    # The capped lead 1008 h < horizon (1152), so lead_delivery_stage_count = the
-    # leading 3 study stages (168+336+504 <= 1008 < 1152) — cobre's
-    # check_commitment_coverage requires exactly these. Both plants tile 3 (0 MW:
-    # no in-horizon gl commitment folds in).
-    e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
-    )
-    for tid in (94, 95):
-        past = [p for p in e.past_anticipated_commitments if p["thermal_id"] == tid]
-        assert [p["start_date"] for p in past] == [
-            "2026-03-14",
-            "2026-03-21",
-            "2026-03-28",
-        ]
-        assert all(p["value_mw"] == 0.0 for p in past)
-
-
-def test_convert_gnl_free_only_deliveries_on_mirror_calendar() -> None:
+def test_convert_gnl_thermal_bounds_match_capability_and_cost() -> None:
     e = convert_gnl(
         _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
     )
     pss = e.post_study_stages
     assert pss is not None
-    # post_study_stages carries the mirror calendar (at the cobre-safe capped
-    # lead) verbatim (cross-checked).
-    assert pss["stages"] == _build_post_study_calendar(_STUDY_SPANS, _CAPPED_H)
-    # Every delivery is FREE (min < max for a non-degenerate plant); NONE pinned.
-    assert e.future_anticipated_deliveries
-    assert all(d["min_mw"] < d["max_mw"] for d in e.future_anticipated_deliveries)
-    # One free delivery per plant per calendar stage, at the plant's capability.
-    for tid, mx in ((94, 500.0), (95, 1593.0)):
-        mine = [d for d in e.future_anticipated_deliveries if d["thermal_id"] == tid]
-        assert len(mine) == len(pss["stages"])
-        assert all(d["min_mw"] == 0.0 and d["max_mw"] == mx for d in mine)
-    # The dropped prior-revision commitment leaves no pinned (min == max) delivery.
-    assert not any(
-        d["thermal_id"] == 94
-        and d["delivery_start"] == "2026-05-09"
-        and d["min_mw"] == d["max_mw"]
-        for d in e.future_anticipated_deliveries
-    )
+    capability = {94: (199.22, 0.0, 500.0), 95: (321.26, 0.0, 1593.0)}
 
-
-def test_convert_gnl_synthesises_free_forward_delivery() -> None:
-    # Study stage m -> post-study stage m (index-direct): stage 0 -> calendar[0].
-    e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
-    )
-    calendar = _build_post_study_calendar(_STUDY_SPANS, _CAPPED_H)
-    expected_start = calendar[0]["start_date"]
-    santa = [
-        d
-        for d in e.future_anticipated_deliveries
-        if d["thermal_id"] == 94 and d["delivery_start"] == expected_start
-    ]
-    assert len(santa) == 1
-    assert santa[0]["min_mw"] == 0.0
-    assert santa[0]["max_mw"] == 500.0
-    assert santa[0]["min_mw"] < santa[0]["max_mw"]
-
-
-def test_convert_gnl_free_deliveries_resolve_in_study() -> None:
-    # Each free delivery's decider (window_end_hours - H, cobre's rule) lands on a
-    # DISTINCT in-study stage 0..n-1; none is dropped (target in (0, horizon_end]).
-    e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
-    )
-    cum = [0.0]
-    for s in _EMIT_STAGES:
-        cum.append(cum[-1] + sum(b["hours"] for b in s["blocks"]))
-    horizon_end_h = cum[-1]
-    start0 = date.fromisoformat(_EMIT_STAGES[0]["start_date"])
-
-    deciders = []
-    for d in e.future_anticipated_deliveries:
-        if d["thermal_id"] != 94:
-            continue
-        window_end_h = (date.fromisoformat(d["delivery_end"]) - start0).days * 24.0
-        target = window_end_h - _CAPPED_H
-        assert 0.0 < target <= horizon_end_h  # in-study, not dropped
-        deciders.append(sum(1 for b in cum if b < target) - 1)
-    assert deciders == [0, 1, 2, 3]  # distinct, one per study stage
-
-
-def test_convert_gnl_deliveries_tile_whole_post_study_stages() -> None:
-    e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
-    )
-    pss = e.post_study_stages
-    assert pss is not None
-    stage_spans = {_calendar_stage_span(s) for s in pss["stages"]}
-
-    assert e.future_anticipated_deliveries
-    for d in e.future_anticipated_deliveries:
-        window = (
-            date.fromisoformat(d["delivery_start"]),
-            date.fromisoformat(d["delivery_end"]),
-        )
-        assert window in stage_spans  # exactly one whole calendar stage
-
-
-def test_convert_gnl_thermal_bounds_intersect_delivery() -> None:
-    e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
-    )
-    pss = e.post_study_stages
-    assert pss is not None
-    cost_of = {94: 199.22, 95: 321.26}
-    stage_index_of_span = {
-        _calendar_stage_span(s): idx for idx, s in enumerate(pss["stages"])
-    }
-    bound_of = {
-        (b["thermal_id"], b["post_study_stage_index"]): b for b in pss["thermal_bounds"]
-    }
-
-    assert e.future_anticipated_deliveries
-    for d in e.future_anticipated_deliveries:
-        window = (
-            date.fromisoformat(d["delivery_start"]),
-            date.fromisoformat(d["delivery_end"]),
-        )
-        idx = stage_index_of_span[window]
-        bound = bound_of[(d["thermal_id"], idx)]
-        assert bound["cost_per_mwh"] == cost_of[d["thermal_id"]]
-        assert bound["min_mw"] <= d["max_mw"]
-        assert d["min_mw"] <= bound["max_mw"]
+    assert pss["thermal_bounds"]
+    for bound in pss["thermal_bounds"]:
+        cost, lo, hi = capability[bound["thermal_id"]]
+        assert bound["cost_per_mwh"] == cost
+        assert bound["min_mw"] == lo
+        assert bound["max_mw"] == hi
 
 
 def test_convert_gnl_warns_on_nonuniform_nl_lag(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # A deck mixing NL lags is surfaced (the single global H assumes a uniform
-    # lag); H is still emitted globally.
+    # A deck mixing NL lags is surfaced (the single global H tile-sizing the
+    # class-2 boundary assumes a uniform lag); the per-plant emitted lead is
+    # unaffected by nl_lag_months either way.
     santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
     pserg = GnlThermal(224, "PSERGIPE I", 3, 321.26, 0.0, 1593.0)
     model = GnlCommitmentModel(
@@ -570,15 +659,18 @@ def test_convert_gnl_warns_on_nonuniform_nl_lag(
         )
 
     assert any("differing anticipation lags" in r.message for r in caplog.records)
+    # Neither plant declares a já-comandada window, so class4_end defaults to
+    # horizon_end: the emitted lead reaches exactly the study horizon
+    # (1152 h = 48 days), not the tile-sizing global H (1176 h).
     assert all(
-        t["anticipated_config"] == {"lead_time_hours": _CAPPED_H} for t in e.thermals
+        t["anticipated_config"] == {"lead_time_hours": 1152.0} for t in e.thermals
     )
 
 
 def test_convert_gnl_empty_gs_yields_no_post_study() -> None:
-    # No GS calendar (degenerate deck): no post-study horizon to anticipate into,
-    # so no free deliveries and no post_study_stages — but the plant stays a valid
-    # anticipated thermal with the mandatory single leading commitment.
+    # No GS calendar (degenerate deck): no post-study horizon to price, so
+    # post_study_stages stays None — but the plant stays a valid anticipated
+    # thermal with the mandatory single leading commitment.
     pserg = GnlThermal(224, "PSERGIPE I", 3, 321.26, 0.0, 1593.0)
     model = GnlCommitmentModel(
         thermals=(pserg,),
@@ -592,7 +684,6 @@ def test_convert_gnl_empty_gs_yields_no_post_study() -> None:
     )
     e = convert_gnl(model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES)
 
-    assert e.future_anticipated_deliveries == []
     assert e.post_study_stages is None
     assert len(e.past_anticipated_commitments) == 1  # left boundary still mandatory
     assert e.thermals[0]["anticipated_config"] == {"lead_time_hours": 168.0}
@@ -622,3 +713,235 @@ def test_convert_gnl_clamps_past_commitment_above_capability(
 
     assert e.past_anticipated_commitments[0]["value_mw"] == 500.0  # 900 -> max 500
     assert any("clamped" in r.message for r in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# Class-4 já-comandada past_anticipated_commitments (the horizon-split)
+# --------------------------------------------------------------------------
+
+_HORIZON_END = date.fromisoformat(_EMIT_STAGES[-1]["end_date"])
+
+
+def test_convert_gnl_emits_class4_past_commitments() -> None:
+    e = convert_gnl(
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+    )
+    for tid, terminal_mw in ((94, 500.0), (95, 0.0)):
+        past = [p for p in e.past_anticipated_commitments if p["thermal_id"] == tid]
+        class4 = past[4:]
+        assert [(p["start_date"], p["end_date"], p["value_mw"]) for p in class4] == [
+            ("2026-05-01", "2026-05-02", 0.0),
+            ("2026-05-02", "2026-05-09", 0.0),
+            ("2026-05-09", "2026-05-16", terminal_mw),
+        ]
+
+
+def test_convert_gnl_past_commitments_never_straddle_horizon() -> None:
+    e = convert_gnl(
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+    )
+    for p in e.past_anticipated_commitments:
+        start = date.fromisoformat(p["start_date"])
+        end = date.fromisoformat(p["end_date"])
+        assert not (start < _HORIZON_END < end)
+
+
+def test_convert_gnl_straddling_class4_window_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A synthetic classify_gnl_windows result whose window crosses the horizon
+    # (never produced by the real classifier, which starts class-4 windows at
+    # or after horizon_end) must still be rejected by convert_gnl's own guard.
+    straddling = GnlPlantClassification(
+        class4_windows=(
+            (
+                _HORIZON_END - timedelta(days=1),
+                _HORIZON_END + timedelta(days=1),
+                0.0,
+            ),
+        ),
+        class4_end=_HORIZON_END + timedelta(days=1),
+    )
+    monkeypatch.setattr(
+        anticipated,
+        "classify_gnl_windows",
+        lambda model, *, horizon_end: GnlClassification(
+            plants={t.code: straddling for t in model.thermals}
+        ),
+    )
+
+    with pytest.raises(ValueError, match="straddle"):
+        convert_gnl(
+            _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+        )
+
+
+def test_convert_gnl_clamps_class4_commitment_above_capability(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # gl geracao and tg disponibilidade are independent for a class-4 week too;
+    # a já-comandada commitment above max_mw is clamped the same as class-2.
+    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
+    model = GnlCommitmentModel(
+        thermals=(santa,),
+        commitments={
+            86: GnlCommitment(
+                86,
+                (
+                    GnlStageCommitment(1, date(2026, 3, 14), 0.0, 168.0),
+                    GnlStageCommitment(9, date(2026, 5, 9), 900.0, 0.0),
+                ),
+            )
+        },
+        weeks_per_month=_EMIT_WEEKS_PER_MONTH,
+        nl_lag_months={86: 2},
+    )
+    with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.anticipated"):
+        e = convert_gnl(
+            model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+        )
+
+    class4 = [
+        p
+        for p in e.past_anticipated_commitments
+        if p["thermal_id"] == 94 and date.fromisoformat(p["start_date"]) >= _HORIZON_END
+    ]
+    assert any(p["value_mw"] == 500.0 for p in class4)  # 900 -> max 500
+    assert any("clamped" in r.message for r in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# Tier 3: real-deck validation (gitignored deck; dev-only)
+# --------------------------------------------------------------------------
+
+_DECK = Path("example/decomp-mar-26-rv2-reduced")
+
+
+@pytest.mark.skipif(
+    not _DECK.exists(), reason=f"reduced mar-26 deck ({_DECK}) not present"
+)
+def test_classify_gnl_windows_matches_relgnl_prior_revision_markers() -> None:
+    """The class-4 set derived from ``gl`` alone matches ``relgnl``'s ``*``
+    (prior-revision, i.e. já-comandada) markers for SANTA CRUZ — the
+    detection hypothesis, checked against the real deck's own output.
+    ``relgnl`` is read only here, never in ``src/``.
+    """
+    from idecomp.decomp import Dadger, Dadgnl, Relgnl
+
+    from cobre_bridge.decomp import temporal as temporal_conv
+
+    dadger = Dadger.read(str(_DECK / "dadger.rv2"))
+    dadgnl = Dadgnl.read(str(_DECK / "dadgnl.rv2"))
+    relgnl = Relgnl.read(str(_DECK / "relgnl.rv2"))
+    horizon_end = temporal_conv.operative_calendar_from_dadger(dadger)[-1].end_date
+
+    report = relgnl.relatorio_operacao_termica
+    assert report is not None
+    santa_rows = report[report["nome_usina"].str.strip() == "SANTA CRUZ"]
+    marker_dates = {
+        date(*(int(p) for p in reversed(row["data_inicio_semana"].split("/"))))
+        for _, row in santa_rows.iterrows()
+        if row["semana"].strip().endswith("*")
+    }
+    assert marker_dates == {date(2026, 5, 2), date(2026, 5, 9)}
+
+    model = read_gnl_model(dadgnl)
+    assert model is not None
+    raw_class4_starts = {
+        s.start_date
+        for s in model.commitments[86].stages
+        if s.start_date >= horizon_end
+    }
+    assert raw_class4_starts == marker_dates
+
+    result = classify_gnl_windows(model, horizon_end=horizon_end)
+    santa = result.plants[86]
+    assert {w[0] for w in santa.class4_windows} - {horizon_end} == marker_dates
+    assert santa.class4_end == date(2026, 5, 16)
+
+
+@pytest.mark.skipif(
+    not _DECK.exists(), reason=f"reduced mar-26 deck ({_DECK}) not present"
+)
+def test_convert_decomp_case_gnl_emission_matches_reduced_deck_target(
+    tmp_path: Path,
+) -> None:
+    """The whole GNL emission, converted from the real reduced deck (the
+    boundary FCF import never runs -- ``convert_decomp_case`` alone never
+    imports it), matches cobre's own post-study e2e fixture structurally:
+    ``post_study_stages.json`` carries the 7-stage class-4-fill +
+    class-3-study-mirror calendar and prunes ``thermal_bounds`` to the
+    class-3 stages, ``initial_conditions.json`` carries no
+    ``future_anticipated_deliveries`` key and tiles the class-4 windows with
+    the real ``gl`` MW (never the hand-authored 300/1000 placeholders from
+    the stale ``example/cobre-mar-26-rv2-reduced`` target), and
+    ``system/thermals.json`` keeps the uncapped lead.
+    """
+    from cobre_bridge.decomp.pipeline import convert_decomp_case
+
+    dst = tmp_path / "converted"
+    convert_decomp_case(_DECK, dst, force=True)
+
+    post_study = json.loads((dst / "post_study_stages.json").read_text())
+    assert [(s["start_date"], s["duration_hours"]) for s in post_study["stages"]] == [
+        ("2026-05-01", 24.0),
+        ("2026-05-02", 168.0),
+        ("2026-05-09", 168.0),
+        ("2026-05-16", 168.0),
+        ("2026-05-23", 168.0),
+        ("2026-05-30", 168.0),
+        ("2026-06-06", 576.0),
+    ]
+    signaled_indices: dict[int, set[int]] = {
+        row["thermal_id"]: set() for row in post_study["thermal_bounds"]
+    }
+    for row in post_study["thermal_bounds"]:
+        signaled_indices[row["thermal_id"]].add(row["post_study_stage_index"])
+    assert signaled_indices == {94: {3, 4, 5, 6}, 95: {3, 4, 5, 6}}
+
+    initial = json.loads((dst / "initial_conditions.json").read_text())
+    assert "future_anticipated_deliveries" not in initial
+    past = initial["past_anticipated_commitments"]
+
+    last_class2 = max(
+        (p for p in past if p["thermal_id"] == 94 and p["start_date"] < "2026-05-01"),
+        key=lambda p: p["start_date"],
+    )
+    assert (last_class2["start_date"], last_class2["end_date"]) == (
+        "2026-04-04",
+        "2026-05-01",
+    )
+    assert last_class2["value_mw"] == 0.0
+
+    # GL: only SANTA CRUZ's terminal já-comandada week (05-09 -> 05-16)
+    # commits real MW; every other class-4 window, either plant, is 0 -- the
+    # hand-authored file's 300/1000 are placeholders, never asserted here.
+    expected_gl_class4 = {
+        94: [
+            ("2026-05-01", "2026-05-02", 0.0),
+            ("2026-05-02", "2026-05-09", 0.0),
+            ("2026-05-09", "2026-05-16", 500.0),
+        ],
+        95: [
+            ("2026-05-01", "2026-05-02", 0.0),
+            ("2026-05-02", "2026-05-09", 0.0),
+            ("2026-05-09", "2026-05-16", 0.0),
+        ],
+    }
+    for tid, expected in expected_gl_class4.items():
+        class4 = sorted(
+            (p["start_date"], p["end_date"], p["value_mw"])
+            for p in past
+            if p["thermal_id"] == tid and p["start_date"] >= "2026-05-01"
+        )
+        assert class4 == expected
+
+    thermals_doc = json.loads((dst / "system" / "thermals.json").read_text())
+    gnl_leads = {
+        t["id"]: t["anticipated_config"]["lead_time_hours"]
+        for t in thermals_doc["thermals"]
+        if t["id"] in (94, 95)
+    }
+    # Per plant, reaching class4_end (2026-05-16, 63 days from the study start
+    # 2026-03-14) -- not the tile-sizing global H (1176.0).
+    assert gnl_leads == {94: 1512.0, 95: 1512.0}

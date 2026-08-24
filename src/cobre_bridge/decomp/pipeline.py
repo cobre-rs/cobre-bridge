@@ -1160,8 +1160,9 @@ def _convert_core_entities(artifacts: DecompCaseArtifacts, writer: CaseWriter) -
     # GNL (fuel-constrained) thermals are declared in dadgnl, absent from CT, so
     # the thermal converter never sees them. Read the commitment model and emit
     # the created thermals plus their anticipated ring: the mandatory left
-    # boundary (past_anticipated_commitments) and any post-horizon deliveries as
-    # the right boundary (future_anticipated_deliveries + post_study_stages.json).
+    # boundary (past_anticipated_commitments, including any já-comandada
+    # post-horizon run) and, when the deck declares a GS calendar, the
+    # post-study thermal_bounds carrier (post_study_stages.json).
     gnl_model = (
         anticipated_conv.read_gnl_model(case.dadgnl)
         if case.dadgnl is not None
@@ -1180,17 +1181,11 @@ def _convert_core_entities(artifacts: DecompCaseArtifacts, writer: CaseWriter) -
             initial_conditions_doc["past_anticipated_commitments"] = (
                 gnl.past_anticipated_commitments
             )
-        if gnl.future_anticipated_deliveries:
-            initial_conditions_doc["future_anticipated_deliveries"] = (
-                gnl.future_anticipated_deliveries
-            )
         if gnl.post_study_stages is not None:
             writer.write_json("post_study_stages.json", gnl.post_study_stages)
         _LOG.info(
-            "emitted %d GNL anticipated thermal(s) from dadgnl; %d future "
-            "anticipated deliver(y/ies)",
+            "emitted %d GNL anticipated thermal(s) from dadgnl",
             len(gnl.thermals),
-            len(gnl.future_anticipated_deliveries),
         )
     artifacts.thermals_dict = thermals_dict
     writer.write_json("system/thermals.json", thermals_dict)
