@@ -8,11 +8,12 @@ from __future__ import annotations
 #: new enough to validate the output. Keep the ``cobre-python`` pin in
 #: ``pyproject.toml`` in lockstep with this constant on any future bump.
 #:
-#: The floor is 0.14.3 because the emitted terminal boundary policy depends on
-#: it: 0.14.3's ``write_policy_checkpoint`` reserves the canonical inflow-lag
-#: state slots. On an older cobre those slots are absent and a boundary carrying
-#: inflow-lag gradient terms has its lag coupling silently dropped.
-MIN_COBRE_VERSION = "0.14.3"
+#: The floor is 0.15.0 because the emitted inputs depend on it: the DECOMP track
+#: now emits the fixed post-horizon anticipated-thermal commitments 0.15.0 models
+#: (past-horizon já-comandada windows plus signaled post-study bounds) and writes
+#: the self-describing ``manifest.bin`` policy checkpoint 0.15.0 reads. An older
+#: cobre rejects those inputs or mis-loads the checkpoint.
+MIN_COBRE_VERSION = "0.15.0"
 
 
 def _installed_cobre_python_version() -> str | None:
