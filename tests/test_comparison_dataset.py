@@ -198,6 +198,22 @@ def test_non_serializable_metadata_raises(tmp_path: Path) -> None:
         dataset.to_dir(tmp_path)
 
 
+def test_frozenset_nested_in_metadata_value_raises(tmp_path: Path) -> None:
+    """A frozenset nested inside a metadata dict value raises ``TypeError``.
+
+    Guards why ``compare_results``/``_merge_hydro_bus_ids`` store the hydro
+    ``bus_ids`` label as a sorted list, not the reader's frozenset — the latter
+    crashed compare-artifact export.
+    """
+    dataset = ComparisonDataset(
+        tidy=_one_row_tidy("newave"),
+        summary=_small_summary(),
+        metadata={"cobre_hydro_meta": {0: {"bus_ids": frozenset({7})}}},
+    )
+    with pytest.raises(TypeError, match="cobre_hydro_meta"):
+        dataset.to_dir(tmp_path)
+
+
 def test_roundtrip_empty_polars_metadata_frame_preserves_schema() -> None:
     """An empty polars metadata frame round-trips with its columns and dtypes.
 

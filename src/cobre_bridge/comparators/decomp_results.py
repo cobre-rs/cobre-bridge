@@ -1672,7 +1672,9 @@ def _merge_hydro_bus_ids(
     dict of new per-plant dicts; neither *meta* nor *labels* is mutated.
     """
     return {
-        hydro_id: {**entry, "bus_ids": labels.get(hydro_id, [])}
+        # Sorted list, not the reader's frozenset: bus_ids lands in the
+        # JSON-serialized metadata side-table, which rejects a frozenset.
+        hydro_id: {**entry, "bus_ids": sorted(labels.get(hydro_id, []))}
         for hydro_id, entry in meta.items()
     }
 

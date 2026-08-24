@@ -16,6 +16,7 @@ import polars as pl
 import pytest
 
 from cobre_bridge.comparators.charts import hydro_slack_aggregate_chart
+from cobre_bridge.comparators.dataset import _metadata_to_json
 from cobre_bridge.comparators.decomp_results import (
     _merge_hydro_bus_ids,
     build_decomp_dataset,
@@ -101,14 +102,24 @@ class TestMergeHydroBusIds:
     """ticket-014's ``bus_ids`` merge helper -- the per-bus hydro charts
     KeyError without it (see ``analyze._bus_name_lookups``)."""
 
-    def test_injects_bus_ids_from_labels(self) -> None:
+    def test_injects_bus_ids_as_a_sorted_list_not_a_frozenset(self) -> None:
         meta = {0: {"name": "A"}, 1: {"name": "B"}}
-        labels = {0: frozenset({7})}
+        labels = {0: frozenset({9, 7})}
 
         merged = _merge_hydro_bus_ids(meta, labels)
 
-        assert merged[0]["bus_ids"] == frozenset({7})
+        # A JSON-native sorted list, not the reader's frozenset: bus_ids lands
+        # in the JSON-serialized metadata side-table, which rejects a frozenset.
+        assert merged[0]["bus_ids"] == [7, 9]
+        assert isinstance(merged[0]["bus_ids"], list)
         assert merged[1]["bus_ids"] == []
+
+    def test_merged_bus_ids_serialize_into_the_metadata_side_table(self) -> None:
+        merged = _merge_hydro_bus_ids({0: {"name": "A"}}, {0: frozenset({3})})
+
+        # Regression: a frozenset here raised ``TypeError`` in
+        # ``_metadata_to_json`` at compare-artifact export time.
+        _metadata_to_json({"cobre_hydro_meta": merged})
 
     def test_does_not_mutate_the_inputs(self) -> None:
         meta = {0: {"name": "A"}}
@@ -181,8 +192,8 @@ class TestBuildDecompDatasetHydroDetail:
         assert set(cobre_hydro_meta) == {0, 1}
         for entry in cobre_hydro_meta.values():
             assert "bus_ids" in entry
-        assert cobre_hydro_meta[0]["bus_ids"] == frozenset({0})
-        assert cobre_hydro_meta[1]["bus_ids"] == frozenset({0})
+        assert cobre_hydro_meta[0]["bus_ids"] == [0]
+        assert cobre_hydro_meta[1]["bus_ids"] == [0]
         # Plant physics from ``read_cobre_hydro_metadata`` survive the merge.
         assert cobre_hydro_meta[0]["name"] == "A"
 

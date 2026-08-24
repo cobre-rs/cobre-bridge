@@ -1079,7 +1079,9 @@ def compare_results(
     # all) simply gets no "bus_ids" key, matching the legacy "no bus" skip.
     for hid, bus_ids in read_cobre_hydro_bus_labels(cobre_output_dir).items():
         if hid in cobre_hydro_meta:
-            cobre_hydro_meta[hid]["bus_ids"] = bus_ids
+            # Sorted list, not the reader's frozenset: this lands in the
+            # JSON-serialized metadata side-table, which rejects a frozenset.
+            cobre_hydro_meta[hid]["bus_ids"] = sorted(bus_ids)
     cobre_thermal_meta = read_cobre_thermal_metadata(cobre_output_dir)
     cobre_bus_meta = read_cobre_bus_metadata(cobre_output_dir)
 
