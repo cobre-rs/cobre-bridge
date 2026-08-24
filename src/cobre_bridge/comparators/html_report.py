@@ -11,7 +11,7 @@ from cobre_bridge.ui.html import (
     section_title,
     wrap_chart,
 )
-from cobre_bridge.ui.js import TAB_SWITCH_JS
+from cobre_bridge.ui.js import PLOTLY_TITLE_SHIM_JS, TAB_SWITCH_JS
 from cobre_bridge.ui.theme import COMPARISON_COLORS
 
 CSS = comparison_css()
@@ -48,6 +48,7 @@ def build_comparison_html(
         tab_contents=tab_contents,
         css=CSS,
         js=JS,
+        required_js=PLOTLY_TITLE_SHIM_JS,
     )
 
 

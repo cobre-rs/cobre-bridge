@@ -14,7 +14,7 @@ from cobre_bridge.dashboard.data import DashboardData
 from cobre_bridge.dashboard.tabs import collect_required_js, get_renderable_tabs
 from cobre_bridge.ui.css import dashboard_css
 from cobre_bridge.ui.html import build_html
-from cobre_bridge.ui.js import TAB_SWITCH_JS
+from cobre_bridge.ui.js import PLOTLY_TITLE_SHIM_JS, TAB_SWITCH_JS
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         tab_contents=tab_contents,
         css=dashboard_css(),
         js=TAB_SWITCH_JS,
-        required_js=collect_required_js(data),
+        required_js=PLOTLY_TITLE_SHIM_JS + collect_required_js(data),
     )
 
     logger.info("Writing dashboard to %s", output_path)

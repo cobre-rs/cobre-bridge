@@ -306,6 +306,29 @@ def add_mean_p50_band(
     return fig
 
 
+def _normalize_plotly_titles(node: object) -> object:
+    """Recursively rewrite a bare-string ``title`` to ``{"text": ...}`` in *node*.
+
+    plotly.js 3.x dropped support for the bare-string ``title`` shorthand
+    (layout title, ``xaxis``/``yaxis``/``scene.*axis``/``colorbar`` titles,
+    ...) — a ``go.Figure`` coerces this on assignment, but a raw dict handed
+    straight to the browser does not, so the string is silently dropped at
+    render. Walks every dict/list in *node* and fixes each ``title`` key
+    still holding a plain string; a dict/object title or an absent key is
+    left untouched (idempotent). Mutates *node* in place and returns it.
+    """
+    if isinstance(node, dict):
+        title = node.get("title")
+        if isinstance(title, str):
+            node["title"] = {"text": title}
+        for value in node.values():
+            _normalize_plotly_titles(value)
+    elif isinstance(node, list):
+        for item in node:
+            _normalize_plotly_titles(item)
+    return node
+
+
 def plotly_div(
     traces: list[dict],
     layout: dict,
@@ -323,6 +346,7 @@ def plotly_div(
     layout.setdefault("legend", LEGEND_DEFAULTS)
     layout.setdefault("template", "plotly_white")
     layout.setdefault("hovermode", "x unified")
+    _normalize_plotly_titles(layout)
 
     data_json = json_for_script(traces)
     layout_json = json_for_script(layout)

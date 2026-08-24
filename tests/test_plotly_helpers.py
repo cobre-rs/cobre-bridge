@@ -10,9 +10,11 @@ import plotly.graph_objects as go
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
+    _normalize_plotly_titles,
     add_mean_p50_band,
     apply_standard_layout,
     fig_to_html,
+    plotly_div,
     render_figure,
 )
 from cobre_bridge.ui.theme import BAND_FILL, BAND_LINE
@@ -155,3 +157,88 @@ def test_band_fill_and_line_match_legacy_literals() -> None:
     charts/_shared.py and add_mean_p50_band's fillcolor computation produced."""
     assert BAND_FILL == "rgba(74,144,184,0.15)"
     assert BAND_LINE == "rgba(255,255,255,0)"
+
+
+# ---------------------------------------------------------------------------
+# _normalize_plotly_titles / plotly_div title normalization
+#
+# plotly.js 3.x dropped bare-string `title` support; a raw layout dict handed
+# to plotly_div (unlike a go.Figure, which coerces on assignment) reaches the
+# browser unvalidated, so a bare string is silently dropped at render. These
+# golden-blind tests catch that class of regression directly on the JSON
+# payload, since the title text itself is still present either way.
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_plotly_titles_rewrites_bare_string_title() -> None:
+    layout = {"title": "Chart Title"}
+    result = _normalize_plotly_titles(layout)
+    assert result is layout  # mutates in place and returns it
+    assert layout["title"] == {"text": "Chart Title"}
+
+
+def test_normalize_plotly_titles_rewrites_nested_axis_titles() -> None:
+    layout = {
+        "xaxis": {"title": "Stage"},
+        "xaxis2": {"title": "Stage 2"},
+        "yaxis": {"title": "MW"},
+    }
+    _normalize_plotly_titles(layout)
+    assert layout["xaxis"]["title"] == {"text": "Stage"}
+    assert layout["xaxis2"]["title"] == {"text": "Stage 2"}
+    assert layout["yaxis"]["title"] == {"text": "MW"}
+
+
+def test_normalize_plotly_titles_rewrites_scene_axis_titles() -> None:
+    layout = {
+        "scene": {
+            "xaxis": {"title": "Turbined (m3/s)"},
+            "yaxis": {"title": "Volume (hm3)"},
+            "zaxis": {"title": "GH (MW)", "autorange": True},
+        }
+    }
+    _normalize_plotly_titles(layout)
+    scene = layout["scene"]
+    assert scene["xaxis"]["title"] == {"text": "Turbined (m3/s)"}
+    assert scene["yaxis"]["title"] == {"text": "Volume (hm3)"}
+    assert scene["zaxis"]["title"] == {"text": "GH (MW)"}
+    assert scene["zaxis"]["autorange"] is True  # untouched sibling key
+
+
+def test_normalize_plotly_titles_rewrites_colorbar_title() -> None:
+    """A layout-level colorbar (e.g. coloraxis.colorbar) is walked too."""
+    layout = {"coloraxis": {"colorbar": {"title": "Corr"}}}
+    _normalize_plotly_titles(layout)
+    assert layout["coloraxis"]["colorbar"]["title"] == {"text": "Corr"}
+
+
+def test_normalize_plotly_titles_is_idempotent_on_object_form_title() -> None:
+    """An already-object-form title (e.g. from a prior normalize pass) is untouched."""
+    layout = {"title": {"text": "Already Object"}, "xaxis": {"title": {"text": "X"}}}
+    _normalize_plotly_titles(layout)
+    assert layout["title"] == {"text": "Already Object"}
+    assert layout["xaxis"]["title"] == {"text": "X"}
+
+
+def test_normalize_plotly_titles_noop_when_title_absent() -> None:
+    layout = {"xaxis": {"type": "date"}, "height": 400}
+    before = {"xaxis": {"type": "date"}, "height": 400}
+    _normalize_plotly_titles(layout)
+    assert layout == before
+
+
+def test_plotly_div_bare_title_layout_emits_object_form_no_bare_titles() -> None:
+    """plotly_div's output for a bare-string-title layout carries object-form
+    titles and no bare ``"title": "<nonempty>"`` anywhere in the emitted JSON."""
+    traces = [{"type": "scatter", "x": [1, 2], "y": [3, 4]}]
+    layout = {
+        "title": "X",
+        "xaxis": {"title": "Y"},
+        "yaxis": {"title": "Z"},
+    }
+    result = plotly_div(traces, layout)
+
+    assert '"title":{"text":"X"}' in result
+    assert '"title":{"text":"Y"}' in result
+    assert '"title":{"text":"Z"}' in result
+    assert not re.search(r'"title":"[^{"][^"]*"', result)

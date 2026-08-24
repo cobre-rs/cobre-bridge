@@ -1139,6 +1139,25 @@ class TestDashboardIntegration:
 
         assert case_dir.resolve().name in html
 
+    def test_build_dashboard_head_includes_plotly_title_shim(
+        self, case_dir: Path, tmp_path: Path
+    ) -> None:
+        """The dashboard <head> must carry the client-side title-normalizer shim.
+
+        plotly.js 3.x drops a bare-string ``title`` at render; the shim wraps
+        ``Plotly.newPlot``/``Plotly.react`` before any tab's chart script runs
+        (see ``PLOTLY_TITLE_SHIM_JS``), so it must land in ``<head>``, not the
+        end-of-body ``<script>``, which executes too late.
+        """
+        from cobre_bridge.dashboard import build_dashboard
+
+        output_path = tmp_path / "dashboard.html"
+        build_dashboard(case_dir, output_path)
+        html = output_path.read_text(encoding="utf-8")
+
+        head = html.split("<head>", 1)[1].split("</head>", 1)[0]
+        assert "normalizePlotlyTitles" in head
+
     def test_build_dashboard_with_per_block_line_bounds(
         self, case_dir: Path, tmp_path: Path
     ) -> None:

@@ -6,6 +6,46 @@ onclick attributes — do not rename function parameters.
 
 from __future__ import annotations
 
+PLOTLY_TITLE_SHIM_JS: str = """
+(function() {
+    // plotly.js 3.x dropped bare-string `title` support (layout, axis, scene
+    // axis, and colorbar titles all need {text: ...}); a raw-JS chart layout
+    // built here never passes through go.Figure's coercion, so a bare string
+    // reaching Plotly.newPlot/react is silently dropped at render instead of
+    // raising. Wrap both entry points so every current and future call site
+    // in data or layout is normalized without editing each one.
+    function normalizePlotlyTitles(node) {
+        if (Array.isArray(node)) {
+            node.forEach(normalizePlotlyTitles);
+            return node;
+        }
+        if (node && typeof node === 'object') {
+            if (typeof node.title === 'string') {
+                node.title = { text: node.title };
+            }
+            for (var key in node) {
+                if (Object.prototype.hasOwnProperty.call(node, key)) {
+                    normalizePlotlyTitles(node[key]);
+                }
+            }
+        }
+        return node;
+    }
+    var origNewPlot = Plotly.newPlot;
+    var origReact = Plotly.react;
+    Plotly.newPlot = function(div, data, layout, config) {
+        return origNewPlot.call(
+            this, div, normalizePlotlyTitles(data), normalizePlotlyTitles(layout), config
+        );
+    };
+    Plotly.react = function(div, data, layout, config) {
+        return origReact.call(
+            this, div, normalizePlotlyTitles(data), normalizePlotlyTitles(layout), config
+        );
+    };
+})();
+"""
+
 TAB_SWITCH_JS: str = """
 document.addEventListener('DOMContentLoaded', function() {
     var nav = document.querySelector('nav');
