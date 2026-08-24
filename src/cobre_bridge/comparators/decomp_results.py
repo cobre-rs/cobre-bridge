@@ -813,11 +813,11 @@ def _interc_side(
         de_raw = row["codigo_submercado_de"]
         para_raw = row["codigo_submercado_para"]
         if de_raw is None or para_raw is None:
-            # The Itaipu 50 Hz "IV" node reports its corridor by
-            # ``nome_submercado_*`` only -- no ``SB``-declared numeric code --
-            # so ``codigo_submercado_de``/``_para`` comes back null. Report it
-            # with the ``-1`` "no SB code" sentinel rather than crashing on the
-            # ``int()`` cast below.
+            # The Itaipu 60 Hz "IV" node -- the transshipment corridor into
+            # Ivaiporã -- reports its corridor by ``nome_submercado_*`` only,
+            # no ``SB``-declared numeric code, so ``codigo_submercado_de``/
+            # ``_para`` comes back null. Report it with the ``-1`` "no SB
+            # code" sentinel rather than crashing on the ``int()`` cast below.
             unresolved.add(
                 (
                     int(de_raw) if de_raw is not None else -1,

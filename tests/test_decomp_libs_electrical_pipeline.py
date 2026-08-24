@@ -670,11 +670,10 @@ class TestRealDeckValidation:
         converted case exits 0.
 
         ``cobre validate`` is a load/schema gate, not a solve -- it does NOT
-        prove LP feasibility (see ticket-013's documented B1 residual: the
-        ``IV`` transshipment bus carries ``carga_ande`` with no deficit
-        curve, so an ANDE shortfall would be an LP infeasibility rather than
-        a priced deficit; benign on this deck per epic-02's own findings,
-        but not exercised by a bare ``validate``)."""
+        prove LP feasibility. ``carga_ande`` nets onto Itaipu's own SE bus
+        (not the ``IV`` transshipment bus, which carries no load), so an
+        ANDE shortfall is absorbed by SE's own deficit curve rather than
+        risking an infeasibility on a bus with none."""
         from cobre_bridge.decomp.pipeline import convert_decomp_case
 
         dst = tmp_path / "decomp-abr-26-lpp-converted"

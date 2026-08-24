@@ -1134,7 +1134,7 @@ def _convert_core_entities(artifacts: DecompCaseArtifacts, writer: CaseWriter) -
     # applied once the resolved hydro_bounds are in hand.
     lines_doc, line_bounds = network_conv.convert_lines(case, id_map)
     if itaipu_operated:
-        # When Itaipu is operated (the split-plant topology relocates its 50 Hz
+        # When Itaipu is operated (the split-plant topology relocates its 60 Hz
         # group to the IV bus), the IV bus needs a connection to SE. append_iv_se_line
         # synthesizes an SE<->IV line only when the deck's own IA register does
         # NOT already wire IV<->SE; when it does (as on most Itaipu decks), the
@@ -1147,7 +1147,7 @@ def _convert_core_entities(artifacts: DecompCaseArtifacts, writer: CaseWriter) -
             line_bounds=line_bounds,
             source_bus_id=id_map.transhipment_bus_id,
             target_bus_id=id_map.bus_id(itaipu_submercado),
-            capacity_mw=network_conv._itaipu_50hz_capacity_mw(dadger),
+            capacity_mw=network_conv._itaipu_60hz_capacity_mw(dadger),
         )
     artifacts.lines_doc = lines_doc
     artifacts.line_bounds = line_bounds
@@ -1244,18 +1244,22 @@ def _convert_scenarios(artifacts: DecompCaseArtifacts, writer: CaseWriter) -> No
             case, id_map, vazoes=vazoes, effective=effective
         ),
     )
-    # The IV bus's carga_ande load is gated on the dadger RI
-    # register being present -- independent of (and additional to) the
+    # Itaipu's carga_ande load nets into its own SE bus (the HVDC Elo
+    # delivers the 50 Hz group's output, and the ANDE demand, directly there
+    # -- see hydro.py's convert_hydros docstring) and is gated on the dadger
+    # RI register being present -- independent of (and additional to) the
     # unconditional Itaipu-operated line above. An Itaipu deck with no RI
-    # register (read_carga_ande returns {}) converts gracefully: the line
-    # exists, but the IV bus stays at zero load.
+    # register (read_carga_ande returns {}) converts gracefully: SE carries
+    # only its own DP demand.
     extra_bus_loads: dict[tuple[int, int], list[float]] | None = None
     if itaipu_operated:
         carga_ande = libs_electrical_conv.read_carga_ande(dadger, calendar)
         if carga_ande:
-            iv_bus = id_map.transhipment_bus_id
+            ande_bus = id_map.bus_id(
+                int(case.hidr.loc[hydro_conv._ITAIPU_CODE, "submercado"])
+            )
             extra_bus_loads = {
-                (iv_bus, stage_index): values
+                (ande_bus, stage_index): values
                 for stage_index, values in carga_ande.items()
             }
     load_stats = load_conv.convert_load_stats(
@@ -1519,7 +1523,7 @@ def _convert_constraints(artifacts: DecompCaseArtifacts, writer: CaseWriter) -> 
     # (geracao_minima_50/60_hz) overlay the same per-group table as the
     # availability max caps. The 50 Hz floor binds in DECOMP (its 50 Hz half
     # sits exactly at it), so without it the converted case under-runs Itaipu's
-    # 50 Hz half and backfills the ANDE load through the IV bus's lines. Merged
+    # 50 Hz half and backfills the ANDE load through SE's own lines. Merged
     # into the availability entries (min on the same (hydro, group, stage) row
     # as the availability max) rather than emitted as a second table.
     if itaipu_operated:

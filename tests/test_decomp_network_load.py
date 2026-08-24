@@ -227,6 +227,74 @@ class TestConvertLoad:
         with pytest.raises(ValueError, match="outside the calendar"):
             convert_load_stats(case, _ID_MAP)
 
+    def test_extra_bus_loads_add_to_existing_dp_row(self) -> None:
+        """``extra_bus_loads`` on a bus ``DP`` already declares (Itaipu's SE
+        bus, for ``carga_ande``) sums element-wise onto the ``DP`` row
+        rather than replacing it -- a regression to a plain ``dict.update``
+        merge would silently erase SE's declared demand."""
+        calendar = _calendar_rv3()
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=_dp_frame()), calendar=calendar
+        )
+        extra = {0: [500.0, 400.0, 300.0], 1: [10.0, 10.0, 10.0], 2: [0.0, 0.0, 0.0]}
+        extra_bus_loads = {(0, stage): values for stage, values in extra.items()}
+
+        dp_only = convert_load_stats(case, _ID_MAP).to_pandas()
+        combined = convert_load_stats(
+            case, _ID_MAP, extra_bus_loads=extra_bus_loads
+        ).to_pandas()
+
+        dp_se = dp_only[dp_only["bus_id"] == 0].set_index("stage_id")["mean_mw"]
+        combined_se = combined[combined["bus_id"] == 0].set_index("stage_id")["mean_mw"]
+        for stage in calendar:
+            expected_extra = (
+                sum(
+                    v * h
+                    for v, h in zip(extra[stage.index], stage.block_hours, strict=True)
+                )
+                / stage.total_hours
+            )
+            assert combined_se.loc[stage.index] == pytest.approx(
+                dp_se.loc[stage.index] + expected_extra
+            )
+
+        # Every other bus's row is untouched by the SE-keyed addition.
+        pd.testing.assert_frame_equal(
+            combined[combined["bus_id"] != 0].reset_index(drop=True),
+            dp_only[dp_only["bus_id"] != 0].reset_index(drop=True),
+        )
+
+    def test_extra_bus_loads_insert_for_bus_absent_from_dp(self) -> None:
+        """A bus ``DP`` never declares (the ``IV`` transhipment bus) has no
+        row to collide with, so ``extra_bus_loads`` is simply inserted --
+        the backward-compatible shape for a deck with no colliding demand."""
+        calendar = _calendar_rv3()
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=_dp_frame()), calendar=calendar
+        )
+        iv_bus = _ID_MAP.transhipment_bus_id
+        extra = {0: [50.0, 40.0, 30.0], 1: [50.0, 40.0, 30.0], 2: [50.0, 40.0, 30.0]}
+        extra_bus_loads = {(iv_bus, stage): values for stage, values in extra.items()}
+
+        combined = convert_load_stats(
+            case, _ID_MAP, extra_bus_loads=extra_bus_loads
+        ).to_pandas()
+        iv_rows = combined[combined["bus_id"] == iv_bus]
+        assert (iv_rows["mean_mw"] > 0).all()
+
+    def test_extra_bus_loads_reject_block_count_mismatch(self) -> None:
+        """A colliding key whose ``extra_bus_loads`` block count disagrees
+        with ``DP``'s own for that (bus, stage) fails loud instead of
+        silently zipping a truncated/padded sum."""
+        calendar = _calendar_rv3()
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=_dp_frame()), calendar=calendar
+        )
+        extra_bus_loads = {(0, 0): [500.0, 400.0]}  # 2 values vs DP's 3
+
+        with pytest.raises(ValueError, match="block"):
+            convert_load_stats(case, _ID_MAP, extra_bus_loads=extra_bus_loads)
+
 
 def _ia_zero_block_frame() -> pd.DataFrame:
     """One SE-IV exchange row whose block-0 ``de_para`` limit sits at

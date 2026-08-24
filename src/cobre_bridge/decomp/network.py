@@ -293,38 +293,38 @@ def convert_lines(
 
 
 #: The converter-created SE<->IV line's fixed name -- the
-#: transshipment link that carries Itaipu's 50 Hz surplus into SE, mirroring
+#: transshipment link that carries Itaipu's 60 Hz output into SE, mirroring
 #: the ``"{de}-{para}"`` naming convention IA lines get above.
 _IV_SE_LINE_NAME = "IV-SE"
 
 #: idecomp's ``df=True`` accessor expands the ``RI`` register's per-patamar
-#: ``geracao_maxima_50_hz`` list the same way it expands ``carga_ande``
+#: ``geracao_maxima_60_hz`` list the same way it expands ``carga_ande``
 #: (mirrors ``libs_electrical._CARGA_ANDE_COLUMN``): one
-#: ``geracao_maxima_50_hz_{k}`` column per patamar slot, a row's own slots
+#: ``geracao_maxima_60_hz_{k}`` column per patamar slot, a row's own slots
 #: beyond its declared patamar count reading back as ``NaN``.
-_GERACAO_MAXIMA_50HZ_COLUMN = re.compile(r"^geracao_maxima_50_hz_(\d+)$")
+_GERACAO_MAXIMA_60HZ_COLUMN = re.compile(r"^geracao_maxima_60_hz_(\d+)$")
 
 #: The source model's own "no limit" numeric idiom for an exchange pair --
 #: the exact value :func:`convert_lines` already passes through as ordinary
 #: ``IA`` data (see its own docstring). Reused verbatim, never invented, as
 #: the converter-created SE<->IV line's capacity when the deck carries no
-#: ``RI`` register to size the 50 Hz half.
+#: ``RI`` register to size the 60 Hz half.
 _UNBOUNDED_LINE_CAPACITY_MW = 99999.0
 
 
-def _itaipu_50hz_capacity_mw(dadger: Dadger) -> float:
+def _itaipu_60hz_capacity_mw(dadger: Dadger) -> float:
     """The SE<->IV line's capacity: the largest declared ``RI``
-    ``geracao_maxima_50_hz`` value across every stage and patamar, or
+    ``geracao_maxima_60_hz`` value across every stage and patamar, or
     :data:`_UNBOUNDED_LINE_CAPACITY_MW` when the deck carries no ``RI``
     register at all.
 
     An absent register means "no limit", not zero -- the line must never
-    bind the 50 Hz surplus.
+    bind the 60 Hz output.
     """
     ri = dadger.ri(df=True)
     if ri is None or ri.empty:
         return _UNBOUNDED_LINE_CAPACITY_MW
-    columns = [c for c in ri.columns if _GERACAO_MAXIMA_50HZ_COLUMN.match(c)]
+    columns = [c for c in ri.columns if _GERACAO_MAXIMA_60HZ_COLUMN.match(c)]
     values = [
         float(row[column])
         for _, row in ri.iterrows()

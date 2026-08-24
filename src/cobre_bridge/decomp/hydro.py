@@ -626,8 +626,8 @@ def _build_split_unit_groups(
     only its own conjunto's installed power to draw on, so the power cap
     inside that function is per-group, never plant-wide. Group ``i`` sits on
     ``group_bus_ids[i]`` — a per-group bus, not necessarily the plant's own
-    bus: :func:`convert_hydros` relocates Itaipu's 50 Hz group to the ``IV``
-    transshipment bus while keeping its 60 Hz group on the plant's own bus.
+    bus: :func:`convert_hydros` relocates Itaipu's 60 Hz group to the ``IV``
+    transshipment bus while keeping its 50 Hz group on the plant's own bus.
 
     Raises
     ------
@@ -805,11 +805,14 @@ def convert_hydros(
     construction — cobre rule 41 holds even though the two groups' own
     per-stage machine-set changes (if any) need not peak on the same stage,
     nor their head-corrected flows peak on the same stage as their rated
-    power. Itaipu's 50 Hz group (group id 0) is placed on
-    ``id_map.transhipment_bus_id`` — the ``IV`` transshipment bus — rather
-    than the plant's own submercado bus; the 60 Hz group (group id 1) stays
-    on the plant's own bus. This relocation is unconditional whenever Itaipu
-    is operated. The entity ``reservoir`` block is the plant's
+    power. Itaipu's 60 Hz group (group id 1) is placed on
+    ``id_map.transhipment_bus_id`` — the ``IV`` bus modeling the 765 kV
+    corridor into Ivaiporã — rather than the plant's own submercado bus; the
+    50 Hz group (group id 0) stays on the plant's own SE bus, where the HVDC
+    Elo delivers directly and the ``carga_ande`` load nets in
+    (:func:`~cobre_bridge.decomp.pipeline._convert_scenarios`). This
+    relocation is unconditional whenever Itaipu is operated. The entity
+    ``reservoir`` block is the plant's
     outer per-stage storage envelope (:func:`storage_envelope`), so
     per-stage bound overrides
     (:func:`cobre_bridge.decomp.bounds.convert_storage_bounds`)
@@ -862,16 +865,18 @@ def convert_hydros(
         bus_id = id_map.bus_id(int(hreg["submercado"]))
         if code == _ITAIPU_CODE:
             frequencies = _split_plant_frequencies(hreg, code, effective, mp, fd)
-            # Unconditional 50 Hz -> IV relocation: Itaipu's 50 Hz
-            # unit group (group id 0, the lower of the two ascending
-            # frequencies) is moved to the transshipment bus so cobre's
-            # HydroGeneration{bus} selector can separate the two groups; the
-            # 60 Hz group (group id 1) stays on the plant's own SE bus
-            # (already computed above as `bus_id`).
+            # Unconditional 60 Hz -> IV relocation: Itaipu's 60 Hz
+            # unit group (group id 1, the higher of the two ascending
+            # frequencies) is moved to the transshipment bus -- the AC
+            # corridor into Ivaiporã -- so cobre's HydroGeneration{bus}
+            # selector can separate the two groups; the 50 Hz group (group
+            # id 0) stays on the plant's own SE bus (already computed above
+            # as `bus_id`), where its HVDC Elo delivers directly and the
+            # `carga_ande` load nets in.
             se_bus = bus_id
             iv_bus = id_map.transhipment_bus_id
             unit_groups, max_turbined, max_generation = _build_split_unit_groups(
-                hreg, code, name, [iv_bus, se_bus], frequencies, effective
+                hreg, code, name, [se_bus, iv_bus], frequencies, effective
             )
         else:
             _, max_generation = _rated_envelope(hreg, code, effective)
@@ -1399,14 +1404,15 @@ def convert_itaipu_frequency_min_generation(
 
     DECOMP's ``RI`` (restrição de Itaipu) register carries a must-run floor on
     each Itaipu frequency half: ``geracao_minima_50_hz`` on the 50 Hz group
-    (which serves the Paraguay/ANDE load plus its surplus into SE) and
-    ``geracao_minima_60_hz`` on the 60 Hz group (on the plant's own bus). Each
-    is a per-(estágio, patamar) list, forward-filled across the calendar the
-    same way :func:`~cobre_bridge.decomp.libs_electrical.read_carga_ande` fills
-    the co-located ``carga_ande`` load. In DECOMP the 50 Hz floor binds (the
-    50 Hz half sits exactly at it), so dropping it lets the converted case
+    (on the plant's own SE bus, where it also serves the netted-in
+    Paraguay/ANDE load) and ``geracao_minima_60_hz`` on the 60 Hz group (on
+    the ``IV`` bus, the transshipment corridor into Ivaiporã). Each is a
+    per-(estágio, patamar) list, forward-filled across the calendar the same
+    way :func:`~cobre_bridge.decomp.libs_electrical.read_carga_ande` fills the
+    co-located ``carga_ande`` load. In DECOMP the 50 Hz floor binds (the 50 Hz
+    half sits exactly at it), so dropping it lets the converted case
     under-run Itaipu's 50 Hz half and backfill the ANDE load from the rest of
-    the system through the ``IV`` bus's lines.
+    the system through SE's own lines.
 
     Returns ``{(hydro_id, hydro_unit_group_id, stage_index): [MW per block]}``
     for the two Itaipu groups, ready to merge into the

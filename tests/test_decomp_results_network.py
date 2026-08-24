@@ -292,7 +292,7 @@ class TestIntercSide:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Regression guard: the source model reports some corridors (the
-        Itaipu 50 Hz ``IV`` node, in particular) with a null
+        Itaipu 60 Hz ``IV`` node, in particular) with a null
         ``codigo_submercado_de``/``_para`` -- a name-only endpoint outside
         the ``SB`` register. This must surface as unresolved (``-1``
         sentinel), never raise, since it can never resolve through

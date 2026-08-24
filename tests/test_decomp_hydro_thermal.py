@@ -427,15 +427,16 @@ class TestConvertHydros:
 
 
 class TestItaipuBusRelabel:
-    """ticket-006: the per-frequency split plant's 50 Hz unit group (group
-    id 0, the ascending-frequency convention pinned by
+    """The per-frequency split plant's 60 Hz unit group (group id 1, the
+    ascending-frequency convention pinned by
     :func:`_split_plant_frequencies`) is unconditionally relocated to the
-    ``IV`` transshipment bus; the 60 Hz group (group id 1) stays on the
-    plant's own submercado bus. Pure/synthetic, deck-independent — no
-    ``example/`` read.
+    ``IV`` transshipment bus -- the corridor into Ivaiporã; the 50 Hz group
+    (group id 0) stays on the plant's own SE submercado bus, where its HVDC
+    Elo delivers directly and the ``carga_ande`` load nets in. Pure/synthetic,
+    deck-independent — no ``example/`` read.
     """
 
-    def test_50hz_group_on_iv_60hz_group_on_se(self) -> None:
+    def test_50hz_group_on_se_60hz_group_on_iv(self) -> None:
         hidr = _itaipu_hidr_frame()
         dadger = _StubDadger(
             uh=_itaipu_uh_frame(),
@@ -450,12 +451,12 @@ class TestItaipuBusRelabel:
         itaipu = doc["hydros"][0]
         groups = {g["id"]: g for g in itaipu["unit_groups"]}
         assert groups.keys() == {0, 1}
-        assert groups[0]["bus_id"] == _ITAIPU_ID_MAP.transhipment_bus_id  # 50 Hz -> IV
-        assert groups[1]["bus_id"] == _ITAIPU_ID_MAP.bus_id(1)  # 60 Hz -> SE
+        assert groups[0]["bus_id"] == _ITAIPU_ID_MAP.bus_id(1)  # 50 Hz -> SE
+        assert groups[1]["bus_id"] == _ITAIPU_ID_MAP.transhipment_bus_id  # 60 Hz -> IV
         assert groups[0]["bus_id"] != groups[1]["bus_id"]
 
     def test_envelope_unchanged_by_the_relabel(self) -> None:
-        """The relabel moves only the 50 Hz group's ``bus_id`` — the summed
+        """The relabel moves only the 60 Hz group's ``bus_id`` — the summed
         plant envelope is exactly what it was before the split existed: two
         identical conjuntos, each capped by its own installed power at
         ``100.0 / 0.72`` m3/s (no head data in this fixture, same head-free
