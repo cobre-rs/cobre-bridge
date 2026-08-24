@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -30,8 +29,10 @@ from cobre_bridge.comparators.alignment import EntityAlignment
 from cobre_bridge.comparators.cobre_readers import _scan_simulation_entity
 from cobre_bridge.constraint_expr import (
     evaluate_constraint_expressions,
+    load_rho_acum_overrides,
     parse_expression,
     resolve_param_to_column,
+    scales_storage_by_rho_acum,
 )
 from cobre_bridge.generic_constraint_format import shape_from_bounds
 from cobre_bridge.id_map import NewaveIdMap
@@ -299,6 +300,7 @@ def evaluate_lhs_newave(
 def evaluate_lhs_cobre(
     constraints: list[dict],
     cobre_output_dir: Path,
+    rho_acum_overrides: dict[int, dict[int, float]] | None = None,
 ) -> pl.DataFrame:
     """Evaluate each constraint's LHS from Cobre simulation outputs.
 
@@ -306,6 +308,13 @@ def evaluate_lhs_cobre(
     :func:`cobre_bridge.constraint_expr.evaluate_constraint_expressions`
     (which returns one row per (constraint, scenario, stage, block)) and
     collapses to mean across scenarios and blocks per (constraint, stage).
+
+    ``rho_acum_overrides`` (typically :func:`cobre_bridge.constraint_expr.
+    load_rho_acum_overrides` against the converted case dir) is forwarded
+    verbatim so a ``@rho_acum_h{id}``-scaled constraint (VminOP, RHE)
+    resolves against the LP's actual per-stage coefficient rather than the
+    simulation's default point-productivity column — see
+    :func:`cobre_bridge.constraint_expr.evaluate_constraint_expressions`.
 
     Returns
     -------
@@ -347,7 +356,7 @@ def evaluate_lhs_cobre(
         exchanges_lf = pl.LazyFrame()
 
     lhs_pd: pd.DataFrame = evaluate_constraint_expressions(
-        constraints, hydros_lf, exchanges_lf
+        constraints, hydros_lf, exchanges_lf, rho_acum_overrides
     )
     if lhs_pd.empty:
         return pl.DataFrame(
@@ -466,46 +475,6 @@ _GC_SCHEMA = {
 }
 
 
-def _is_vminop(constraint: dict) -> bool:
-    """True when the constraint scales ``hydro_storage`` by an ``@rho_acum``.
-
-    RE / AGRINT constraints never reference ``@rho_acum_h{id}``; only VminOP
-    (security-curve) constraints do, so this cleanly partitions the set.
-    """
-    for _, param_name, vtype, _ in parse_expression(constraint.get("expression", "")):
-        if (
-            vtype == "hydro_storage"
-            and param_name is not None
-            and param_name.startswith("rho_acum_h")
-        ):
-            return True
-    return False
-
-
-def _load_rho_acum_overrides(cobre_case_dir: Path) -> dict[int, dict[int, float]]:
-    """Load per-stage ρ_acum overrides from ``constraints/generic_parameters.json``.
-
-    Returns ``{hydro_id: {stage_id: ρ_acum}}`` where ρ_acum is the energy-scaled
-    coefficient (MWmonth/hm³) the VminOP LP uses, so ρ·storage[hm³] is MWmonth.
-    """
-    path = cobre_case_dir / "constraints" / "generic_parameters.json"
-    out: dict[int, dict[int, float]] = {}
-    if not path.exists():
-        return out
-    try:
-        with path.open() as f:
-            params = json.load(f).get("scalar_parameters", [])
-    except (OSError, json.JSONDecodeError) as exc:
-        _LOG.warning("generic_parameters.json could not be parsed: %s", exc)
-        return out
-    for entry in params:
-        m = re.fullmatch(r"rho_acum_h(\d+)", str(entry.get("name", "")))
-        if m is None or entry.get("kind") != "per_stage":
-            continue
-        out[int(m.group(1))] = {int(s): float(v) for s, v in entry.get("values", [])}
-    return out
-
-
 def _load_hydro_min_storage(cobre_case_dir: Path) -> dict[int, float]:
     """Load minimum operative storage (hm³) per hydro id from ``hydros.json``."""
     path = cobre_case_dir / "system" / "hydros.json"
@@ -562,11 +531,11 @@ def apply_vminop_useful_energy(
 
     Returns the updated ``(gc_bounds, gc_lhs_nw, gc_lhs_cb)``.
     """
-    vminop = [c for c in constraints if _is_vminop(c)]
+    vminop = [c for c in constraints if scales_storage_by_rho_acum(c)]
     if not vminop:
         return gc_bounds, gc_lhs_nw, gc_lhs_cb
 
-    rho = _load_rho_acum_overrides(cobre_case_dir)
+    rho = load_rho_acum_overrides(cobre_case_dir)
     vmin = _load_hydro_min_storage(cobre_case_dir)
     hydros_lf = _scan_simulation_entity(cobre_output_dir, "hydros")
     if not rho or not vmin or hydros_lf is None:

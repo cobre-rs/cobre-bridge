@@ -22,11 +22,9 @@ import pyarrow.parquet as pq
 
 from cobre_bridge.comparators.alignment import EntityAlignment
 from cobre_bridge.comparators.constraints_compare import (
-    _is_vminop,
     _load_generic_constraint_bounds,
     _load_generic_constraints,
     _load_hydro_min_storage,
-    _load_rho_acum_overrides,
     _resolve_bound,
     apply_vminop_useful_energy,
     evaluate_lhs_cobre,
@@ -34,6 +32,10 @@ from cobre_bridge.comparators.constraints_compare import (
     per_stage_bounds,
 )
 from cobre_bridge.comparators.newave_readers import read_medias_hydro
+from cobre_bridge.constraint_expr import (
+    load_rho_acum_overrides,
+    scales_storage_by_rho_acum,
+)
 from cobre_bridge.id_map import NewaveIdMap
 
 _COBRE_INPUT_DIR = (
@@ -173,11 +175,11 @@ class TestLoadGenericConstraintBounds:
 class TestLoadRhoAcumOverrides:
     def test_parses_per_stage_values(self, tmp_path: Path) -> None:
         _write_generic_parameters(tmp_path)
-        rho = _load_rho_acum_overrides(tmp_path)
+        rho = load_rho_acum_overrides(tmp_path)
         assert rho == {0: {0: 0.5, 1: 0.52}}
 
     def test_degrades_to_empty_dict_on_missing_file(self, tmp_path: Path) -> None:
-        assert _load_rho_acum_overrides(tmp_path) == {}
+        assert load_rho_acum_overrides(tmp_path) == {}
 
 
 class TestLoadHydroMinStorage:
@@ -243,16 +245,16 @@ class TestPerStageBounds:
         assert per_stage_bounds(empty) == {}
 
 
-class TestIsVminop:
+class TestScalesStorageByRhoAcum:
     def test_true_for_rho_acum_scaled_storage(self) -> None:
         constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
         vminop = next(c for c in constraints if c["id"] == _VMINOP_ID)
-        assert _is_vminop(vminop) is True
+        assert scales_storage_by_rho_acum(vminop) is True
 
     def test_false_for_plain_generation_sum(self) -> None:
         constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
         non_vminop = next(c for c in constraints if c["id"] == _NON_VMINOP_ID)
-        assert _is_vminop(non_vminop) is False
+        assert scales_storage_by_rho_acum(non_vminop) is False
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +305,8 @@ class TestEvaluateLhsCobre:
         # constraint 0: generation_mw(hydro 0) + generation_mw(hydro 1).
         assert rows[(_NON_VMINOP_ID, 0)] == 95.0 + 88.0
         assert rows[(_NON_VMINOP_ID, 1)] == 97.0 + 90.0
-        # constraint 1: rho_acum(stage) * storage_final_hm3(hydro 0).
+        # constraint 1, no rho_acum_overrides given: falls back to the
+        # simulation's default accumulated_productivity_mw_per_m3s column.
         assert rows[(_VMINOP_ID, 0)] == 0.5 * 500.0
         assert rows[(_VMINOP_ID, 1)] == 0.52 * 480.0
 
@@ -319,6 +322,72 @@ class TestEvaluateLhsCobre:
             lhs = evaluate_lhs_cobre(constraints, tmp_path)
         assert lhs.is_empty()
         assert "Simulation directory not found" in caplog.text
+
+
+class TestEvaluateLhsCobreRhoAcumOverride:
+    """Regression for the dashboard/DECOMP-compare LHS-scale bug: without
+    ``rho_acum_overrides``, a ``@rho_acum_h{id}``-scaled constraint (VminOP,
+    RHE) silently resolves against the simulation's *default* productivity
+    column, which sits on a different scale than the LP's own per-stage
+    override -- so the evaluated LHS is incomparable to its own bound."""
+
+    def test_override_replaces_default_productivity_column(
+        self, tmp_path: Path
+    ) -> None:
+        _write_sim_hydros_parquet(tmp_path)
+        constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
+        # Deliberately different from the sim default (0.5 at stage 0, see
+        # _write_sim_hydros_parquet) -- mirrors the real VminOP/RHE gap
+        # between cobre's computed default and the LP's per_stage override.
+        overrides = {0: {0: 2.19, 1: 2.5}}
+
+        default_lhs = evaluate_lhs_cobre(constraints, tmp_path)
+        override_lhs = evaluate_lhs_cobre(constraints, tmp_path, overrides)
+
+        def _row(df: pl.DataFrame, cid: int, stage: int) -> float:
+            sub = df.filter(
+                (pl.col("constraint_id") == cid) & (pl.col("stage_id") == stage)
+            )
+            return float(sub["lhs_value"][0])
+
+        assert _row(default_lhs, _VMINOP_ID, 0) == 0.5 * 500.0
+        assert _row(override_lhs, _VMINOP_ID, 0) == 2.19 * 500.0
+        assert _row(override_lhs, _VMINOP_ID, 1) == 2.5 * 480.0
+        assert _row(override_lhs, _VMINOP_ID, 0) != _row(default_lhs, _VMINOP_ID, 0)
+
+        # A constraint with no @rho_acum term is unaffected by the override.
+        assert _row(override_lhs, _NON_VMINOP_ID, 0) == _row(
+            default_lhs, _NON_VMINOP_ID, 0
+        )
+
+    def test_override_can_flip_a_falsely_violated_stage_to_satisfied(
+        self, tmp_path: Path
+    ) -> None:
+        """A wrong (too-low) default productivity can make a satisfied
+        constraint LOOK violated; the LP-faithful override must not."""
+        _write_sim_hydros_parquet(tmp_path)
+        constraint = [
+            {
+                "id": 0,
+                "name": "RHE_1",
+                "expression": "@rho_acum_h0 * hydro_storage(0)",
+            }
+        ]
+        # Between 0.5*500=250 (default) and 2.19*500=1095 (override).
+        bound_lower = 600.0
+
+        default_lhs = evaluate_lhs_cobre(constraint, tmp_path)
+        override_lhs = evaluate_lhs_cobre(constraint, tmp_path, {0: {0: 2.19, 1: 2.5}})
+
+        default_value = float(
+            default_lhs.filter(pl.col("stage_id") == 0)["lhs_value"][0]
+        )
+        override_value = float(
+            override_lhs.filter(pl.col("stage_id") == 0)["lhs_value"][0]
+        )
+
+        assert default_value < bound_lower  # falsely appears violated
+        assert override_value >= bound_lower  # LP-faithful: actually satisfied
 
 
 # ---------------------------------------------------------------------------

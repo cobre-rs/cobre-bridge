@@ -575,3 +575,81 @@ class TestBuildDecompDatasetConstraints:
         constraints_tab = _extract_tab_content(html, "tab-constraints")
         assert "Generic Constraints — LHS vs Bound" in constraints_tab
         assert "Plotly.newPlot" in constraints_tab
+
+    def test_rhe_lhs_forwards_overrides_and_bound_stays_raw_nonnegative(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Regression guard: the RHE cobre-side LHS now resolves
+        ``@rho_acum_h{id}`` via the LP's per-stage override (same mechanism as
+        VminOP), forwarded through ``evaluate_lhs_cobre``'s third positional
+        arg -- and, unlike the source-model VminOP path, the RHE bound is
+        NEVER useful-energy-shifted (dead volume can exceed the bound for
+        DECOMP RHE), so it must reach the dataset unchanged and non-negative.
+        """
+        _patch_aligned_frames(monkeypatch, _aligned_fixture())
+        case_dir = tmp_path / "case"
+        constraints = [
+            {
+                "id": 0,
+                "name": "RHE_115",
+                "description": "RHE stored-energy constraint 115",
+                "expression": "@rho_acum_h0 * hydro_storage(0)",
+                "slack": {"enabled": True, "penalty": 1000.0},
+            }
+        ]
+        raw_bound_lower = 3097.40
+        bound_rows = [
+            {
+                "constraint_id": 0,
+                "stage_id": 0,
+                "block_id": None,
+                "bound_lower": raw_bound_lower,
+                "bound_upper": None,
+            }
+        ]
+        output_dir = _write_generic_constraints_case(case_dir, constraints, bound_rows)
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            _no_dec_oper,
+        )
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            lambda *_a, **_k: pl.DataFrame(
+                {
+                    "estagio": [1],
+                    "no": [1],
+                    "cenario": [1],
+                    "codigo_restricao": [115],
+                    "valor_MW": [2951.58],
+                    "violacao_absoluta_MW": [145.83],
+                }
+            ),
+        )
+        calls: list[tuple[object, ...]] = []
+
+        def _capturing_evaluate_lhs_cobre(*args: object, **_kw: object) -> pl.DataFrame:
+            calls.append(args)
+            return pl.DataFrame(
+                {"constraint_id": [0], "stage_id": [0], "lhs_value": [3000.0]}
+            )
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.constraints_compare.evaluate_lhs_cobre",
+            _capturing_evaluate_lhs_cobre,
+        )
+
+        dataset = build_decomp_dataset(case_dir, output_dir)
+
+        # evaluate_lhs_cobre received a third positional arg -- the
+        # rho_acum_overrides mapping ({} here, since no
+        # generic_parameters.json was written by this fixture).
+        assert len(calls) == 1
+        assert calls[0][2] == {}
+
+        bound_row = dataset.render.gc_bounds.row(0, named=True)
+        assert bound_row["bound_lower"] == pytest.approx(raw_bound_lower)
+        assert bound_row["bound_lower"] >= 0.0

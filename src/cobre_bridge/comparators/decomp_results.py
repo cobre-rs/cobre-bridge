@@ -2973,12 +2973,21 @@ def build_decomp_dataset(
         _load_generic_constraints,
         evaluate_lhs_cobre,
     )
+    from cobre_bridge.constraint_expr import load_rho_acum_overrides
 
     cobre_case_dir = case_dir_for(cobre_output_dir)
     gc_constraints = _load_generic_constraints(cobre_case_dir)
     gc_bounds_df = _load_generic_constraint_bounds(cobre_case_dir)
     if gc_constraints:
-        gc_lhs_cb = evaluate_lhs_cobre(gc_constraints, cobre_output_dir)
+        # RHE's ``@rho_acum_h{id}`` resolves against the LP's per-stage
+        # override (same mechanism as VminOP), not the simulation's default
+        # productivity column -- unlike the source-model VminOP path, RHE's
+        # bound is never useful-energy-shifted (dead volume can exceed the
+        # bound here), so only the LHS scaling is corrected.
+        rho_acum_overrides = load_rho_acum_overrides(cobre_case_dir)
+        gc_lhs_cb = evaluate_lhs_cobre(
+            gc_constraints, cobre_output_dir, rho_acum_overrides
+        )
         gc_lhs_nw = _generic_constraint_lhs_decomp(
             case, cobre_output_dir, gc_constraints, probabilities=probabilities
         )

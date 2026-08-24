@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from cobre_bridge.constraint_expr import evaluate_constraint_expressions
+from cobre_bridge.constraint_expr import (
+    evaluate_constraint_expressions,
+    load_rho_acum_overrides,
+)
 from cobre_bridge.dashboard.tabs.constraints_utils import (
     build_constraints_summary_table,
     derive_constraint_shape,
@@ -552,9 +555,14 @@ def can_render(data: DashboardData) -> bool:
 
 def render(data: DashboardData) -> str:
     """Return the full HTML string for the v2 Constraints tab content area."""
-    # Evaluate LHS expressions once; passed to LHS vs Bound chart
+    # Evaluate LHS expressions once; passed to LHS vs Bound chart. A
+    # @rho_acum_h{id}-scaled term (VminOP, RHE) resolves against the LP's
+    # per-stage override, not the simulation's default point-productivity
+    # column -- otherwise the LHS renders on the wrong scale relative to its
+    # own (unmodified) bound.
+    rho_acum_overrides = load_rho_acum_overrides(data.case_dir)
     lhs_df = evaluate_constraint_expressions(
-        data.gc_constraints, data.hydros_lf, data.exchanges_lf
+        data.gc_constraints, data.hydros_lf, data.exchanges_lf, rho_acum_overrides
     )
 
     # --- Section A: metrics row ---
