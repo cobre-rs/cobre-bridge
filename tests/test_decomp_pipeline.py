@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -16,6 +17,7 @@ import pyarrow.parquet as pq
 import pytest
 from typer.testing import CliRunner
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.cli import app
 from cobre_bridge.decomp.anticipated import GnlEmission
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
@@ -45,8 +47,7 @@ from cobre_bridge.decomp.single_term_bounds import HydroCapacities
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import _THERMAL_COST_SCHEMA, ThermalBounds
 from cobre_bridge.diagnostics import Diagnostic
-
-_RV3_DECK = Path("example/decomp-jul-26-rv3")
+from tests.conftest import make_decomp_case
 
 _ID_MAP = DecompIdMap(
     bus_codes=(1, 2),
@@ -58,6 +59,12 @@ _ID_MAP = DecompIdMap(
 def _calendar():
     hours = [[15.0, 64.0, 89.0]] * 2 + [[63.0, 280.0, 401.0]]
     return build_operative_calendar(date(2026, 7, 18), hours)
+
+
+def _scenario_case():
+    """A ``DecompCase`` carrying only ``calendar`` — the sole cached slot
+    ``convert_external_inflows``/``convert_inflow_stats_identity`` read."""
+    return make_decomp_case(Path("unused"), calendar=_calendar())
 
 
 def _hidr_frame() -> pd.DataFrame:
@@ -110,7 +117,10 @@ class TestScenarioEmitters:
     def test_external_inflows_are_incremental(self) -> None:
         hidr = _hidr_frame()
         table = convert_external_inflows(
-            _StubVazoes(), _effective_no_override(hidr), _ID_MAP, _calendar()
+            _scenario_case(),
+            _ID_MAP,
+            vazoes=_StubVazoes(),
+            effective=_effective_no_override(hidr),
         ).to_pandas()
         # 4 tree nodes × 2 hydros.
         assert len(table) == 8
@@ -123,7 +133,7 @@ class TestScenarioEmitters:
         assert fan[fan["hydro_id"] == 1]["value_m3s"].iloc[0] == pytest.approx(180.0)
 
     def test_identity_stats(self) -> None:
-        stats = convert_inflow_stats_identity(_ID_MAP, _calendar()).to_pandas()
+        stats = convert_inflow_stats_identity(_scenario_case(), _ID_MAP).to_pandas()
         assert len(stats) == 2 * 3
         assert set(stats["mean_m3s"]) == {0.0}
         assert set(stats["std_m3s"]) == {1.0}
@@ -181,127 +191,51 @@ class TestScenarioEmitters:
         vazoes.cenarios_gerados.loc[0, "estagio"] = 2
         with pytest.raises(ValueError, match="node-graph"):
             convert_external_inflows(
-                vazoes, _effective_no_override(_hidr_frame()), _ID_MAP, _calendar()
+                _scenario_case(),
+                _ID_MAP,
+                vazoes=vazoes,
+                effective=_effective_no_override(_hidr_frame()),
             )
 
 
-_EXPECTED_ARTIFACTS = [
-    "config.json",
-    "stages.json",
-    "penalties.json",
-    "initial_conditions.json",
-    "system/buses.json",
-    "system/hydros.json",
-    "system/lines.json",
-    "system/pumping_stations.json",
-    "system/thermals.json",
-    "system/hydro_production_models.json",
-    "system/hydro_energy_productivity.parquet",
-    "system/non_controllable_sources.json",
-    "scenarios/inflow_seasonal_stats.parquet",
-    "scenarios/external_inflow_scenarios.parquet",
-    "scenarios/external_ncs_scenarios.parquet",
-    "scenarios/external_load_scenarios.parquet",
-    "scenarios/load_seasonal_stats.parquet",
-    "scenarios/load_factors.json",
-    "scenarios/non_controllable_stats.parquet",
-    "scenarios/non_controllable_factors.json",
-    "constraints/thermal_bounds.parquet",
-    "constraints/line_bounds.parquet",
-    "constraints/hydro_bounds.parquet",
-    "constraints/pumping_bounds.parquet",
-]
-
-
 class TestPipeline:
-    @pytest.mark.skipif(
-        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
-    )
-    def test_rv3_full_conversion(self, tmp_path: Path) -> None:
-        from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-        dst = tmp_path / "case"
-        convert_decomp_case(_RV3_DECK, dst)  # ticket-023c: no longer raises
-
-        for artifact in _EXPECTED_ARTIFACTS:
-            assert (dst / artifact).is_file(), artifact
-        # The exchange-factors document is retired: line_bounds carries the
-        # per-block absolute-MW rows directly, so nothing writes this file.
-        assert not (dst / "constraints" / "exchange_factors.json").exists()
-
-        stages = json.loads((dst / "stages.json").read_text())
-        assert len(stages["stages"]) == 3
-        # No per-stage num_openings on external-only DECOMP stages.
-        assert all("num_openings" not in s for s in stages["stages"])
-        graph = stages["policy_graph"]
-        assert graph["annual_discount_rate"] == pytest.approx(0.12)
-        # 3 stages: 2 trunk nodes (0,1) + a 353-node terminal fan (ids 2..354).
-        assert len(graph["nodes"]) == 2 + 353
-        assert sum(1 for n in graph["nodes"] if n["stage_id"] == 0) == 1
-        fan_edges = [t for t in graph["transitions"] if t["source_id"] == 1]
-        assert len(fan_edges) == 353
-        assert sum(t["probability"] for t in fan_edges) == pytest.approx(1.0, abs=1e-4)
-
-        config = json.loads((dst / "config.json").read_text())
-        # Training enumerates the tree; simulation samples the fan (C10 gap).
-        assert config["training"]["selection"] == {"method": "enumerated"}
-        assert config["simulation"]["selection"] == {
-            "method": "sampled",
-            "num_scenarios": 353,
-        }
-        assert config["training"]["stopping_rules"] == [
-            {"type": "gap", "relative_tolerance": 0.001},
-            {"type": "iteration_limit", "limit": 500},
-        ]
-        source = config["training"]["scenario_source"]
-        assert source["inflow"]["scheme"] == "external"
-        # Every stochastic class is external: inflow (the tree), load, NCS.
-        assert source["ncs"]["scheme"] == "external"
-        assert source["load"]["scheme"] == "external"
-        assert source["seed"] == 20260718
-
-        buses = json.loads((dst / "system" / "buses.json").read_text())["buses"]
-        assert len(buses) == 6
-
-        external = pq.read_table(
-            dst / "scenarios" / "external_inflow_scenarios.parquet"
-        )
-        hydros = json.loads((dst / "system" / "hydros.json").read_text())["hydros"]
-        assert external.num_rows == len(hydros) * (1 + 1 + 353)
-        # External NCS library: 32 sources × (trunk col + trunk col + 353 fan).
-        ext_ncs = pq.read_table(dst / "scenarios" / "external_ncs_scenarios.parquet")
-        # cobre's 0.14 clean break renamed the NCS availability column
-        # `value` -> `availability_factor` (the sole accepted spelling).
-        assert set(ext_ncs.column_names) == {
-            "stage_id",
-            "scenario_id",
-            "ncs_id",
-            "availability_factor",
-        }
-        n_ncs = len(
-            json.loads((dst / "system" / "non_controllable_sources.json").read_text())[
-                "non_controllable_sources"
-            ]
-        )
-        assert ext_ncs.num_rows == n_ncs * (1 + 1 + 353)
-        # External load library: 6 buses × (trunk col + trunk col + 353 fan).
-        ext_load = pq.read_table(dst / "scenarios" / "external_load_scenarios.parquet")
-        assert set(ext_load.column_names) == {
-            "stage_id",
-            "scenario_id",
-            "bus_id",
-            "value_mw",
-        }
-        assert ext_load.num_rows == len(buses) * (1 + 1 + 353)
-
-        with pytest.raises(FileExistsError, match="force"):
-            convert_decomp_case(_RV3_DECK, dst)
-
     def test_missing_deck_raises(self, tmp_path: Path) -> None:
         from cobre_bridge.decomp.pipeline import convert_decomp_case
 
         with pytest.raises(FileNotFoundError, match="caso.dat"):
             convert_decomp_case(tmp_path, tmp_path / "out")
+
+    def test_discover_decomp_files_no_caso_raises_source_file_error(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.errors import SourceFileError
+
+        with pytest.raises(SourceFileError) as excinfo:
+            discover_decomp_files(tmp_path)
+
+        exc = excinfo.value
+        assert isinstance(exc, FileNotFoundError)
+        assert exc.path == str(tmp_path)
+        assert exc.field == "caso.dat"
+        assert "caso.dat" in str(exc)
+
+    def test_discover_decomp_files_no_dadger_raises_source_file_error(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.errors import SourceFileError
+
+        (tmp_path / "caso.dat").write_text("rv0\n", encoding="latin-1")
+
+        with pytest.raises(SourceFileError) as excinfo:
+            discover_decomp_files(tmp_path)
+
+        exc = excinfo.value
+        assert isinstance(exc, FileNotFoundError)
+        assert exc.path == str(tmp_path)
+        assert exc.field == "dadger"
+        assert "no dadger* file found" in str(exc)
 
 
 class TestPhaseLabels:
@@ -321,109 +255,113 @@ class TestPhaseLabels:
             "Writing outputs",
         )
 
-    @pytest.mark.skipif(
-        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
-    )
-    def test_rv3_on_phase_callback_receives_every_label_once_in_order(
-        self, tmp_path: Path
-    ) -> None:
-        from cobre_bridge.decomp.pipeline import (
-            DECOMP_CONVERSION_PHASE_LABELS,
-            convert_decomp_case,
+
+class TestDecompCaseArtifacts:
+    """ticket-013 (epic-03): the bundle ``_discover``/``_convert_core_entities``/
+    ``_convert_scenarios`` thread across the discovery/entity/scenario phases,
+    and the still-inline bounds/constraints/write phases read back off — must
+    carry every field those five functions (plus ticket-016's FCF importer,
+    which reads ``config``/``initial_conditions``) depend on."""
+
+    def test_field_contract(self) -> None:
+        from cobre_bridge.decomp.pipeline import DecompCaseArtifacts
+
+        field_names = {f.name for f in dataclasses.fields(DecompCaseArtifacts)}
+        assert {
+            "case",
+            "id_map",
+            "dadger",
+            "calendar",
+            "vazoes",
+            "effective",
+            "itaipu_operated",
+            "fan_probabilities",
+            "tx",
+            "config",
+            "stages_dict",
+            "hydros_dict",
+            "thermals_dict",
+            "buses_doc",
+            "lines_doc",
+            "line_bounds",
+            "initial_conditions",
+            "deficit_cost",
+            "has_travel_time",
+            "fpha_codes",
+        } <= field_names
+
+        # _discover's own fields are required (no default); every later-phase
+        # field defaults to None until _convert_core_entities/_convert_scenarios
+        # populate it.
+        artifacts = DecompCaseArtifacts(
+            case=object(),
+            id_map=_ID_MAP,
+            dadger=object(),
+            calendar=[],
+            vazoes=object(),
+            effective=object(),
+            itaipu_operated=False,
+            fan_probabilities=[1.0],
+            tx=0.1,
         )
+        assert artifacts.config is None
+        assert artifacts.initial_conditions is None
+        assert artifacts.stages_dict is None
+        assert artifacts.hydros_dict is None
+        assert artifacts.thermals_dict is None
+        assert artifacts.lines_doc is None
+        assert artifacts.line_bounds is None
 
-        labels: list[str] = []
-        dst = tmp_path / "case"
-        convert_decomp_case(_RV3_DECK, dst, on_phase=labels.append)
-
-        assert labels == list(DECOMP_CONVERSION_PHASE_LABELS)
-
-    @pytest.mark.skipif(
-        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
-    )
-    def test_rv3_no_on_phase_still_returns_a_report_without_raising(
-        self, tmp_path: Path
-    ) -> None:
-        from cobre_bridge.decomp.pipeline import ConversionReport, convert_decomp_case
-
-        dst = tmp_path / "case"
-        report = convert_decomp_case(_RV3_DECK, dst)
-
-        assert isinstance(report, ConversionReport)
+        artifacts.config = {"a": 1}
+        artifacts.initial_conditions = {"storage": []}
+        artifacts.stages_dict = {"stages": []}
+        artifacts.hydros_dict = {"hydros": []}
+        artifacts.thermals_dict = {"thermals": []}
+        artifacts.lines_doc = {"lines": []}
+        artifacts.line_bounds = pa.table({"line_id": pa.array([], type=pa.int32())})
+        assert isinstance(artifacts.config, dict)
+        assert isinstance(artifacts.initial_conditions, dict)
+        assert isinstance(artifacts.stages_dict, dict)
+        assert isinstance(artifacts.hydros_dict, dict)
+        assert isinstance(artifacts.thermals_dict, dict)
+        assert isinstance(artifacts.id_map, DecompIdMap)
+        assert isinstance(artifacts.lines_doc, dict)
+        assert isinstance(artifacts.line_bounds, pa.Table)
 
 
 class TestEmissionCheckWiring:
     """The post-emission self-checks (ticket-016, epic-04) run inside
     ``convert_decomp_case``, before the constraint writes."""
 
-    @pytest.mark.skipif(
-        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
-    )
-    def test_rv3_belo_monte_generation_ceiling_clamped_to_capacity(
-        self, tmp_path: Path
-    ) -> None:
-        """AC4 (ticket-023c): DECOMP writes ``max_generation_mw`` rows on
-        ``hydro_bounds`` (RE ``FU`` single-hydro-generation contributions,
-        resolved through the accumulator) — rule 43 is genuinely reachable
-        (no longer always "not applicable"). BELO MONTE (hydro 159) carries
-        two RE records declaring an 11000 MW ceiling above its own
-        entity-declared, head-derated capacity (9777.776 MW) — a real
-        cross-source mismatch (see ``single_term_bounds.py``'s module
-        docstring). ``_re_generation_contributions`` clamps every emitted
-        row down to the declared capacity, so ``convert_decomp_case`` no
-        longer raises the rule-43 ``hydro-bounds-raises-declared-capacity``
-        error on it, and a ``decomp-re-generation-clamped`` diagnostic
-        records the clamp instead.
+    def test_run_and_gate_raises_on_duplicate_bound_row(self) -> None:
+        """tier-1 (no ``example/`` deck): drives the same
+        ``emission_checks.run_and_gate`` call ``_convert_decomp_case_impl``
+        now makes (ticket-002), over a synthetic in-memory bounds table
+        carrying one duplicate ``(hydro_id, stage_id, block_id, column)`` row
+        (cobre rule 36, ``check_bound_row_uniqueness``) — the gate must raise
+        ``EmissionCheckError``, and that exception must still satisfy
+        ``isinstance(exc, ValueError)`` for any existing
+        ``pytest.raises(ValueError)`` call site."""
+        from cobre_bridge import emission_checks
 
-        ticket-003: ``convert_decomp_case`` now owns its own ``dx.collect()``
-        and returns a ``ConversionReport``, so this reads
-        ``report.diagnostics`` instead of wrapping the call in its own outer
-        sink (which would now be shadowed and see nothing). Also covers
-        AC-1/AC-2: every entity/stage count on the report is ``> 0``, and the
-        report carries the ``cadastro-overrides-applied`` INFO diagnostic
-        plus at least one WARNING-severity diagnostic (the bridged deferral
-        warning)."""
-        from cobre_bridge import diagnostics as dx
-        from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-        dst = tmp_path / "case"
-        report = convert_decomp_case(_RV3_DECK, dst)  # must not raise
-
-        assert report.hydro_count > 0
-        assert report.thermal_count > 0
-        assert report.bus_count > 0
-        assert report.line_count > 0
-        assert report.stage_count > 0
-
-        assert any(d.code == "cadastro-overrides-applied" for d in report.diagnostics)
-        assert any(d.severity is dx.Severity.WARNING for d in report.diagnostics)
-
-        hydros = json.loads((dst / "system" / "hydros.json").read_text())["hydros"]
-        belo_monte = next(h for h in hydros if h["id"] == 159)
-        capacity = belo_monte["generation"]["max_generation_mw"]
-        assert capacity == pytest.approx(9777.776)
-
-        hydro_bounds = pq.read_table(dst / "constraints" / "hydro_bounds.parquet")
-        belo_monte_ceilings = [
-            row["max_generation_mw"]
-            for row in hydro_bounds.to_pylist()
-            if row["hydro_id"] == 159 and row["max_generation_mw"] is not None
+        hydro_bounds = pa.table(
+            {
+                "hydro_id": pa.array([0, 0], type=pa.int32()),
+                "stage_id": pa.array([1, 1], type=pa.int32()),
+                "block_id": pa.array([None, None], type=pa.int32()),
+                "min_outflow_m3s": pa.array([5.0, 5.0], type=pa.float64()),
+            }
+        )
+        bound_families = [
+            emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds)
         ]
-        assert belo_monte_ceilings, "expected clamped max_generation_mw row(s)"
-        assert all(v == pytest.approx(capacity) for v in belo_monte_ceilings)
 
-        errors = [
-            d
-            for d in report.diagnostics
-            if d.code == "hydro-bounds-raises-declared-capacity"
-        ]
-        assert errors == []
+        def _run_emission_checks() -> None:
+            emission_checks.check_bound_row_uniqueness(bound_families)
 
-        clamped = [
-            d for d in report.diagnostics if d.code == "decomp-re-generation-clamped"
-        ]
-        assert clamped
-        assert any("Hydro 159" in d.summary for d in clamped)
+        with pytest.raises(emission_checks.EmissionCheckError) as excinfo:
+            emission_checks.run_and_gate(_run_emission_checks)
+        assert isinstance(excinfo.value, ValueError)
 
     def test_decomp_shaped_violation_flips_convert_status_through_the_same_function(
         self,
@@ -464,129 +402,6 @@ class TestEmissionCheckWiring:
         assert _convert_status(collected, success="ok") == "error"
         assert _convert_status([], success="ok") == "ok"
 
-    @pytest.mark.skipif(
-        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
-    )
-    def test_a_real_emission_check_error_makes_the_real_conversion_fail(
-        self, tmp_path: Path
-    ) -> None:
-        """A DECOMP deck carrying a synthetic emission-check violation makes
-        the REAL conversion path fail: ``convert_decomp_case`` must raise, not
-        merely compute an "error" status from hand-built diagnostics (Finding
-        1, epic-04 boundary remediation). The violation is injected by
-        patching ONE check function to unconditionally emit an ERROR
-        diagnostic; file discovery, deck parsing, every converter, and the
-        OTHER three checks all still run for real against the rv3 deck."""
-        from cobre_bridge import diagnostics as dx
-        from cobre_bridge import emission_checks
-        from cobre_bridge.decomp.pipeline import convert_decomp_case
-        from cobre_bridge.diagnostics import Diagnostic, Severity
-
-        def _synthetic_violation(*args: object, **kwargs: object) -> None:
-            dx.emit(
-                Diagnostic(
-                    code="synthetic-test-violation",
-                    severity=Severity.ERROR,
-                    category="Emission self-checks",
-                    title="Synthetic violation injected by the test",
-                    summary="synthetic ERROR diagnostic for Finding-1 coverage",
-                )
-            )
-
-        dst = tmp_path / "case"
-        with (
-            patch.object(
-                emission_checks,
-                "check_unit_group_envelope",
-                side_effect=_synthetic_violation,
-            ),
-            pytest.raises(ValueError, match="synthetic-test-violation"),
-        ):
-            convert_decomp_case(_RV3_DECK, dst)
-
-        # The raise happens before the constraint tables are written, so no
-        # half-valid case should look convertible on a bare retry.
-        assert not (dst / "constraints" / "hydro_bounds.parquet").exists()
-
-
-class TestContractWiring:
-    """ticket-004 (epic-01): the CI/CE contract model wires into
-    ``convert_decomp_case``, gated on non-empty like every other bound
-    family it joins in ``bound_families``."""
-
-    @pytest.mark.skipif(
-        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
-    )
-    def test_rv3_conversion_writes_no_contract_files(self, tmp_path: Path) -> None:
-        """rv3 has no contracts (D6 skips its lone placeholder row), so
-        neither gated write fires and the conversion still completes clean."""
-        from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-        dst = tmp_path / "case"
-        convert_decomp_case(_RV3_DECK, dst)
-
-        assert not (dst / "system" / "energy_contracts.json").exists()
-        assert not (dst / "constraints" / "contract_bounds.parquet").exists()
-
-    @pytest.mark.skipif(
-        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
-    )
-    def test_deck_with_contract_writes_both_files(self, tmp_path: Path) -> None:
-        """A deck carrying one non-placeholder contract writes both gated
-        files, non-empty — ``read_contracts`` is patched to yield it so the
-        rest of the real rv3 conversion (dadger parsing, id_map, calendar,
-        every other converter) still runs for real."""
-        from collections.abc import Sequence
-
-        from idecomp.decomp import Dadger
-
-        from cobre_bridge.decomp.contracts import Contract, ContractStage
-        from cobre_bridge.decomp.pipeline import convert_decomp_case
-        from cobre_bridge.decomp.temporal import OperativeStage
-
-        def _fake_read_contracts(
-            dadger: Dadger, calendar: Sequence[OperativeStage]
-        ) -> list[Contract]:
-            sb = dadger.sb(df=True)
-            bus_code = int(sb["codigo_submercado"].iloc[0])
-            stages = [
-                ContractStage(
-                    min_mw=[0.0] * len(stage.block_hours),
-                    max_mw=[100.0] * len(stage.block_hours),
-                    custo=[50.0] * len(stage.block_hours),
-                    loss_factor=None,
-                )
-                for stage in calendar
-            ]
-            return [
-                Contract(
-                    id=0,
-                    kind="import",
-                    numero=1,
-                    name="Test Contract",
-                    bus_code=bus_code,
-                    stages=stages,
-                )
-            ]
-
-        dst = tmp_path / "case"
-        with patch(
-            "cobre_bridge.decomp.pipeline.contracts_conv.read_contracts",
-            side_effect=_fake_read_contracts,
-        ):
-            convert_decomp_case(_RV3_DECK, dst)
-
-        contracts_path = dst / "system" / "energy_contracts.json"
-        bounds_path = dst / "constraints" / "contract_bounds.parquet"
-        assert contracts_path.is_file()
-        assert bounds_path.is_file()
-
-        contracts_doc = json.loads(contracts_path.read_text())
-        assert len(contracts_doc["contracts"]) == 1
-
-        bounds_table = pq.read_table(bounds_path)
-        assert bounds_table.num_rows > 0
-
 
 class TestBoundAccumulatorWiring:
     """ticket-023 (epic-07): the E2 accumulator is the *single* merge point
@@ -609,54 +424,6 @@ class TestBoundAccumulatorWiring:
         source = inspect.getsource(pipeline)
         assert source.count("concat_tables") == 1
         assert "pa.concat_tables(generic_bound_tables)" in source
-
-    @pytest.mark.skipif(
-        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
-    )
-    def test_resolve_and_build_bound_tables_run_exactly_once(
-        self, tmp_path: Path
-    ) -> None:
-        """Every contribution family (legacy hydro/storage/thermal, plus the
-        RE/RHQ/RHV single-term producers) is collected once and fed through
-        exactly one ``resolve`` + ``build_bound_tables`` pass — not one pass
-        per family."""
-        from cobre_bridge.decomp import bounds_accumulator
-        from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-        dst = tmp_path / "case"
-        with (
-            patch.object(
-                bounds_accumulator, "resolve", wraps=bounds_accumulator.resolve
-            ) as mock_resolve,
-            patch.object(
-                bounds_accumulator,
-                "build_bound_tables",
-                wraps=bounds_accumulator.build_bound_tables,
-            ) as mock_build,
-        ):
-            convert_decomp_case(_RV3_DECK, dst)
-
-        assert mock_resolve.call_count == 1
-        assert mock_build.call_count == 1
-
-    @pytest.mark.skipif(
-        not (_RV3_DECK / "caso.dat").exists(), reason="rv3 deck not present"
-    )
-    def test_rv3_pumping_bounds_written_with_qbom_records(self, tmp_path: Path) -> None:
-        """rv3 declares QBOM single-term pumping bounds (RHQ) — the new
-        ``pumping_bounds.parquet`` exists with ``PUMPING_BOUNDS_SCHEMA``
-        columns (AC #4, the positive half)."""
-        from cobre_bridge.decomp.bounds_accumulator import PUMPING_BOUNDS_SCHEMA
-        from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-        dst = tmp_path / "case"
-        convert_decomp_case(_RV3_DECK, dst)
-
-        path = dst / "constraints" / "pumping_bounds.parquet"
-        assert path.is_file()
-        table = pq.read_table(path)
-        assert table.column_names == PUMPING_BOUNDS_SCHEMA.names
-        assert table.num_rows > 0
 
     def test_no_pumping_records_writes_no_pumping_bounds_file(
         self, tmp_path: Path
@@ -925,13 +692,28 @@ def _run_cadastro_pipeline(
         dadger=Path("unused/dadger.rv0"),
         vazoes=Path("unused/vazoes.rv0"),
         hidr=Path("unused/hidr.dat"),
-        dadgnl=Path("unused/dadgnl.rv0") if gnl_emission is not None else None,
+        dadgnl=None,
         renovaveis=None,
         polinjus=None,
     )
     dadger = _CadastroDadger(ac_volmax_frame)
     hidr = _cadastro_hidr_frame()
     calendar = _calendar()
+    case = make_decomp_case(
+        files,
+        dadger=dadger,
+        hidr=hidr,
+        id_map=_CADASTRO_ID_MAP,
+        calendar=calendar,
+        renovaveis=None,
+        # A non-None sentinel enters convert_decomp_case's GNL wiring branch
+        # (gated on ``case.dadgnl is not None``); the model's own decode is
+        # patched below via ``anticipated_conv.read_gnl_model``, so the
+        # sentinel's identity never matters.
+        dadgnl=object() if gnl_emission is not None else None,
+        polinjus=None,
+        libs_restricao_eletrica=None,
+    )
 
     productivity_table = pa.table(
         {"equivalent_productivity_mw_per_m3s": pa.array([0.5, 0.6], type=pa.float64())}
@@ -977,13 +759,8 @@ def _run_cadastro_pipeline(
     ]
 
     patches: dict[str, object] = {
-        "cobre_bridge.decomp.pipeline.discover_decomp_files": files,
-        "cobre_bridge.decomp.pipeline.Dadger.read": dadger,
+        "cobre_bridge.decomp.pipeline.DecompCase.from_directory": case,
         "cobre_bridge.decomp.pipeline.Vazoes.read": object(),
-        "cobre_bridge.decomp.pipeline.hydro_conv.read_hidr": hidr,
-        "cobre_bridge.decomp.pipeline.DecompIdMap.from_dadger": _CADASTRO_ID_MAP,
-        "cobre_bridge.decomp.pipeline"
-        ".temporal_conv.operative_calendar_from_dadger": calendar,
         "cobre_bridge.decomp.pipeline.scenarios_conv.terminal_fan_probabilities": [1.0],
         "cobre_bridge.decomp.pipeline.config_conv.convert_config": {},
         "cobre_bridge.decomp.pipeline.network_conv._bus_deficit_costs": {},
@@ -1025,11 +802,11 @@ def _run_cadastro_pipeline(
             ConstraintCensus(by_family={}, to_bounds=(), to_generic=to_generic)
         ),
         "cobre_bridge.decomp.pipeline.network_conv.pumping_station_id_map": {},
-        # ticket-023b: the mock DecompFiles below points at a placeholder,
-        # non-existent dadger path (Dadger.read is patched, so no real file
-        # I/O happens anywhere else in this fixture) — the E1 detection
-        # helpers read the raw deck files directly, so they must be patched
-        # here too, the same way the special-constraint reader above is.
+        # ticket-023b: the mock deck exposes no real files (DecompCase.from_directory
+        # is patched wholesale above, so no real file I/O happens anywhere in this
+        # fixture) — the E1 detection helpers read the raw deck files directly, so
+        # they must be patched here too, the same way the special-constraint
+        # reader above is.
         "cobre_bridge.decomp.pipeline"
         ".constraint_registers.detect_unreadable_electrical": list(
             unreadable_electrical
@@ -1039,12 +816,13 @@ def _run_cadastro_pipeline(
         ),
     }
     if gnl_emission is not None:
-        # ticket-004: route the GNL wiring block (pipeline.py:779-810) through
+        # ticket-004: route the GNL wiring block through
         # its own patches rather than the empty/absent default above —
         # convert_gnl's own decode/placement logic stays out of scope
         # (tests/test_decomp_anticipated.py owns it), only the routing of its
         # *return value* into the written case files is under test here.
-        patches["cobre_bridge.decomp.pipeline.Dadgnl.read"] = object()
+        # ``case.dadgnl`` is already the non-None sentinel set above, so only
+        # its downstream decode (read_gnl_model) needs patching here.
         patches["cobre_bridge.decomp.pipeline.anticipated_conv.read_gnl_model"] = (
             object()
         )
@@ -1074,10 +852,10 @@ def _run_cadastro_pipeline(
 # ticket-004 (epic-03): two hand-built ``GnlEmission`` fixtures driving
 # ``TestGnlWiring`` below via ``_run_cadastro_pipeline``'s ``gnl_emission``
 # param — no real ``dadgnl`` deck, no ``convert_gnl`` execution (it is
-# mocked). "Populated" carries a non-empty right boundary (a pinned,
-# post-horizon delivery); "empty-right-boundary" mirrors a GS-calendar-only
-# plant (e.g. PSERGIPE I) that declares free deliveries in-study but commits
-# none post-horizon.
+# mocked). "Populated" carries a non-empty post-study ``thermal_bounds``
+# carrier; "empty" mirrors a GS-calendar-only plant (e.g. PSERGIPE I) whose
+# post-study stages are all class-4 já-comandada, so none get a
+# ``thermal_bounds`` row.
 _POPULATED_GNL_EMISSION = GnlEmission(
     thermals=[
         {"id": 1, "name": "GNL A", "anticipated_config": {"lead_time_hours": 168.0}},
@@ -1087,22 +865,17 @@ _POPULATED_GNL_EMISSION = GnlEmission(
         {"thermal_id": 1, "stage_id": 0, "mw": 50.0},
         {"thermal_id": 2, "stage_id": 0, "mw": 30.0},
     ],
-    future_anticipated_deliveries=[
-        {"thermal_id": 1, "stage_id": 12, "min_mw": 50.0, "max_mw": 50.0},
-        {"thermal_id": 2, "stage_id": 12, "min_mw": 0.0, "max_mw": 100.0},
-    ],
     post_study_stages={
         "stages": [{"id": 12, "start_date": "2027-07-06"}],
         "thermal_bounds": [{"thermal_id": 1, "stage_id": 12, "max_mw": 50.0}],
     },
 )
 
-_EMPTY_RIGHT_BOUNDARY_GNL_EMISSION = GnlEmission(
+_EMPTY_THERMAL_BOUNDS_GNL_EMISSION = GnlEmission(
     thermals=[
         {"id": 1, "name": "GNL A", "anticipated_config": {"lead_time_hours": 168.0}},
     ],
     past_anticipated_commitments=[{"thermal_id": 1, "stage_id": 0, "mw": 20.0}],
-    future_anticipated_deliveries=[],
     post_study_stages={
         "stages": [{"id": 12, "start_date": "2027-07-06"}],
         "thermal_bounds": [],
@@ -1112,7 +885,7 @@ _EMPTY_RIGHT_BOUNDARY_GNL_EMISSION = GnlEmission(
 
 class TestGnlWiring:
     """ticket-004 (epic-03): regression-guard the pre-existing GNL wiring
-    block (``pipeline.py:779-810``). Epic 02 reworked ``convert_gnl`` to
+    block. Epic 02 reworked ``convert_gnl`` to
     synthesise a GS-driven post-study calendar and free (not just pinned)
     forward deliveries, but the pipeline call site already carried the
     unchanged ``GnlEmission`` shape to disk — no tier-1 test exercised it,
@@ -1143,12 +916,14 @@ class TestGnlWiring:
         written_stages = json.loads((dst / "stages.json").read_text())["stages"]
         assert call_kwargs["stages"] == written_stages
 
-    def test_populated_emission_routes_thermals_and_both_boundaries(
+    def test_populated_emission_routes_thermals_and_past_boundary(
         self, tmp_path: Path
     ) -> None:
         """Every created GNL thermal id lands in ``thermals.json``, sorted
-        ascending; both boundaries land in ``initial_conditions.json``
-        verbatim."""
+        ascending; the past boundary lands in ``initial_conditions.json``
+        verbatim, with no ``future_anticipated_deliveries`` key (retired);
+        the post-study ``thermal_bounds`` carrier is still written and
+        non-empty."""
         dst = _run_cadastro_pipeline(
             tmp_path, ac_volmax_frame=None, gnl_emission=_POPULATED_GNL_EMISSION
         )
@@ -1167,50 +942,54 @@ class TestGnlWiring:
             initial_conditions["past_anticipated_commitments"]
             == _POPULATED_GNL_EMISSION.past_anticipated_commitments
         )
-        assert (
-            initial_conditions["future_anticipated_deliveries"]
-            == _POPULATED_GNL_EMISSION.future_anticipated_deliveries
-        )
+        assert "future_anticipated_deliveries" not in initial_conditions
 
-    def test_empty_right_boundary_writes_post_study_stages_and_omits_key(
+        post_study = json.loads((dst / "post_study_stages.json").read_text())
+        assert post_study["thermal_bounds"]
+
+    def test_empty_thermal_bounds_still_writes_post_study_stages(
         self, tmp_path: Path
     ) -> None:
-        """A GS-calendar-only plant (empty ``future_anticipated_deliveries``,
-        empty ``post_study_stages["thermal_bounds"]``) still gets
-        ``post_study_stages.json`` (non-``None`` calendar), but
+        """A GS-calendar-only plant whose post-study stages are all class-4
+        (empty ``post_study_stages["thermal_bounds"]``) still gets
+        ``post_study_stages.json`` (non-``None`` calendar);
         ``initial_conditions.json`` carries no
-        ``future_anticipated_deliveries`` key at all (the block only sets it
-        when truthy)."""
+        ``future_anticipated_deliveries`` key (retired)."""
         dst = _run_cadastro_pipeline(
             tmp_path,
             ac_volmax_frame=None,
-            gnl_emission=_EMPTY_RIGHT_BOUNDARY_GNL_EMISSION,
+            gnl_emission=_EMPTY_THERMAL_BOUNDS_GNL_EMISSION,
         )
 
         post_study = json.loads((dst / "post_study_stages.json").read_text())
         assert post_study["thermal_bounds"] == []
-        expected_post_study = _EMPTY_RIGHT_BOUNDARY_GNL_EMISSION.post_study_stages
+        expected_post_study = _EMPTY_THERMAL_BOUNDS_GNL_EMISSION.post_study_stages
         assert expected_post_study is not None
         assert post_study["stages"] == expected_post_study["stages"]
 
         initial_conditions = json.loads((dst / "initial_conditions.json").read_text())
         assert "future_anticipated_deliveries" not in initial_conditions
 
-    def test_summary_log_names_future_anticipated_not_post_horizon(
+    def test_summary_log_names_only_thermal_count(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The summary log's future-delivery count is worded "future
-        anticipated deliver(y/ies)" (it counts free + pinned deliveries),
-        never the old "post-horizon deliver(y/ies)"."""
+        """The summary log names only the emitted GNL thermal count -- no
+        "future anticipated deliver(y/ies)" clause (the retired free lane)
+        and no "post-horizon deliver(y/ies)" wording (an older phrasing)."""
         with caplog.at_level(logging.INFO, logger="cobre_bridge.decomp.pipeline"):
             _run_cadastro_pipeline(
                 tmp_path, ac_volmax_frame=None, gnl_emission=_POPULATED_GNL_EMISSION
             )
 
-        future_matches = [
-            r for r in caplog.records if "future anticipated deliver" in r.message
+        thermal_matches = [
+            r
+            for r in caplog.records
+            if "emitted 2 GNL anticipated thermal(s) from dadgnl" in r.message
         ]
-        assert len(future_matches) == 1
+        assert len(thermal_matches) == 1
+        assert not any(
+            "future anticipated deliver" in r.message for r in caplog.records
+        )
         assert not any("post-horizon deliver" in r.message for r in caplog.records)
 
 
@@ -1243,6 +1022,18 @@ class TestCadastroPipelineWiring:
         # 50% of the base [20, 100] / [10, 50] ranges.
         assert values[0] == pytest.approx(60.0)
         assert values[1] == pytest.approx(30.0)
+
+    def test_initial_conditions_json_stamps_schema_as_first_key(
+        self, tmp_path: Path
+    ) -> None:
+        """``$schema`` is now stamped on DECOMP ``initial_conditions.json`` too
+        (the twin-track asymmetry epic-07 deferred), first key to match the
+        source model's own key order, pinned to the registry."""
+        dst = _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
+
+        doc = json.loads((dst / "initial_conditions.json").read_text())
+        assert next(iter(doc)) == "$schema"
+        assert doc["$schema"] == cobre_schemas.schema_url_for("initial_conditions.json")
 
     def test_temporal_override_adds_storage_rows_and_raises_the_entity_envelope(
         self, tmp_path: Path
@@ -1581,11 +1372,9 @@ class TestGenericConstraintWiring:
     ) -> None:
         """AC5: ``generic_constraint_bounds.parquet`` compresses with zstd
         (cobre C3: snappy unsupported), and ``generic_constraints.json``'s
-        envelope key + ``$schema`` match the source model's own generic-
-        constraints writer (``converters/constraints.py``), confirmed by
-        loading both."""
-        from cobre_bridge.converters import constraints as source_constraints_conv
-
+        envelope key + ``$schema`` match the registry entry the source
+        model's own generic-constraints writer (``converters/constraints.py``)
+        also reads, confirmed by loading both."""
         dst = _run_cadastro_pipeline(
             tmp_path, ac_volmax_frame=None, to_generic=_all_synthetic_generics()
         )
@@ -1598,7 +1387,9 @@ class TestGenericConstraintWiring:
                 assert row_group.column(column_index).compression == "ZSTD"
 
         doc = json.loads((dst / "constraints" / "generic_constraints.json").read_text())
-        assert doc["$schema"] == source_constraints_conv._SCHEMA_URL
+        assert doc["$schema"] == cobre_schemas.schema_url_for(
+            "constraints/generic_constraints.json"
+        )
         assert set(doc) == {"$schema", "constraints"}
 
 
@@ -1672,7 +1463,7 @@ class TestDryRun:
     ) -> None:
         """A dry-run failure must never clear ``dst``: it wrote nothing, and
         ``dst`` may be a pre-existing populated directory the user never
-        asked to clear. ``config.json`` is one of ``_clear_dst_contents``'s
+        asked to clear. ``config.json`` is one of ``clear_dst_contents``'s
         own removal-list names, so its survival proves cleanup was skipped
         entirely, not merely that this particular name was spared.
 
@@ -1704,6 +1495,60 @@ class TestDryRun:
 
         assert existing.read_text(encoding="utf-8") == "keep me"
 
+    def test_force_preclears_stale_decomp_artifacts(self, tmp_path: Path) -> None:
+        """A successful ``--force`` re-run over a populated ``dst`` pre-clears
+        the previous case's full artifact set first, so a conditional
+        artifact the new run does not reproduce (``post_study_stages.json``,
+        ``boundary/``) cannot survive on top of the fresh case (CONV-02)."""
+        from cobre_bridge.decomp import pipeline as decomp_pipeline
+
+        dst = tmp_path / "case"
+        dst.mkdir()
+        post_study = dst / "post_study_stages.json"
+        post_study.write_text("{}", encoding="utf-8")
+        boundary = dst / "boundary"
+        boundary.mkdir()
+        (boundary / "metadata.json").write_text("{}", encoding="utf-8")
+
+        def _fake_impl(*args: object, **kwargs: object) -> ConversionReport:
+            return ConversionReport()
+
+        with patch.object(
+            decomp_pipeline, "_convert_decomp_case_impl", side_effect=_fake_impl
+        ):
+            decomp_pipeline.convert_decomp_case(tmp_path / "src", dst, force=True)
+
+        assert not post_study.exists()
+        assert not boundary.exists()
+
+    def test_force_dry_run_preserves_stale_decomp_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        """``--force --dry-run`` over the same populated ``dst`` must not
+        pre-clear: a dry run never mutates ``dst``."""
+        from cobre_bridge.decomp import pipeline as decomp_pipeline
+
+        dst = tmp_path / "case"
+        dst.mkdir()
+        post_study = dst / "post_study_stages.json"
+        post_study.write_text("{}", encoding="utf-8")
+        boundary = dst / "boundary"
+        boundary.mkdir()
+        (boundary / "metadata.json").write_text("{}", encoding="utf-8")
+
+        def _fake_impl(*args: object, **kwargs: object) -> ConversionReport:
+            return ConversionReport()
+
+        with patch.object(
+            decomp_pipeline, "_convert_decomp_case_impl", side_effect=_fake_impl
+        ):
+            decomp_pipeline.convert_decomp_case(
+                tmp_path / "src", dst, force=True, dry_run=True
+            )
+
+        assert post_study.exists()
+        assert boundary.exists()
+
     def test_real_run_against_populated_dst_refuses_without_clearing(
         self, tmp_path: Path
     ) -> None:
@@ -1725,6 +1570,56 @@ class TestDryRun:
             convert_decomp_case(tmp_path / "src", dst)
 
         assert existing.read_bytes() == b"keep me"
+
+    def test_clear_dst_contents_removes_decomp_only_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        """The DECOMP set clears the shared artifacts plus its own root-level
+        ``post_study_stages.json`` and ``boundary/`` tree (CONV-10)."""
+        from cobre_bridge.decomp.pipeline import DECOMP_CLEARED_ARTIFACTS
+        from cobre_bridge.pipeline import clear_dst_contents
+
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        post_study = dst / "post_study_stages.json"
+        post_study.write_text("{}", encoding="utf-8")
+        boundary = dst / "boundary"
+        boundary.mkdir()
+        (boundary / "metadata.json").write_text("{}", encoding="utf-8")
+        config = dst / "config.json"
+        config.write_text("{}", encoding="utf-8")
+        notes = dst / "notes.txt"
+        notes.write_text("keep me", encoding="utf-8")
+
+        clear_dst_contents(dst, DECOMP_CLEARED_ARTIFACTS)
+
+        assert not post_study.exists()
+        assert not boundary.exists()
+        assert not config.exists()
+        assert notes.exists()
+
+    def test_newave_cleared_set_leaves_decomp_only_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression pinning CONV-10: the NEWAVE set does not name
+        DECOMP-only artifacts, so they survive a NEWAVE-set clear."""
+        from cobre_bridge.pipeline import NEWAVE_CLEARED_ARTIFACTS, clear_dst_contents
+
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        post_study = dst / "post_study_stages.json"
+        post_study.write_text("{}", encoding="utf-8")
+        boundary = dst / "boundary"
+        boundary.mkdir()
+        (boundary / "metadata.json").write_text("{}", encoding="utf-8")
+        config = dst / "config.json"
+        config.write_text("{}", encoding="utf-8")
+
+        clear_dst_contents(dst, NEWAVE_CLEARED_ARTIFACTS)
+
+        assert post_study.exists()
+        assert boundary.exists()
+        assert not config.exists()
 
 
 _READ_TRAVEL_TIMES = "cobre_bridge.decomp.pipeline.travel_time_conv.read_travel_times"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from cobre_bridge.decomp.fcf.mapper import (
     DroppedTerm,
     GnlRingPlan,
     GnlThermalTarget,
+    _resolve_gnl_targets,
     map_boundary_cuts,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
@@ -467,13 +469,14 @@ def test_map_gnl_places_chain_rule_sum_on_dated_slots() -> None:
 
 
 def test_map_gnl_covered_lane_populated_uncovered_lane_dropped() -> None:
-    """Ticket-013 AC 1 — the empirical `mar-26-rv2` READBACK shape: thermal
-    94's `20260501` dated slot is covered (`>= post_horizon_start`) and
-    keeps the chain-rule sum; thermal 95's `20260401` dated slot is
-    *before* the post-study horizon (non-covered) and is dropped, staying
-    at `0.0`, with a `GnlDroppedTerm` naming the post-study horizon —
-    exactly the ring shape that made `cobre run` reject the boundary
-    (thermal 95, delivery `20260401`, before horizon `20260501`).
+    """The excised-ring shape: thermal 94's `20260501` dated slot is a
+    class-3 signaled lane (`>= post_horizon_start`), covered, and keeps the
+    chain-rule sum, nonzero and finite; thermal 95's `20260401` dated slot
+    is an in-study delivery (before `post_horizon_start`), non-covered, and
+    is dropped, staying at `0.0`, with a `GnlDroppedTerm` naming the
+    in-study committed window that actually prices it. No class-4
+    já-comandada slot exists in the fixture at all — cobre excises it from
+    the ring entirely, so there is nothing to drop for it.
     """
     pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3, 12: 1.0, 14: 2.0, 16: 4.0})
     cuts, manifest, id_map, plan = _make_gnl_ring_fixture(
@@ -491,18 +494,20 @@ def test_map_gnl_covered_lane_populated_uncovered_lane_dropped() -> None:
 
     mapped = result.cuts[0]
     assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS / 3)  # 94 covered
+    assert math.isfinite(mapped.coefficients[2])
     assert mapped.coefficients[3] == 0.0  # thermal 95, uncovered -> dropped
 
     matches = [
         term
         for term in result.gnl_dropped
-        if term.thermal_id == 95
-        and term.submercado == 3
-        and term.nl_lag == 1
-        and "post-study horizon" in term.reason
+        if term.thermal_id == 95 and term.submercado == 3 and term.nl_lag == 1
     ]
     assert len(matches) == 1
-    assert matches[0].coefficient == pytest.approx(7.0)
+    dropped = matches[0]
+    assert dropped.coefficient == pytest.approx(7.0)
+    assert "in-study committed window" in dropped.reason
+    assert "K=0" not in dropped.reason
+    assert "post-horizon lane" not in dropped.reason
     # The "all dated slots uncovered" case is the uncovered-drop above, not
     # the pre-existing "no dated ring slot for thermal" reason (that one is
     # reserved for a target with zero dated slots at all).
@@ -510,6 +515,17 @@ def test_map_gnl_covered_lane_populated_uncovered_lane_dropped() -> None:
         term.thermal_id == 95 and "no dated ring slot" in term.reason
         for term in result.gnl_dropped
     )
+
+
+def test_resolve_gnl_targets_docstring_is_month_anchor_not_full_day() -> None:
+    """AC 4 — the docstring says month-anchor and no longer describes a
+    ``YYYYMMDD`` full-day value or the retired K=0-lead-lane framing
+    (source-text check)."""
+    docstring = _resolve_gnl_targets.__doc__
+    assert docstring is not None
+    assert "month-anchor" in docstring
+    assert "YYYYMMDD" not in docstring
+    assert "K=0" not in docstring
 
 
 def test_map_gnl_all_dated_slots_covered_drops_nothing() -> None:

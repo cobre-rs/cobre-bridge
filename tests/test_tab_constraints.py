@@ -206,6 +206,9 @@ def _make_mock_data(
     data.hydros_lf = pl.LazyFrame()
     data.exchanges_lf = pl.LazyFrame()
     data.simulation_available = True
+    # A real, non-existent Path so render()'s load_rho_acum_overrides() call
+    # degrades to {} instead of running json.load() against a MagicMock.
+    data.case_dir = Path("nonexistent-cobre-bridge-dashboard-case")
     return data
 
 
@@ -870,6 +873,27 @@ def test_render_returns_string() -> None:
     assert isinstance(result, str)
 
 
+def test_render_wires_rho_acum_overrides_into_evaluate_constraint_expressions() -> None:
+    """render() loads case_dir's rho_acum overrides and forwards them to
+    evaluate_constraint_expressions -- the dashboard's half of the LHS-scale
+    fix (constraints_compare/decomp_results carry the compare-side half)."""
+    from unittest.mock import patch
+
+    data = _make_mock_data()
+    sentinel_overrides = {0: {0: 2.19}}
+    with (
+        patch(
+            "cobre_bridge.dashboard.tabs.constraints.load_rho_acum_overrides",
+            return_value=sentinel_overrides,
+        ) as mock_load,
+        patch(_PATCH_EVAL, return_value=_STUB_LHS_DF) as mock_eval,
+    ):
+        render(data)
+
+    mock_load.assert_called_once_with(data.case_dir)
+    assert mock_eval.call_args.args[-1] == sentinel_overrides
+
+
 # ---------------------------------------------------------------------------
 # Parser tests — @name sigil + literal coefficient handling
 # ---------------------------------------------------------------------------
@@ -1063,6 +1087,86 @@ class TestEvaluateAtName:
         df = self._evaluate("@rho_acum_h0 * hydro_storage(0)", with_productivity=False)
         s0 = df[(df["stage_id"] == 0) & (df["scenario_id"] == 0)]
         assert s0["lhs_value"].iloc[0] == 0.0
+
+
+class TestEvaluateAtNameRhoAcumOverride:
+    """``rho_acum_overrides`` replaces the default productivity column at
+    ``@rho_acum_h{id}`` -- the mechanism VminOP/RHE need to match the LP's
+    own resolution instead of the simulation's default point productivity
+    (see :func:`cobre_bridge.constraint_expr.load_rho_acum_overrides`)."""
+
+    def _evaluate(
+        self,
+        expression: str,
+        rho_acum_overrides: dict[int, dict[int, float]] | None,
+    ):
+        from cobre_bridge.constraint_expr import evaluate_constraint_expressions
+
+        constraints = [
+            {
+                "id": 0,
+                "name": "test",
+                "expression": expression,
+                "sense": ">=",
+                "slack": {"enabled": False},
+            }
+        ]
+        return evaluate_constraint_expressions(
+            constraints,
+            _make_hydros_lf(),
+            _empty_exchanges_lf(),
+            rho_acum_overrides,
+        )
+
+    def test_override_wins_over_default_column(self) -> None:
+        """Sim default at (hydro 0, stage 0) is 2.0 (see _make_hydros_lf); a
+        distinct override (5.68, mirroring the real VminOP/RHE gap) must win:
+        LHS = 5.68 * 100.0, not 2.0 * 100.0."""
+        df = self._evaluate("@rho_acum_h0 * hydro_storage(0)", {0: {0: 5.68, 1: 5.9}})
+        s0 = df[(df["stage_id"] == 0) & (df["scenario_id"] == 0)]
+        assert s0["lhs_value"].iloc[0] == 5.68 * 100.0
+        assert s0["lhs_value"].iloc[0] != 2.0 * 100.0
+
+    def test_missing_stage_in_override_falls_back_to_default_column(self) -> None:
+        """An override dict that only covers stage 0 leaves stage 1 on the
+        sim's default column."""
+        df = self._evaluate("@rho_acum_h0 * hydro_storage(0)", {0: {0: 5.68}})
+        s1 = df[(df["stage_id"] == 1) & (df["scenario_id"] == 0)]
+        assert s1["lhs_value"].iloc[0] == 2.0 * 150.0  # default column at stage 1
+
+    def test_override_for_other_hydro_does_not_affect_this_one(self) -> None:
+        """Overrides are keyed per hydro id; an override for hydro 1 must not
+        leak into hydro 0's term."""
+        df = self._evaluate("@rho_acum_h0 * hydro_storage(0)", {1: {0: 9.99}})
+        s0 = df[(df["stage_id"] == 0) & (df["scenario_id"] == 0)]
+        assert s0["lhs_value"].iloc[0] == 2.0 * 100.0  # unchanged default
+
+    def test_none_overrides_preserves_prior_behaviour(self) -> None:
+        """``rho_acum_overrides=None`` (the default) is identical to the
+        pre-override evaluator."""
+        df = self._evaluate("@rho_acum_h0 * hydro_storage(0)", None)
+        s0 = df[(df["stage_id"] == 0) & (df["scenario_id"] == 0)]
+        assert s0["lhs_value"].iloc[0] == 2.0 * 100.0
+
+    def test_override_lets_a_satisfied_stage_clear_its_own_bound(self) -> None:
+        """The regression this ticket fixes: the *default* column can put the
+        LHS on the wrong side of its own bound; the LP-faithful override
+        clears it. Default LHS = 2.0*100=200 < bound=300 (falsely violated);
+        override LHS = 5.68*100=568 >= bound=300 (actually satisfied)."""
+        bound = 300.0
+        default_df = self._evaluate("@rho_acum_h0 * hydro_storage(0)", None)
+        override_df = self._evaluate(
+            "@rho_acum_h0 * hydro_storage(0)", {0: {0: 5.68, 1: 5.9}}
+        )
+        default_lhs = default_df[
+            (default_df["stage_id"] == 0) & (default_df["scenario_id"] == 0)
+        ]["lhs_value"].iloc[0]
+        override_lhs = override_df[
+            (override_df["stage_id"] == 0) & (override_df["scenario_id"] == 0)
+        ]["lhs_value"].iloc[0]
+
+        assert default_lhs < bound
+        assert override_lhs >= bound
 
 
 def _make_multiblock_hydros_lf() -> pl.LazyFrame:

@@ -15,34 +15,26 @@ have no Cobre encoding today).
 
 from __future__ import annotations
 
-import logging
 import re
 from typing import TYPE_CHECKING
 
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.converters.network import (
-    _BUSES_SCHEMA_URL,
-    _LINES_SCHEMA_URL,
-)
+from cobre_bridge import cobre_schemas
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import date
 
     from idecomp.decomp import Dadger
 
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
 _COST_COLUMN = re.compile(r"^custo_(\d+)$")
 _LIMIT_COLUMN = re.compile(r"^limite_superior_(\d+)$")
 _FULL_DEPTH_PERCENT = 100.0
-_PUMPING_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/pumping_stations.schema.json"
-)
 
 
 def _bus_deficit_costs(dadger: Dadger) -> dict[int, float]:
@@ -91,9 +83,8 @@ def _bus_deficit_costs(dadger: Dadger) -> dict[int, float]:
 
 
 def convert_buses(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    start_date: date,
 ) -> dict:
     """Build the ``buses.json`` dict from ``SB`` + ``CD`` records.
 
@@ -103,8 +94,8 @@ def convert_buses(
     ``deficit_segments`` and defer to the global default — they carry no
     load, so the value is never priced.
     """
-    costs = _bus_deficit_costs(dadger)
-    op_date = start_date.isoformat()
+    costs = _bus_deficit_costs(case.dadger)
+    op_date = case.start_date.isoformat()
 
     buses: list[dict] = []
     for code in id_map.bus_codes:
@@ -126,23 +117,10 @@ def convert_buses(
         }
     )
 
-    return {"$schema": _BUSES_SCHEMA_URL, "buses": buses}
-
-
-def convert_lines_placeholder() -> dict:
-    """An empty (but structurally required) ``lines.json``.
-
-    The exchange network waits on the ``IA`` accessor fix upstream; until
-    it lands the buses are deliberately unconnected — each subsystem
-    self-balances against its own deficit cost. (The file being mandatory
-    for a lineless study is tracked cobre-gap C4,
-    ``plans/conversion-found-improvements.md`` in the cobre repo.)
-    """
-    logging.getLogger(__name__).warning(
-        "exchange network deferred (IA accessor fix upstream): emitting an "
-        "empty lines.json — subsystems are unconnected and self-balance"
-    )
-    return {"$schema": _LINES_SCHEMA_URL, "lines": []}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/buses.json"),
+        "buses": buses,
+    }
 
 
 def _ia_dense(
@@ -220,10 +198,8 @@ _LINE_BOUNDS_SCHEMA = pa.schema(
 
 
 def convert_lines(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    start_date: date,
 ) -> tuple[dict, pa.Table]:
     """Convert the ``IA`` exchange network.
 
@@ -236,9 +212,16 @@ def convert_lines(
     (cobre rule 36). Block rows carry the ``IA`` record's own per-block
     limit as an absolute MW value, read directly with no factor round-trip.
     The unbounded sentinel (99999) passes through as a plain large capacity.
+
+    TRACKED COBRE-GAP WORKAROUND (C4, the cobre repository's
+    conversion-found-improvements registry): a deck that declares no ``IA``
+    pairs still emits ``system/lines.json`` with an empty ``lines`` list,
+    because cobre requires the file structurally even for a lineless study.
+    Remove this note when the registry's C4 entry closes.
     """
-    dense = _ia_dense(dadger, calendar)
-    op_date = start_date.isoformat()
+    calendar = case.calendar
+    dense = _ia_dense(case.dadger, calendar)
+    op_date = case.start_date.isoformat()
 
     pairs = sorted(
         dense,
@@ -281,11 +264,8 @@ def convert_lines(
             # Per-block rows carry the IA record's own de_para/para_de
             # values directly, as absolute MW — no factor round-trip, so
             # no division and no reconstruction error. A block whose limit
-            # is 0.0 is now an ordinary bound (direct_mw = 0.0 / reverse_mw
-            # = 0.0): the previous factor encoding had no representation
-            # for a zero limit and raised on it; under absolute MW that
-            # case no longer exists, so the raise is gone and nothing
-            # replaces it.
+            # is 0.0 is an ordinary bound (direct_mw = 0.0 / reverse_mw = 0.0),
+            # not a sentinel to skip.
             blocks = list(zip(limits["de_para"], limits["para_de"], strict=True))
             uniform = all(d == direct_base and r == reverse_base for d, r in blocks)
             if not uniform:
@@ -307,44 +287,44 @@ def convert_lines(
         schema=_LINE_BOUNDS_SCHEMA,
     )
     return (
-        {"$schema": _LINES_SCHEMA_URL, "lines": lines},
+        {"$schema": cobre_schemas.schema_url_for("system/lines.json"), "lines": lines},
         bounds,
     )
 
 
-#: The converter-created SE<->IV line's fixed name (ticket-007) -- the
-#: transshipment link that carries Itaipu's 50 Hz surplus into SE, mirroring
+#: The converter-created SE<->IV line's fixed name -- the
+#: transshipment link that carries Itaipu's 60 Hz output into SE, mirroring
 #: the ``"{de}-{para}"`` naming convention IA lines get above.
 _IV_SE_LINE_NAME = "IV-SE"
 
 #: idecomp's ``df=True`` accessor expands the ``RI`` register's per-patamar
-#: ``geracao_maxima_50_hz`` list the same way it expands ``carga_ande``
+#: ``geracao_maxima_60_hz`` list the same way it expands ``carga_ande``
 #: (mirrors ``libs_electrical._CARGA_ANDE_COLUMN``): one
-#: ``geracao_maxima_50_hz_{k}`` column per patamar slot, a row's own slots
+#: ``geracao_maxima_60_hz_{k}`` column per patamar slot, a row's own slots
 #: beyond its declared patamar count reading back as ``NaN``.
-_GERACAO_MAXIMA_50HZ_COLUMN = re.compile(r"^geracao_maxima_50_hz_(\d+)$")
+_GERACAO_MAXIMA_60HZ_COLUMN = re.compile(r"^geracao_maxima_60_hz_(\d+)$")
 
 #: The source model's own "no limit" numeric idiom for an exchange pair --
 #: the exact value :func:`convert_lines` already passes through as ordinary
 #: ``IA`` data (see its own docstring). Reused verbatim, never invented, as
 #: the converter-created SE<->IV line's capacity when the deck carries no
-#: ``RI`` register to size the 50 Hz half.
+#: ``RI`` register to size the 60 Hz half.
 _UNBOUNDED_LINE_CAPACITY_MW = 99999.0
 
 
-def _itaipu_50hz_capacity_mw(dadger: Dadger) -> float:
+def _itaipu_60hz_capacity_mw(dadger: Dadger) -> float:
     """The SE<->IV line's capacity: the largest declared ``RI``
-    ``geracao_maxima_50_hz`` value across every stage and patamar, or
+    ``geracao_maxima_60_hz`` value across every stage and patamar, or
     :data:`_UNBOUNDED_LINE_CAPACITY_MW` when the deck carries no ``RI``
     register at all.
 
     An absent register means "no limit", not zero -- the line must never
-    bind the 50 Hz surplus (ticket-007 pitfall guard).
+    bind the 60 Hz output.
     """
     ri = dadger.ri(df=True)
     if ri is None or ri.empty:
         return _UNBOUNDED_LINE_CAPACITY_MW
-    columns = [c for c in ri.columns if _GERACAO_MAXIMA_50HZ_COLUMN.match(c)]
+    columns = [c for c in ri.columns if _GERACAO_MAXIMA_60HZ_COLUMN.match(c)]
     values = [
         float(row[column])
         for _, row in ri.iterrows()
@@ -355,10 +335,10 @@ def _itaipu_50hz_capacity_mw(dadger: Dadger) -> float:
 
 
 def append_iv_se_line(
+    case: DecompCase,
+    *,
     lines_doc: dict,
     line_bounds: pa.Table,
-    calendar: Sequence[OperativeStage],
-    start_date: date,
     source_bus_id: int,
     target_bus_id: int,
     capacity_mw: float,
@@ -366,14 +346,14 @@ def append_iv_se_line(
     """Append the converter-created ``IV-SE`` line to a :func:`convert_lines` result.
 
     Unconditional on Itaipu detection alone: the caller decides whether
-    Itaipu (code 66) is operated and only calls this when it is
-    (ticket-007), so a deck that never operates Itaipu stays byte-identical
-    to today. But before synthesizing, this checks whether *lines_doc*
+    Itaipu (code 66) is operated and only calls this when it is, so a deck
+    that never operates Itaipu stays byte-identical to today. But before
+    synthesizing, this checks whether *lines_doc*
     already carries a line connecting *source_bus_id* and *target_bus_id*
     (as an unordered pair -- the deck's own ``IA`` line may run either
     direction). When one exists, the ``IV`` bus is not islanded: the deck's
     own line already wires it, and carries the source model's own capacity
-    rather than the unbounded sentinel, so this is a no-op (ticket-016) --
+    rather than the unbounded sentinel, so this is a no-op --
     *lines_doc*/*line_bounds* are returned unchanged.
 
     Otherwise (the genuinely-islanded case) it synthesizes exactly as
@@ -388,6 +368,7 @@ def append_iv_se_line(
     the source model declares no separate reverse limit for this
     converter-created link.
     """
+    calendar = case.calendar
     pair = frozenset({source_bus_id, target_bus_id})
     existing_line = next(
         (
@@ -406,7 +387,7 @@ def append_iv_se_line(
     new_line = {
         "id": line_id,
         "name": _IV_SE_LINE_NAME,
-        "operational_start_date": start_date.isoformat(),
+        "operational_start_date": case.start_date.isoformat(),
         "source_bus_id": source_bus_id,
         "target_bus_id": target_bus_id,
         "capacity": {"direct_mw": capacity_mw, "reverse_mw": capacity_mw},
@@ -436,8 +417,7 @@ def pumping_station_id_map(dadger: Dadger) -> dict[int, int]:
     ``single_term_bounds.single_term_bound_contributions``'s ``QBOM`` path
     resolves its pumping-station entity id through this same map (its
     ``pumping_station_ids`` argument), since the QBOM term's ``code`` is a
-    pumping-station ``codigo_usina``, not a hydro one (epic-07,
-    ticket-023).
+    pumping-station ``codigo_usina``, not a hydro one.
     """
     ue = dadger.ue(df=True)
     if ue is None or ue.empty:
@@ -447,9 +427,8 @@ def pumping_station_id_map(dadger: Dadger) -> dict[int, int]:
 
 
 def convert_pumping_stations(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    start_date: date,
 ) -> dict:
     """Convert the ``UE`` pumping stations (1:1).
 
@@ -458,12 +437,16 @@ def convert_pumping_stations(
     :func:`pumping_station_id_map`, the single authority for ``UE`` id
     assignment.
     """
+    dadger = case.dadger
     ue = dadger.ue(df=True)
     if ue is None or ue.empty:
-        return {"$schema": _PUMPING_SCHEMA_URL, "pumping_stations": []}
+        return {
+            "$schema": cobre_schemas.schema_url_for("system/pumping_stations.json"),
+            "pumping_stations": [],
+        }
 
     station_ids = pumping_station_id_map(dadger)
-    op_date = start_date.isoformat()
+    op_date = case.start_date.isoformat()
     stations: list[dict] = []
     for _, row in ue.sort_values("codigo_usina").iterrows():
         code = int(row["codigo_usina"])
@@ -485,4 +468,7 @@ def convert_pumping_stations(
                 },
             }
         )
-    return {"$schema": _PUMPING_SCHEMA_URL, "pumping_stations": stations}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/pumping_stations.json"),
+        "pumping_stations": stations,
+    }

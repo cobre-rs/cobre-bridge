@@ -6,7 +6,7 @@ reused verbatim. The rated-capability sum is *not* reused as-is, though:
 :func:`_compute_max_turbined_rated_ac_adjusted` below is a DECOMP-only
 counterpart that layers the ``NUMCON``/``NUMMAQ``/``POTEFE``/``VAZEFE``
 machine-configuration overrides on top of the same per-conjunto registry
-data the shared ``converters.hydro._compute_max_turbined_rated`` reads —
+data the shared ``converters.hydro.bounds._compute_max_turbined_rated`` reads —
 some plants' *true* in-service machine count differs from ``hidr.dat``'s
 nameplate conjunto sum, and the shared helper (which the source-model side
 keeps byte-identical) exposes only the pre-summed total, not a per-conjunto
@@ -23,13 +23,13 @@ machine set drops below that envelope gets a sparse per-stage overlay row
 instead (:func:`convert_hydro_group_availability`), never a change to the
 declared envelope itself.
 
-**Head-aware ``max_turbined_m3s`` (ticket-017, E5 headline, validated
-2026-08-08).** The emitted ``max_turbined_m3s`` is the head-corrected
+**Head-aware ``max_turbined_m3s``.** The emitted ``max_turbined_m3s`` is the
+head-corrected
 engolimento, not the plain rated sum: :func:`_head_corrected_envelope`/
 :func:`_conjunto_head_corrected_envelope` mirror the source-model side's
-``converters.hydro._compute_max_turbined_head_corrected`` — derating the
+``converters.hydro.bounds._compute_max_turbined_head_corrected`` — derating the
 rated flow by the turbine affinity law ``(h_op / h_nom) ** k_turb`` and
-capping it at ``Σ n·p_nom / ρ_eq`` — using ticket-013's per-stage
+capping it at ``Σ n·p_nom / ρ_eq`` — using the per-stage
 ``h_op = ρ_eq / ρ_esp``. Two DECOMP-specific corrections vs the shared
 helper, both validated against ``relato.rv3``'s ``Qtur Maxima``: **no**
 TEIF/IP availability derating (availability lives on the MP×FD/B8 path,
@@ -53,8 +53,8 @@ The one plant whose maintenance and availability registers are declared
 two ``MP``/``FD`` ``frequencia`` rows) gets two conjunto-backed unit groups
 instead of the usual single mirror group — see
 :func:`_build_split_unit_groups`. Scope is the ratified loop-closing
-milestone: faithful registry, cascade, capability, initial storage, and (as
-of tickets 013/017, E5) head/productivity, including head-aware
+milestone: faithful registry, cascade, capability, initial storage, and
+head/productivity, including head-aware
 engolimento — with everything whose faithful treatment is still gated on
 later features left unconverted: travel time (``VI`` — a separate dadger
 register, not an ``AC`` class) and the evaporation/tailrace-polynomial
@@ -64,15 +64,15 @@ given deck actually declares) is reported by ``check decomp``
 (:mod:`cobre_bridge.decomp.preflight`); ``VI``, not being an ``AC``
 register, is documented only here.
 
-**Effective (post-``AC``) cascade topology and inflow gauge (ticket-014,
-E5, OQ-4 resolved).** The cascade walk (:func:`_downstream_operated`,
+**Effective (post-``AC``) cascade topology and inflow gauge.** The cascade
+walk (:func:`_downstream_operated`,
 shared by this module's own ``downstream_id`` entity field and
 ``scenarios.py``'s incremental-inflow attribution) and the inflow-gauge
 attribution both read :class:`~cobre_bridge.decomp.cadastro.
 EffectiveCadastro`'s ``downstream_plant``/``inflow_gauge`` accessors — the
 post-``AC NUMJUS``/``NUMPOS`` link/gauge — rather than the base ``hidr``
 columns directly. Absent an override the effective value equals base, so
-this is byte-identical to the pre-ticket behaviour for every plant with no
+this is byte-identical to the base-column behaviour for every plant with no
 ``NUMJUS``/``NUMPOS`` row. ``AC JUSENA`` (a downstream-**energy** coupling,
 not a water-routing link) and ``AC NPOSNW`` (the other source family's own
 inflow gauge) are deliberately **not** ingested — no DECOMP consumer; their
@@ -93,27 +93,26 @@ import pyarrow as pa
 from idecomp.decomp.modelos.dadger import ACALTEFE
 from inewave.newave import Hidr
 
-from cobre_bridge.converters.hydro import (
-    _KTURB_BY_TIPO_TURBINA,
-    _PRODUCTION_MODELS_SCHEMA_URL,
-    _SCHEMA_URL,
-    _apply_hydraulic_loss,
-    _fpha_efficiency,
-    build_mirror_unit_group,
-)
+from cobre_bridge import cobre_schemas
+from cobre_bridge.converters.hydro import build_mirror_unit_group
 from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
 from cobre_bridge.decomp.group_bounds import GroupBoundEntry
+from cobre_bridge.productivity import (
+    KTURB_BY_TIPO_TURBINA,
+    equivalent_productivity_from_coeffs,
+    fpha_efficiency,
+)
+from cobre_bridge.tolerances import relative_tolerance
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import date
     from pathlib import Path
 
     from idecomp.decomp import Dadger
 
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.temporal import OperativeStage
 
 _LOG = logging.getLogger(__name__)
 
@@ -175,8 +174,7 @@ def _downstream_operated(
 ) -> int | None:
     """Walk the *effective* (post-``AC NUMJUS``) cascade to the next
     *operated* plant downstream, at *stage_index* (default the initial
-    stage — the single stage-representative topology every caller uses,
-    ticket-014).
+    stage — the single stage-representative topology every caller uses).
 
     Non-operated intermediates are skipped through (their routing is
     instantaneous absence — the water continues down the declared chain);
@@ -236,7 +234,7 @@ def _conjunto_rated_ac_adjusted(
     own is the ``hidr`` base, forward-filled flat); ``None`` means the pair
     carries no override at all, and every field falls back to the
     ``hidr.dat`` row directly — the same ``.get(..., base)`` fallback the
-    pre-ticket date-blind reader used.
+    date-blind reader used.
     """
     machine_set = effective.machine_set(code, conjunto_index, stage_index)
     if machine_set is None:
@@ -258,8 +256,8 @@ def _compute_max_turbined_rated_ac_adjusted(
 ) -> tuple[float, float]:
     """Return ``(max_turbined, max_generation)`` — the AC-adjusted rated
     nameplate capacity at *stage_index* — the DECOMP-only counterpart to the
-    shared, un-derated, stage-invariant ``converters.hydro.
-    _compute_max_turbined_rated``.
+    shared, un-derated, stage-invariant
+    ``converters.hydro.bounds._compute_max_turbined_rated``.
 
     Sums :func:`_conjunto_rated_ac_adjusted` over every conjunto effective
     at *stage_index* (``effective.machine_conjunto_count(code,
@@ -301,7 +299,7 @@ def _rated_envelope(
     ac_adjusted`'s two components ever reaches over the horizon, taken
     independently (the two maxima need not land on the same stage). A
     constant machine set collapses this to the stage-0 value, matching the
-    pre-ticket date-blind value exactly. Not used for the split plant
+    date-blind value exactly. Not used for the split plant
     (Itaipu): its entity envelope is instead the *sum* of the two groups'
     own :func:`_conjunto_rated_envelope`, computed in
     :func:`convert_hydros`, so cobre rule 41 holds by construction rather
@@ -417,7 +415,7 @@ def _conjunto_head_corrected_ac_adjusted(
     base ``hidr`` ``queda_nominal_conjunto_{conjunto_index}``
     (:func:`_conjunto_h_nom`) — **not** the ``AC ALTEFE`` override, which has
     no idecomp value accessor — and ``k_turb`` is looked up from
-    ``_KTURB_BY_TIPO_TURBINA`` by the plant's ``tipo_turbina`` (0.5 for
+    ``KTURB_BY_TIPO_TURBINA`` by the plant's ``tipo_turbina`` (0.5 for
     Francis/Pelton, 0.2 for Kaplan). No TEIF/IP availability derating is
     applied (validated worse: 8.2% vs 1.3% median error vs ``Qtur Maxima`` —
     availability lives on the MP×FD/B8 path instead) and no
@@ -436,7 +434,7 @@ def _conjunto_head_corrected_ac_adjusted(
     )
     h_nom = _conjunto_h_nom(hreg, conjunto_index)
     tipo_turbina = int(hreg.get("tipo_turbina", 0) or 0)
-    kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
+    kturb = KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
     affinity = _conjunto_affinity_flow(n_q, h_nom, h_op, kturb)
     return min(affinity, n_p / rho_eq)
 
@@ -461,7 +459,7 @@ def _head_corrected_max_turbined_ac_adjusted(
     doing so would cap the power per conjunto, which only the split plant's
     own groups do. Instead it re-derives each conjunto's affinity flow the
     same way (``h_nom`` from :func:`_conjunto_h_nom`, ``k_turb`` from
-    ``_KTURB_BY_TIPO_TURBINA``, no TEIF/IP, no ``tipo_regulacao`` branch —
+    ``KTURB_BY_TIPO_TURBINA``, no TEIF/IP, no ``tipo_regulacao`` branch —
     see :func:`_conjunto_head_corrected_ac_adjusted`'s docstring for the
     validated rationale) and sums both the affinity flow and the installed
     power across conjuntos before taking the single min. *h_op* and *rho_eq*
@@ -472,7 +470,7 @@ def _head_corrected_max_turbined_ac_adjusted(
     if n_sets is None:
         n_sets = int(hreg["numero_conjuntos_maquinas"])
     tipo_turbina = int(hreg.get("tipo_turbina", 0) or 0)
-    kturb = _KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
+    kturb = KTURB_BY_TIPO_TURBINA.get(tipo_turbina, 0.5)
     sum_affinity = 0.0
     sum_p = 0.0
     for i in range(1, n_sets + 1):
@@ -624,12 +622,12 @@ def _build_split_unit_groups(
     max-over-stages AC-adjusted rated envelope
     (:func:`_conjunto_rated_envelope`); its ``max_turbined_m3s`` is instead
     that conjunto's own head-corrected envelope
-    (:func:`_conjunto_head_corrected_envelope`, ticket-017) — each group has
+    (:func:`_conjunto_head_corrected_envelope`) — each group has
     only its own conjunto's installed power to draw on, so the power cap
     inside that function is per-group, never plant-wide. Group ``i`` sits on
     ``group_bus_ids[i]`` — a per-group bus, not necessarily the plant's own
-    bus: :func:`convert_hydros` relocates Itaipu's 50 Hz group to the ``IV``
-    transshipment bus while keeping its 60 Hz group on the plant's own bus.
+    bus: :func:`convert_hydros` relocates Itaipu's 60 Hz group to the ``IV``
+    transshipment bus while keeping its 50 Hz group on the plant's own bus.
 
     Raises
     ------
@@ -752,10 +750,9 @@ def _evaporation_coefficients_mm(hidr: pd.DataFrame, code: int) -> list[float] |
 
 
 def convert_hydros(
-    dadger: Dadger,
-    hidr: pd.DataFrame,
+    case: DecompCase,
     id_map: DecompIdMap,
-    start_date: date,
+    *,
     effective: EffectiveCadastro,
     travel_time_hours: dict[int, float] | None = None,
     fpha_codes: set[int] | None = None,
@@ -787,7 +784,7 @@ def convert_hydros(
     in-service machine configuration differs from ``hidr.dat``'s nameplate
     conjunto sum, and/or changes mid-horizon. ``max_turbined_m3s`` is
     instead the max-over-stages envelope of the **head-corrected** engolimento
-    (:func:`_head_corrected_envelope`, ticket-017 — see the module docstring
+    (:func:`_head_corrected_envelope` — see the module docstring
     for the validated formula and accuracy). A stage whose effective
     capacity (installed power or head-corrected flow) drops below its own
     envelope gets a sparse per-stage overlay instead
@@ -808,17 +805,23 @@ def convert_hydros(
     construction — cobre rule 41 holds even though the two groups' own
     per-stage machine-set changes (if any) need not peak on the same stage,
     nor their head-corrected flows peak on the same stage as their rated
-    power. Itaipu's 50 Hz group (group id 0) is placed on
-    ``id_map.transhipment_bus_id`` — the ``IV`` transshipment bus — rather
-    than the plant's own submercado bus; the 60 Hz group (group id 1) stays
-    on the plant's own bus. This relocation is unconditional whenever Itaipu
-    is operated (ticket-006). The entity ``reservoir`` block is the plant's
+    power. Itaipu's 60 Hz group (group id 1) is placed on
+    ``id_map.transhipment_bus_id`` — the ``IV`` bus modeling the 765 kV
+    corridor into Ivaiporã — rather than the plant's own submercado bus; the
+    50 Hz group (group id 0) stays on the plant's own SE bus, where the HVDC
+    Elo delivers directly and the ``carga_ande`` load nets in
+    (:func:`~cobre_bridge.decomp.pipeline._convert_scenarios`). This
+    relocation is unconditional whenever Itaipu is operated. The entity
+    ``reservoir`` block is the plant's
     outer per-stage storage envelope (:func:`storage_envelope`), so
     per-stage bound overrides
     (:func:`cobre_bridge.decomp.bounds.convert_storage_bounds`)
     always sit inside it. Per-family ``AC`` coverage is reported by
     ``check decomp`` (:mod:`cobre_bridge.decomp.preflight`), not logged here.
     """
+    dadger = case.dadger
+    hidr = case.hidr
+    start_date = case.start_date
     operated = _operated_uh(dadger)
     coupling_only = _coupling_only_codes(dadger)
     if coupling_only:
@@ -862,16 +865,18 @@ def convert_hydros(
         bus_id = id_map.bus_id(int(hreg["submercado"]))
         if code == _ITAIPU_CODE:
             frequencies = _split_plant_frequencies(hreg, code, effective, mp, fd)
-            # Unconditional 50 Hz -> IV relocation (ticket-006): Itaipu's 50 Hz
-            # unit group (group id 0, the lower of the two ascending
-            # frequencies) is moved to the transshipment bus so cobre's
-            # HydroGeneration{bus} selector can separate the two groups; the
-            # 60 Hz group (group id 1) stays on the plant's own SE bus
-            # (already computed above as `bus_id`).
+            # Unconditional 60 Hz -> IV relocation: Itaipu's 60 Hz
+            # unit group (group id 1, the higher of the two ascending
+            # frequencies) is moved to the transshipment bus -- the AC
+            # corridor into Ivaiporã -- so cobre's HydroGeneration{bus}
+            # selector can separate the two groups; the 50 Hz group (group
+            # id 0) stays on the plant's own SE bus (already computed above
+            # as `bus_id`), where its HVDC Elo delivers directly and the
+            # `carga_ande` load nets in.
             se_bus = bus_id
             iv_bus = id_map.transhipment_bus_id
             unit_groups, max_turbined, max_generation = _build_split_unit_groups(
-                hreg, code, name, [iv_bus, se_bus], frequencies, effective
+                hreg, code, name, [se_bus, iv_bus], frequencies, effective
             )
         else:
             _, max_generation = _rated_envelope(hreg, code, effective)
@@ -915,7 +920,7 @@ def convert_hydros(
             entry["specific_productivity_mw_per_m3s_per_m"] = rho_esp
             entry["efficiency"] = {
                 "type": "constant",
-                "value": _fpha_efficiency(rho_esp, name),
+                "value": fpha_efficiency(rho_esp, name),
             }
             # Inline constant tailrace = mean canal de fuga: cobre's FPHA
             # fallback for a plant whose tailrace_curves.parquet family is
@@ -983,7 +988,10 @@ def convert_hydros(
             n_altefe,
         )
 
-    return {"$schema": _SCHEMA_URL, "hydros": hydros}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/hydros.json"),
+        "hydros": hydros,
+    }
 
 
 def _initial_volume_hm3(effective: EffectiveCadastro, code: int, pct: float) -> float:
@@ -993,7 +1001,7 @@ def _initial_volume_hm3(effective: EffectiveCadastro, code: int, pct: float) -> 
     not the plant's outer envelope, so the range is read from
     :func:`~cobre_bridge.decomp.cadastro.effective_storage_range` at stage
     ``0``. A run-of-river (``D``) plant's stage-0 range is already the
-    single-point collapse ``(vol_ref, vol_ref)`` (ticket-018), so its initial
+    single-point collapse ``(vol_ref, vol_ref)``, so its initial
     value is ``vol_ref`` regardless of *pct*. Shared by
     :func:`convert_initial_storage` (the initial condition) and
     :func:`_operated_initial_volumes` (the generation-productivity anchor) so
@@ -1004,7 +1012,7 @@ def _initial_volume_hm3(effective: EffectiveCadastro, code: int, pct: float) -> 
 
 
 def _operated_initial_volumes(
-    dadger: Dadger, effective: EffectiveCadastro
+    case: DecompCase, *, effective: EffectiveCadastro
 ) -> dict[int, float]:
     """``{code: initial reservoir volume hm³}`` for every operated ``UH`` plant.
 
@@ -1016,23 +1024,23 @@ def _operated_initial_volumes(
         int(row["codigo_usina"]): _initial_volume_hm3(
             effective, int(row["codigo_usina"]), float(row["volume_inicial"])
         )
-        for _, row in _operated_uh(dadger).iterrows()
+        for _, row in _operated_uh(case.dadger).iterrows()
     }
 
 
 def convert_initial_storage(
-    dadger: Dadger,
-    hidr: pd.DataFrame,
+    case: DecompCase,
     id_map: DecompIdMap,
+    *,
     effective: EffectiveCadastro,
 ) -> list[dict]:
     """Initial reservoir volumes from ``UH`` (% of useful → hm³).
 
     The percentage is resolved by :func:`_initial_volume_hm3` against the
     stage-0 effective useful volume (run-of-river plants collapse to their
-    reference volume — ticket-018).
+    reference volume).
     """
-    operated = _operated_uh(dadger)
+    operated = _operated_uh(case.dadger)
     storage: list[dict] = []
     for _, row in operated.iterrows():
         code = int(row["codigo_usina"])
@@ -1048,46 +1056,6 @@ def convert_initial_storage(
             )
     storage.sort(key=lambda e: e["hydro_id"])
     return storage
-
-
-def _eval_cota_from_coeffs(coeffs: Sequence[float], volume_hm3: float) -> float:
-    """Evaluate the upstream cota polynomial ``cota(V) = Σ a_i · V^i`` at *V*
-    from an explicit 5-coefficient list, ordered ``ordem 0..4``.
-
-    The coefficient-list counterpart of ``converters.hydro.
-    _evaluate_cota_polynomial``, which reads the same five coefficients off a
-    base ``hidr`` row directly — this variant exists so the per-stage
-    *effective* polynomial (:meth:`~cobre_bridge.decomp.cadastro.
-    EffectiveCadastro.cota_polynomial`, base or ``AC COTVOL``-overridden) can
-    be evaluated without mutating a per-stage copy of the base row.
-    """
-    v = volume_hm3
-    a = coeffs
-    return a[0] + a[1] * v + a[2] * v * v + a[3] * v**3 + a[4] * v**4
-
-
-def _mean_cota_from_coeffs(coeffs: Sequence[float], v_lo: float, v_hi: float) -> float:
-    """Volume-averaged upstream cota over ``[v_lo, v_hi]`` from an explicit
-    5-coefficient list.
-
-    The same analytic quartic integral as ``converters.hydro.
-    _mean_cota_over_volume``, taking *coeffs* directly rather than a ``hidr``
-    row — see :func:`_eval_cota_from_coeffs` for why.
-    """
-    if v_hi <= v_lo:
-        return _eval_cota_from_coeffs(coeffs, v_lo)
-    a = coeffs
-
-    def antideriv(v: float) -> float:
-        return (
-            a[0] * v
-            + a[1] * v * v / 2.0
-            + a[2] * v**3 / 3.0
-            + a[3] * v**4 / 4.0
-            + a[4] * v**5 / 5.0
-        )
-
-    return (antideriv(v_hi) - antideriv(v_lo)) / (v_hi - v_lo)
 
 
 def _equivalent_productivity_mw_per_m3s(
@@ -1130,13 +1098,17 @@ def _equivalent_productivity_mw_per_m3s(
     perdas = effective.value(code, "perdas", stage_index)
     tipo_perda = int(effective.base.loc[code, "tipo_perda"])
     coeffs = effective.cota_polynomial(code, stage_index)
-    if reference_volume_hm3 is None:
-        cota = _mean_cota_from_coeffs(coeffs, v_min, v_max)
-    else:
-        cota = _eval_cota_from_coeffs(coeffs, reference_volume_hm3)
-    h_gross = cota - cf
-    h_net = max(_apply_hydraulic_loss(h_gross, tipo_perda, perdas), 0.0)
-    return rho_esp * h_net
+    return equivalent_productivity_from_coeffs(
+        coeffs,
+        volume_min_hm3=v_min,
+        volume_max_hm3=v_max,
+        rho_esp=rho_esp,
+        canal_fuga_m=cf,
+        tipo_perda=tipo_perda,
+        perdas=perdas,
+        reference_volume_hm3=reference_volume_hm3,
+        plant_name=str(effective.base.loc[code, "nome_usina"]).strip(),
+    )
 
 
 def convert_energy_productivity(
@@ -1194,16 +1166,9 @@ def convert_energy_productivity(
     )
 
 
-#: Mirrors ``emission_checks._ENVELOPE_TOLERANCE`` (cobre-io's relative
-#: envelope tolerance) — used only to decide whether a computed availability
-#: value sits below the declared envelope past float noise, not to gate a
-#: cobre rule (that mirror lives in ``emission_checks.check_group_bound_envelope``).
-_SPARSITY_TOLERANCE = 1e-9
-
-
 def _below_envelope(value: float, envelope: float) -> bool:
     """Whether *value* is below *envelope* past relative float noise."""
-    return value < envelope - _SPARSITY_TOLERANCE * max(abs(envelope), 1.0)
+    return value < envelope - relative_tolerance(envelope)
 
 
 def _single_group_factor_rows(records: pd.DataFrame | None) -> dict[int, pd.Series]:
@@ -1277,10 +1242,9 @@ def _availability_bound_entry(
 
 
 def convert_hydro_group_availability(
-    dadger: Dadger,
-    hidr: pd.DataFrame,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
+    *,
     effective: EffectiveCadastro,
 ) -> dict[tuple[int, int, int], GroupBoundEntry]:
     """B8 per-group per-stage available capacity.
@@ -1296,7 +1260,7 @@ def convert_hydro_group_availability(
     envelope (:func:`_rated_envelope`). The per-stage hydraulic engolimento
     limit is *not* imposed as a second generation cap: the emitted
     ``max_turbined_m3s`` overlay is the per-stage **head-corrected** flow
-    (:func:`_head_corrected_max_turbined_ac_adjusted`, ticket-017), sparse
+    (:func:`_head_corrected_max_turbined_ac_adjusted`), sparse
     against the group's own head-corrected envelope
     (:func:`_head_corrected_envelope`), and generation is
     ``productivity × turbined`` — so the physical hydraulic limit binds
@@ -1319,13 +1283,15 @@ def convert_hydro_group_availability(
     (:func:`_conjunto_head_corrected_envelope`).
 
     Returns the ``(hydro_id, hydro_unit_group_id, stage_id) ->
-    GroupBoundEntry`` mapping ticket-025's ``convert_hydro_unit_group_bounds``
+    GroupBoundEntry`` mapping ``convert_hydro_unit_group_bounds``
     consumes unchanged — populated *sparsely*, only where an emitted value
     falls below that group's own declared envelope, the same "only where it
     differs" convention every sibling emitter uses.
     """
-    mp = dadger.mp(df=True)
-    fd = dadger.fd(df=True)
+    hidr = case.hidr
+    calendar = case.calendar
+    mp = case.dadger.mp(df=True)
+    fd = case.dadger.fd(df=True)
     mp_by_code = _single_group_factor_rows(mp)
     fd_by_code = _single_group_factor_rows(fd)
 
@@ -1431,22 +1397,22 @@ _ITAIPU_MIN_GENERATION_PREFIXES: tuple[tuple[int, str], ...] = (
 
 
 def convert_itaipu_frequency_min_generation(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
 ) -> dict[tuple[int, int, int], list[float]]:
     """Itaipu's per-frequency minimum-generation floors from the ``RI`` register.
 
     DECOMP's ``RI`` (restrição de Itaipu) register carries a must-run floor on
     each Itaipu frequency half: ``geracao_minima_50_hz`` on the 50 Hz group
-    (which serves the Paraguay/ANDE load plus its surplus into SE) and
-    ``geracao_minima_60_hz`` on the 60 Hz group (on the plant's own bus). Each
-    is a per-(estágio, patamar) list, forward-filled across the calendar the
-    same way :func:`~cobre_bridge.decomp.libs_electrical.read_carga_ande` fills
-    the co-located ``carga_ande`` load. In DECOMP the 50 Hz floor binds (the
-    50 Hz half sits exactly at it), so dropping it lets the converted case
+    (on the plant's own SE bus, where it also serves the netted-in
+    Paraguay/ANDE load) and ``geracao_minima_60_hz`` on the 60 Hz group (on
+    the ``IV`` bus, the transshipment corridor into Ivaiporã). Each is a
+    per-(estágio, patamar) list, forward-filled across the calendar the same
+    way :func:`~cobre_bridge.decomp.libs_electrical.read_carga_ande` fills the
+    co-located ``carga_ande`` load. In DECOMP the 50 Hz floor binds (the 50 Hz
+    half sits exactly at it), so dropping it lets the converted case
     under-run Itaipu's 50 Hz half and backfill the ANDE load from the rest of
-    the system through the ``IV`` bus's lines.
+    the system through SE's own lines.
 
     Returns ``{(hydro_id, hydro_unit_group_id, stage_index): [MW per block]}``
     for the two Itaipu groups, ready to merge into the
@@ -1466,7 +1432,8 @@ def convert_itaipu_frequency_min_generation(
     """
     if _ITAIPU_CODE not in id_map.hydro_codes:
         return {}
-    ri = dadger.ri(df=True)
+    calendar = case.calendar
+    ri = case.dadger.ri(df=True)
     if ri is None or ri.empty:
         return {}
 
@@ -1560,4 +1527,7 @@ def convert_production_models(
                 "stage_ranges": [stage_range],
             }
         )
-    return {"$schema": _PRODUCTION_MODELS_SCHEMA_URL, "production_models": models}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/hydro_production_models.json"),
+        "production_models": models,
+    }

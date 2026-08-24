@@ -3,8 +3,8 @@
 Provides timing breakdowns, solver diagnostics, LP dimensions, and scaling
 charts used by the main performance tab module.
 
-Timing column hierarchy (verified against cobre crates/cobre-sddp/src/
-{forward,backward,training_output}.rs):
+Timing column hierarchy (verified against cobre's SDDP forward, backward, and
+training_output timing modules):
 
 - **Top-level phases** (mutually exclusive, sum ≈ iteration total):
   ``forward_wall_ms``, ``backward_wall_ms``, ``cut_selection_ms``,
@@ -29,6 +29,13 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from cobre_bridge.dashboard.tabs.timing_phases import (
+    TOP_LEVEL_PHASE_COLUMNS as TOP_LEVEL_PHASE_COLUMNS,
+)
+from cobre_bridge.dashboard.tabs.timing_phases import (
+    active_top_level_phases,
+    build_timing_stacked_figure,
+)
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS as _LEGEND,
 )
@@ -42,17 +49,9 @@ from cobre_bridge.ui.plotly_helpers import (
 from cobre_bridge.ui.theme import COLORS, PERFORMANCE_PHASE_COLORS
 
 # ---------------------------------------------------------------------------
-# Timing column categorisation — single source of truth for all timing charts.
+# Timing column categorisation for the sub-component and aggregate-CPU
+# charts. The top-level phase config/detector/builder live in timing_phases.
 # ---------------------------------------------------------------------------
-
-TOP_LEVEL_PHASE_COLUMNS: tuple[str, ...] = (
-    "forward_wall_ms",
-    "backward_wall_ms",
-    "cut_selection_ms",
-    "mpi_allreduce_ms",
-    "lower_bound_ms",
-    "overhead_ms",
-)
 
 # Wall-time sub-components inside backward_wall_ms.
 BACKWARD_SUBCOMPONENT_COLUMNS: tuple[str, ...] = (
@@ -127,25 +126,6 @@ _TIMING_COMPONENT_COLORS: list[str] = [
 # ---------------------------------------------------------------------------
 
 
-_TOP_LEVEL_PHASE_LABELS: dict[str, tuple[str, str]] = {
-    "forward_wall_ms": ("Forward", PERFORMANCE_PHASE_COLORS["forward"]),
-    "backward_wall_ms": ("Backward", PERFORMANCE_PHASE_COLORS["backward"]),
-    "cut_selection_ms": ("Cut Selection", PERFORMANCE_PHASE_COLORS["lp_solve"]),
-    "lower_bound_ms": ("Lower Bound Eval", "#14B8A6"),
-    "mpi_allreduce_ms": ("MPI AllReduce", "#8B5CF6"),
-    "overhead_ms": ("Other Overhead", PERFORMANCE_PHASE_COLORS["overhead"]),
-}
-
-
-def _detect_top_level_columns(timing: pd.DataFrame) -> list[tuple[str, str, str]]:
-    """Return [(column, label, color)] for present top-level phases."""
-    return [
-        (col, _TOP_LEVEL_PHASE_LABELS[col][0], _TOP_LEVEL_PHASE_LABELS[col][1])
-        for col in TOP_LEVEL_PHASE_COLUMNS
-        if col in timing.columns and col in _TOP_LEVEL_PHASE_LABELS
-    ]
-
-
 def chart_iteration_timing_breakdown(timing: pd.DataFrame) -> str:
     """Stacked bar per iteration using ONLY top-level phases.
 
@@ -156,23 +136,11 @@ def chart_iteration_timing_breakdown(timing: pd.DataFrame) -> str:
     """
     if timing.empty:
         return "<p>No timing data available.</p>"
-
-    present = _detect_top_level_columns(timing)
-    if not present:
+    if not active_top_level_phases(timing):
         return "<p>No recognised top-level timing columns.</p>"
 
-    iters = timing["iteration"].tolist()
-    fig = go.Figure()
-    for col, label, color in present:
-        fig.add_trace(
-            go.Bar(
-                x=iters,
-                y=timing[col].tolist(),
-                name=label,
-                marker_color=color,
-                hovertemplate=f"{label}: %{{y:.0f}} ms<extra></extra>",
-            )
-        )
+    fig = build_timing_stacked_figure(timing)
+    assert fig is not None  # guarded above: timing non-empty + phases present
     return render_figure(
         fig,
         title="Iteration Timing — Top-Level Phases (non-overlapping, sums to total)",
@@ -768,7 +736,7 @@ def chart_timing_waterfall(timing: pd.DataFrame) -> str:
     if timing.empty:
         return "<p>No timing data available.</p>"
 
-    present = _detect_top_level_columns(timing)
+    present = active_top_level_phases(timing)
     if not present:
         return "<p>No recognised top-level timing columns.</p>"
 
@@ -1681,7 +1649,7 @@ def chart_convergence_vs_wall_time(conv: pd.DataFrame, timing: pd.DataFrame) -> 
 
 
 # ---------------------------------------------------------------------------
-# Post-epic-04a backward-pass charts: per-opening & per-worker observability
+# Backward-pass charts: per-opening & per-worker observability
 # ---------------------------------------------------------------------------
 
 
@@ -1941,7 +1909,7 @@ def _box_stats_by_stage(bwd: pd.DataFrame, value_col: str) -> pd.DataFrame:
 def chart_backward_per_opening_solve_time(solver_train: pd.DataFrame) -> str:
     """Box plot of per-opening backward solve time (ms), grouped by stage.
 
-    Post-epic-04a the backward pass emits one solver-stats row per
+    The backward pass emits one solver-stats row per
     ``(iteration, stage, opening, rank, worker_id)``. Aggregating by stage
     exposes how much variability exists across openings and iterations at
     each stage — a fat tail signals LPs that swing wildly in difficulty.
@@ -2041,7 +2009,7 @@ def chart_backward_per_opening_simplex(solver_train: pd.DataFrame) -> str:
 def chart_backward_load_balance_per_worker(solver_train: pd.DataFrame) -> str:
     """Per-(rank, worker) backward solve time summed across iterations.
 
-    Post-epic-04b backward rows carry the real ``(rank, worker_id)`` from
+    Backward rows carry the real ``(rank, worker_id)`` from
     the MPI allgatherv. Summing solve time across iterations per worker
     reveals static load imbalance — a worker that consistently picks up
     more LPs than its peers stands out as a tall bar in this chart.
@@ -2109,7 +2077,7 @@ def chart_backward_load_balance_per_worker(solver_train: pd.DataFrame) -> str:
 def chart_worker_wall_time_distribution(timing_raw: pd.DataFrame) -> str:
     """Per-(rank, worker) forward + backward wall time across iterations.
 
-    Consumes the raw post-epic-04b timing rows that carry a non-null
+    Consumes the raw timing rows that carry a non-null
     ``worker_id``. Each bar is one worker; the two series are the summed
     forward/backward wall time observed by that worker. Large discrepancies
     across workers at the same rank surface thread-pool imbalance.

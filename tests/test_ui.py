@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import plotly.graph_objects as go
 import pytest
+from plotly.offline import get_plotlyjs_version
 
 from cobre_bridge.ui.css import PLANT_EXPLORER_CSS, comparison_css, dashboard_css
 from cobre_bridge.ui.html import (
@@ -20,7 +21,7 @@ from cobre_bridge.ui.html import (
     section_title,
     wrap_chart,
 )
-from cobre_bridge.ui.js import PLANT_EXPLORER_JS, TAB_SWITCH_JS
+from cobre_bridge.ui.js import PLANT_EXPLORER_JS, PLOTLY_TITLE_SHIM_JS, TAB_SWITCH_JS
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
@@ -30,7 +31,6 @@ from cobre_bridge.ui.plotly_helpers import (
 )
 from cobre_bridge.ui.theme import (
     BUS_COLORS,
-    CHART_PALETTES,
     COLORS,
     COMPARISON_COLORS,
     COPPER_ACCENT,
@@ -100,12 +100,6 @@ def test_theme_copper_accent_value() -> None:
 def test_theme_comparison_colors_keys() -> None:
     """COMPARISON_COLORS must contain 'cobre', 'newave', 'diff', 'match'."""
     assert set(COMPARISON_COLORS.keys()) == {"cobre", "newave", "diff", "match"}
-
-
-def test_theme_chart_palettes_default_mirrors_bus_colors() -> None:
-    """CHART_PALETTES['default'] must be identical to BUS_COLORS."""
-    assert "default" in CHART_PALETTES
-    assert CHART_PALETTES["default"] is BUS_COLORS
 
 
 def test_legend_defaults_orientation() -> None:
@@ -225,6 +219,22 @@ def test_tab_switch_js_is_non_empty_string() -> None:
     assert len(TAB_SWITCH_JS.strip()) > 0
 
 
+def test_plotly_title_shim_js_wraps_both_render_entry_points() -> None:
+    """PLOTLY_TITLE_SHIM_JS must override both Plotly.newPlot and Plotly.react."""
+    assert "Plotly.newPlot = function" in PLOTLY_TITLE_SHIM_JS
+    assert "Plotly.react = function" in PLOTLY_TITLE_SHIM_JS
+    assert "origNewPlot.call" in PLOTLY_TITLE_SHIM_JS
+    assert "origReact.call" in PLOTLY_TITLE_SHIM_JS
+
+
+def test_plotly_title_shim_js_normalizes_data_and_layout() -> None:
+    """The shim must normalize both the data (traces, e.g. per-trace colorbar
+    titles) and the layout argument, not layout alone — a bare colorbar title
+    lives on a trace object, not on layout."""
+    assert "normalizePlotlyTitles(data)" in PLOTLY_TITLE_SHIM_JS
+    assert "normalizePlotlyTitles(layout)" in PLOTLY_TITLE_SHIM_JS
+
+
 def test_wrap_chart_produces_chart_card() -> None:
     """wrap_chart must wrap content in a chart-card div (now includes expand button)."""
     result = wrap_chart("<p>Chart</p>")
@@ -283,7 +293,7 @@ def test_build_html_structure(
         js=TAB_SWITCH_JS,
     )
     assert "<!DOCTYPE html>" in result
-    assert "plotly-2.35.2.min.js" in result
+    assert f"plotly-{get_plotlyjs_version()}.min.js" in result
     assert "<header>" in result
     assert "<nav>" in result
     assert "<main>" in result
@@ -404,6 +414,23 @@ def test_comparators_backward_compat() -> None:
     assert callable(metrics_grid)
     assert callable(metric_card)
     assert callable(build_comparison_html)
+
+
+def test_build_comparison_html_head_includes_plotly_title_shim() -> None:
+    """The compare (newave + decomp, shared shell) report <head> must carry the
+    client-side title-normalizer shim.
+
+    plotly.js 3.x drops a bare-string ``title`` at render; the shim wraps
+    ``Plotly.newPlot``/``Plotly.react`` before any tab's chart script runs, so
+    it must land in ``<head>`` (via ``required_js``), not the end-of-body
+    ``<script>`` (``JS``/``TAB_SWITCH_JS``), which executes too late.
+    """
+    from cobre_bridge.comparators.html_report import build_comparison_html
+
+    html = build_comparison_html("Test", {"tab-overview": "<p>x</p>"})
+
+    head = html.split("<head>", 1)[1].split("</head>", 1)[0]
+    assert "normalizePlotlyTitles" in head
 
 
 # ---------------------------------------------------------------------------

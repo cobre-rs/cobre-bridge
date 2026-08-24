@@ -5,8 +5,7 @@ Every hydro declares a mandatory, stage-invariant ``unit_groups[]`` array
 stage-varying (optionally per-block) overlay for it — this table — letting
 any of a group's four declared bounds be *lowered* per stage/block.
 
-Verified cobre schema
-(``crates/cobre-io/src/constraints/hydro_unit_group_bounds.rs:94-169``):
+Verified against cobre's ``hydro_unit_group_bounds`` schema:
 
 ======================= ========== ============
 Column                  Arrow type Required?
@@ -21,26 +20,24 @@ Column                  Arrow type Required?
 ``block_id``            ``int32``  optional / nullable
 ======================= ========== ============
 
-All four bound columns are block-eligible (reader module doc lines 26-35) —
+All four bound columns are block-eligible (see the reader module docstring) —
 unlike the plant-axis ``hydro_bounds``, this family has no block-ineligible
 column (contrast ``thermal_bounds.cost_per_mwh``), so cobre rule 37 never
 touches it.
 
 **The overlay is id-addressed, not position-addressed.** cobre matches an
-override row to a group by the group's own declared ``id``
-(``resolution/group_bounds.rs:54-59,70-83``: it builds
+override row to a group by the group's own declared ``id`` (cobre builds
 ``group_position[(hydro.id, group.id)]`` and looks each row up by
 ``(row.hydro_id, row.hydro_unit_group_id)``), and it sorts both
 ``unit_groups[]`` and the bound rows by their full key on load
-(``entities/hydro.rs::sort_unit_groups``,
-``constraints/hydro_unit_group_bounds.rs:210-217``). Producer emission
+(``entities/hydro.rs::sort_unit_groups``). Producer emission
 order is therefore never load-bearing; the only producer obligation is that
 ``hydro_unit_group_id`` names the target group's declared ``id`` and that
 group ids are unique within a plant (cobre rule 39).
 
 This module is **value-fed, not deck-deriving** — it computes nothing about
 availability, unit maintenance, or Itaipu's split. :func:`_empty` is what
-the DECOMP pipeline calls until ticket-026 supplies real values.
+the DECOMP pipeline calls until real per-group values are supplied.
 """
 
 from __future__ import annotations
@@ -53,6 +50,7 @@ import pyarrow as pa
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.temporal import OperativeStage
 
 _HYDRO_UNIT_GROUP_BOUNDS_SCHEMA = pa.schema(
@@ -135,8 +133,9 @@ def _hours_weighted(values: Sequence[float], stage: OperativeStage) -> float:
 
 
 def convert_hydro_unit_group_bounds(
+    case: DecompCase,
+    *,
     values: Mapping[tuple[int, int, int], GroupBoundEntry],
-    calendar: Sequence[OperativeStage],
 ) -> pa.Table:
     """Build ``hydro_unit_group_bounds`` from a hand-fed value mapping.
 
@@ -170,7 +169,7 @@ def convert_hydro_unit_group_bounds(
     if not values:
         return _empty()
 
-    stages_by_id = {stage.index: stage for stage in calendar}
+    stages_by_id = {stage.index: stage for stage in case.calendar}
 
     hydro_ids: list[int] = []
     group_ids: list[int] = []

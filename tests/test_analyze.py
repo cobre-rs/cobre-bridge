@@ -2,49 +2,40 @@
 
 from __future__ import annotations
 
-import contextlib
-import io
 from pathlib import Path
 from typing import cast
 
-import pandas as pd
 import polars as pl
+import pytest
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.comparators.analyze import (
     aggregate_percentile_band,
-    bounds_mismatch_listing,
-    bounds_summary_counts,
-    build_bounds_dataset,
     build_results_dataset,
     bus_groups_and_pct,
     cobre_sum_and_newave_sin,
+    cost_percent_deltas,
+    fpha_metric_summary,
     per_bus_band_from_pct,
     per_bus_sums_from_frame,
     per_bus_sums_from_results,
     per_stage_sum_from_frame,
     per_stage_sum_from_results,
+    plant_max_reldiff_ranking,
     plant_percentile_arrays,
+    productivity_scatter_errors,
     results_footer_counts,
     spillage_lookups,
-    summary_frame_from_bounds,
     summary_frame_from_results,
-    tidy_from_bounds,
     tidy_from_results,
     tidy_percentiles_from_percentile_data,
     tidy_results_dataset,
     top_divergences_from_results,
 )
-from cobre_bridge.comparators.bounds import BoundComparison
 from cobre_bridge.comparators.dataset import (
     SUMMARY_SCHEMA,
     TIDY_SCHEMA,
     ComparisonDataset,
-)
-from cobre_bridge.comparators.report import (
-    build_summary,
-    print_bounds_mismatches_from_dataset,
-    print_mismatches,
 )
 from cobre_bridge.comparators.results import (
     PercentileData,
@@ -58,7 +49,6 @@ from cobre_bridge.comparators.verdict import (
 
 
 def _make_results() -> list[ResultComparison]:
-    """Three result comparisons spanning two entity types."""
     return [
         ResultComparison(
             entity_type="hydro",
@@ -100,7 +90,6 @@ def _make_results() -> list[ResultComparison]:
 
 
 def _empty_summary() -> pl.DataFrame:
-    """An empty summary frame for ``ComparisonDataset`` validation."""
     return ComparisonDataset.empty().summary
 
 
@@ -249,7 +238,6 @@ def test_tidy_results_dataset_empty_inputs_validate() -> None:
 
 
 def _make_many_results(n: int) -> list[ResultComparison]:
-    """``n`` result comparisons with monotonically increasing ``abs_diff``."""
     return [
         ResultComparison(
             entity_type="hydro",
@@ -354,9 +342,9 @@ def test_build_results_dataset_validates_and_carries_metadata() -> None:
 
     dataset.validate()
     assert len(dataset.metadata["top_divergences"]) == len(results)
-    assert dataset.metadata["nw_costs"] == {"deficit": 1.0}
-    assert dataset.metadata["cobre_costs"] == {"deficit": 2.0}
-    assert dataset.metadata["nw_bus_names"] == {0: "SUDESTE"}
+    assert dataset.render.nw_costs == {"deficit": 1.0}
+    assert dataset.render.cobre_costs == {"deficit": 2.0}
+    assert dataset.render.nw_bus_names == {0: "SUDESTE"}
     assert dataset.metadata["nw_hydro_names"] == {0: "ITAIPU", 1: "TUCURUI"}
     assert dataset.tidy.height == 2 * len(results) + 6
 
@@ -369,8 +357,8 @@ def test_build_results_dataset_empty_inputs_validate() -> None:
     assert dataset.summary.height == 0
 
 
-def test_build_results_dataset_carries_render_only_keys_in_memory() -> None:
-    """The render-only keys (results + drained pct frames) live in metadata."""
+def test_build_results_dataset_populates_render_inputs() -> None:
+    """``results`` + every drained ``pct`` frame land on ``dataset.render``."""
     results = _make_results()
     pct = PercentileData(
         thermal=pl.DataFrame({"entity_id": [0], "stage_id": [0]}),
@@ -380,23 +368,25 @@ def test_build_results_dataset_carries_render_only_keys_in_memory() -> None:
 
     dataset = build_results_dataset(results, pct, 1e-2)
 
-    assert dataset.metadata["results"] == list(results)
-    assert dataset.metadata["nw_max_stage"] == 12
-    assert dataset.metadata["cobre_training_seconds"] == 3.5
-    assert isinstance(dataset.metadata["thermal"], pl.DataFrame)
-    assert isinstance(dataset.metadata["gc_constraints"], list)
+    assert dataset.render.results == list(results)
+    assert dataset.render.nw_max_stage == 12
+    assert dataset.render.cobre_training_seconds == 3.5
+    assert isinstance(dataset.render.thermal, pl.DataFrame)
+    assert isinstance(dataset.render.gc_constraints, list)
 
 
-def test_metadata_json_excludes_render_only_keys(tmp_path: Path) -> None:
-    """``to_dir`` writes a small metadata.json without the render-only inputs.
+def test_metadata_json_holds_only_provenance_at_top_level(tmp_path: Path) -> None:
+    """``to_dir``'s top-level ``metadata.json`` holds only provenance keys.
 
-    The bulky render inputs (``results`` plus the drained ``PercentileData``
-    frames) are in :data:`RENDER_ONLY_METADATA_KEYS`, so ``to_dir`` must NOT
-    serialize them — yet the genuine provenance key ``top_divergences`` is kept.
+    Render inputs (``results`` plus the drained ``PercentileData`` frames)
+    serialize into the nested render payload (CMP-04), never as a top-level
+    ``metadata.json`` key — while the genuine provenance key
+    ``top_divergences`` is kept at the top level.
     """
+    import dataclasses
     import json
 
-    from cobre_bridge.comparators.dataset import RENDER_ONLY_METADATA_KEYS
+    from cobre_bridge.comparators.dataset import RenderInputs
 
     results = _make_results()
     pct = PercentileData(
@@ -411,175 +401,38 @@ def test_metadata_json_excludes_render_only_keys(tmp_path: Path) -> None:
     metadata_path = paths[2]
     written = json.loads(metadata_path.read_text(encoding="utf-8"))
 
-    # No render-only key leaked into the artifact.
-    for key in RENDER_ONLY_METADATA_KEYS:
-        assert key not in written, f"render-only key {key!r} leaked into metadata.json"
-    assert "results" not in written
-    assert "hydro" not in written
-    # Genuine provenance / JSON-native keys survive.
+    # No RenderInputs field name leaks in as a top-level metadata.json key.
+    render_field_names = {f.name for f in dataclasses.fields(RenderInputs)}
+    leaked = render_field_names & written.keys()
+    assert not leaked, f"render fields leaked into top-level metadata.json: {leaked}"
+    # Genuine provenance keys survive at the top level.
     assert "top_divergences" in written
-    assert written["nw_costs"] == {"deficit": 1.0}
+    assert "footer_counts" in written
+    assert "nw_hydro_names" in written
 
 
-def test_render_only_covers_all_frame_metadata_keys(tmp_path: Path) -> None:
-    """Every frame-valued metadata key must be listed in RENDER_ONLY_METADATA_KEYS.
+def test_render_inputs_fields_match_report_builder_consumption() -> None:
+    """Every ``RenderInputs`` field is read by ``report_builder``, and vice versa.
 
-    Guards the sync invariant between :func:`build_results_dataset` and
-    :data:`RENDER_ONLY_METADATA_KEYS`: a contributor who adds a new frame-valued
-    metadata key but forgets to register it here would otherwise only discover it
-    as a runtime ``TypeError`` from :meth:`ComparisonDataset.to_dir` (which cannot
-    serialize a bare ``pl``/``pd`` frame unless it is skipped as render-only).
-    This asserts the containment up front, and round-trips through ``to_dir`` to
-    confirm no frame key leaks into ``metadata.json``.
+    Guards the sync invariant between :class:`RenderInputs` and
+    ``report_builder.build_comparison_report``: a contributor who adds a new
+    typed render field but forgets to wire it into the report (or removes a
+    consumer without dropping the field) is caught here, rather than
+    surfacing as a silently-unused field or an ``AttributeError`` at render
+    time.
     """
-    import json
+    import dataclasses
+    import inspect
+    import re
 
-    from cobre_bridge.comparators.dataset import RENDER_ONLY_METADATA_KEYS
+    from cobre_bridge.comparators import report_builder
+    from cobre_bridge.comparators.dataset import RenderInputs
 
-    results = _make_results()
-    pct = PercentileData(
-        hydro=pl.DataFrame({"entity_id": [0], "stage_id": [0]}),
-        thermal=pl.DataFrame({"entity_id": [0], "stage_id": [0]}),
-        line_bounds=pd.DataFrame({"line_id": [0], "value": [1.0]}),
-        nw_costs={"deficit": 1.0},
-    )
+    field_names = {f.name for f in dataclasses.fields(RenderInputs)}
+    source = inspect.getsource(report_builder)
+    consumed = set(re.findall(r"dataset\.render\.(\w+)", source))
 
-    dataset = build_results_dataset(results, pct, 1e-2)
-
-    frame_keys = {
-        key
-        for key, value in dataset.metadata.items()
-        if isinstance(value, (pl.DataFrame, pd.DataFrame))
-    }
-    assert frame_keys, "expected at least one frame-valued metadata key in the fixture"
-    missing = frame_keys - RENDER_ONLY_METADATA_KEYS
-    assert not missing, (
-        f"frame-valued metadata keys {sorted(missing)} are not listed in "
-        f"RENDER_ONLY_METADATA_KEYS; add them or to_dir will raise a TypeError"
-    )
-
-    paths = dataset.to_dir(tmp_path)
-    written = json.loads(paths[2].read_text(encoding="utf-8"))
-    for key in frame_keys:
-        assert key not in written, (
-            f"frame metadata key {key!r} leaked into metadata.json"
-        )
-
-
-def _make_bounds() -> list[BoundComparison]:
-    """Four bound comparisons across two variables, mixing match/mismatch."""
-    return [
-        BoundComparison(
-            entity_type="hydro",
-            entity_name="ITAIPU",
-            newave_code=10,
-            cobre_id=0,
-            stage=0,
-            variable="storage_max",
-            newave_value=29000.0,
-            cobre_value=29000.0,
-            diff=0.0,
-            match=True,
-        ),
-        BoundComparison(
-            entity_type="hydro",
-            entity_name="TUCURUI",
-            newave_code=20,
-            cobre_id=1,
-            stage=0,
-            variable="storage_max",
-            newave_value=50000.0,
-            cobre_value=49000.0,
-            diff=1000.0,
-            match=False,
-        ),
-        BoundComparison(
-            entity_type="thermal",
-            entity_name="ANGRA",
-            newave_code=30,
-            cobre_id=2,
-            stage=0,
-            variable="generation_max",
-            newave_value=1350.0,
-            cobre_value=1350.0,
-            diff=0.0,
-            match=True,
-        ),
-        BoundComparison(
-            entity_type="thermal",
-            entity_name="CUIABA",
-            newave_code=40,
-            cobre_id=3,
-            stage=1,
-            variable="generation_max",
-            newave_value=500.0,
-            cobre_value=450.0,
-            diff=50.0,
-            match=False,
-        ),
-    ]
-
-
-def test_tidy_from_bounds_row_count_and_sources() -> None:
-    results = _make_bounds()
-
-    out = tidy_from_bounds(results)
-
-    assert out.height == 2 * len(results)
-    assert list(out.columns) == list(TIDY_SCHEMA)
-    assert set(out["source"].unique().to_list()) == {"newave", "cobre"}
-    assert out["bus"].unique().to_list() == [-1]
-    assert out["block"].unique().to_list() == [-1]
-
-
-def test_summary_from_bounds_within_tol_matches_build_summary() -> None:
-    results = _make_bounds()
-
-    out = summary_frame_from_bounds(results)
-    expected = build_summary(results)
-
-    assert list(out.columns) == list(SUMMARY_SCHEMA)
-    expected_schema = {name: dtype() for name, dtype in SUMMARY_SCHEMA.items()}
-    assert dict(out.schema) == expected_schema
-
-    for row in out.iter_rows(named=True):
-        matches, mismatches = expected.by_variable[row["variable"]]
-        assert row["within_tol_rate"] == matches / (matches + mismatches)
-        assert row["count"] == matches + mismatches
-        assert row["correlation"] is None
-
-
-def test_bounds_dataset_top_divergences_only_mismatches() -> None:
-    results = _make_bounds()
-
-    dataset = build_bounds_dataset(results)
-
-    dataset.validate()
-    divergences = dataset.metadata["top_divergences"]
-    assert isinstance(divergences, list)
-    assert all(d["match"] is False for d in divergences)
-    # Two mismatched rows in the fixture, largest abs(diff) first.
-    assert [d["entity_name"] for d in divergences] == ["TUCURUI", "CUIABA"]
-    assert dataset.tidy.height == 2 * len(results)
-
-
-def test_bounds_adapters_empty_inputs() -> None:
-    tidy = tidy_from_bounds([])
-    summary = summary_frame_from_bounds([])
-    dataset = build_bounds_dataset([])
-
-    assert tidy.height == 0
-    assert list(tidy.columns) == list(TIDY_SCHEMA)
-    assert summary.height == 0
-    assert list(summary.columns) == list(SUMMARY_SCHEMA)
-    dataset.validate()
-    assert dataset.metadata["top_divergences"] == []
-    summary_counts = dataset.metadata["summary_counts"]
-    assert isinstance(summary_counts, dict)
-    assert summary_counts["total"] == 0
-    mismatch_listing = dataset.metadata["mismatch_listing"]
-    assert isinstance(mismatch_listing, dict)
-    assert mismatch_listing["total"] == 0
+    assert consumed == field_names
 
 
 # -------------------------------------------------------------------
@@ -607,96 +460,6 @@ def test_build_results_dataset_carries_footer_counts() -> None:
     assert isinstance(footer, dict)
     assert footer["total"] == legacy.total
     assert footer["by_entity_type"] == legacy.by_entity_type
-
-
-def test_bounds_summary_counts_matches_build_summary() -> None:
-    results = _make_bounds()
-
-    counts = bounds_summary_counts(results)
-    legacy = build_summary(results)
-
-    assert counts["total"] == legacy.total
-    assert counts["matches"] == legacy.matches
-    assert counts["mismatches"] == legacy.mismatches
-    # The metadata pairs are [match, mismatch] lists; legacy uses tuples.
-    by_type = counts["by_entity_type"]
-    assert isinstance(by_type, dict)
-    assert {k: tuple(v) for k, v in by_type.items()} == legacy.by_entity_type
-    by_var = counts["by_variable"]
-    assert isinstance(by_var, dict)
-    assert {k: tuple(v) for k, v in by_var.items()} == legacy.by_variable
-
-
-def test_build_bounds_dataset_carries_summary_and_mismatch_metadata() -> None:
-    results = _make_bounds()
-
-    dataset = build_bounds_dataset(results)
-
-    assert "summary_counts" in dataset.metadata
-    assert "mismatch_listing" in dataset.metadata
-    listing = dataset.metadata["mismatch_listing"]
-    assert isinstance(listing, dict)
-    # Two mismatches in the fixture; sorted by raw diff descending.
-    assert listing["total"] == 2
-    rows = listing["rows"]
-    assert isinstance(rows, list)
-    assert [r["entity_name"] for r in rows] == ["TUCURUI", "CUIABA"]
-    assert rows[0]["newave_code"] == 20
-
-
-def test_bounds_mismatch_listing_sorts_by_raw_diff_descending() -> None:
-    results = _make_bounds()
-
-    listing = bounds_mismatch_listing(results, max_rows=50)
-
-    diffs = [r["diff"] for r in listing["rows"]]
-    assert diffs == sorted(diffs, reverse=True)
-
-
-def test_bounds_mismatch_listing_respects_max_rows_but_keeps_total() -> None:
-    results = _make_bounds()
-
-    listing = bounds_mismatch_listing(results, max_rows=1)
-
-    assert listing["total"] == 2
-    rows = listing["rows"]
-    assert isinstance(rows, list)
-    assert len(rows) == 1
-    assert rows[0]["entity_name"] == "TUCURUI"
-
-
-# -------------------------------------------------------------------
-# ticket-008: byte-identical legacy-vs-dataset console printers
-# -------------------------------------------------------------------
-
-
-def _capture(func: object, *args: object) -> str:
-    """Run a stdout-writing printer and return the captured text."""
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        func(*args)  # type: ignore[operator]
-    return buffer.getvalue()
-
-
-def test_print_bounds_mismatches_from_dataset_matches_legacy() -> None:
-    results = _make_bounds()
-    dataset = build_bounds_dataset(results)
-
-    legacy_out = _capture(print_mismatches, results)
-    dataset_out = _capture(print_bounds_mismatches_from_dataset, dataset)
-
-    assert dataset_out == legacy_out
-
-
-def test_print_bounds_mismatches_from_dataset_matches_legacy_no_mismatches() -> None:
-    results = [r for r in _make_bounds() if r.match]
-    dataset = build_bounds_dataset(results)
-
-    legacy_out = _capture(print_mismatches, results)
-    dataset_out = _capture(print_bounds_mismatches_from_dataset, dataset)
-
-    assert dataset_out == legacy_out
-    assert dataset_out == "No mismatches found.\n"
 
 
 # ---------------------------------------------------------------------------
@@ -1477,21 +1240,6 @@ def _summary_dataset(rows: list[dict[str, object]]) -> ComparisonDataset:
 class TestCompareVerdict:
     """Tests for ``build_compare_verdict`` reading only ``dataset.summary``."""
 
-    def test_verdict_bounds_fixture_counts_variables_and_worst(self) -> None:
-        results = _make_bounds()
-        dataset = build_bounds_dataset(results)
-
-        verdict = build_compare_verdict(dataset)
-
-        rows = dataset.summary.to_dicts()
-        assert verdict.total == 2
-        assert verdict.within_tol == 0
-        assert verdict.all_within_tol is False
-        # Derive the expected winner FROM the summary, never recompute sMAPE.
-        expected = min(rows, key=lambda r: (-float(r["max_smape"]), str(r["variable"])))
-        assert verdict.worst_variable == expected["variable"]
-        assert verdict.worst_smape == expected["max_smape"]
-
     def test_verdict_empty_dataset_returns_zeroed_verdict(self) -> None:
         dataset = build_results_dataset([], PercentileData(), 1e-2)
 
@@ -1567,3 +1315,194 @@ class TestCompareVerdict:
 
         assert verdict.worst_variable == "a_var"
         assert verdict.worst_smape == 0.5
+
+
+# ---------------------------------------------------------------------------
+# plant_max_reldiff_ranking (CMP-07: charts._shared._plant_max_reldiff_table)
+# ---------------------------------------------------------------------------
+
+
+def _reldiff_result(
+    name: str,
+    code: int,
+    cobre_id: int,
+    stage: int,
+    var: str,
+    rel_diff: float | None,
+    entity_type: str = "hydro",
+) -> ResultComparison:
+    return ResultComparison(
+        entity_type=entity_type,
+        entity_name=name,
+        newave_code=code,
+        cobre_id=cobre_id,
+        stage=stage,
+        variable=var,
+        newave_value=100.0,
+        cobre_value=100.0 * (1.0 + (rel_diff or 0.0)),
+        abs_diff=100.0 * (rel_diff or 0.0),
+        rel_diff=rel_diff,
+    )
+
+
+def test_plant_max_reldiff_ranking_orders_worst_first_and_computes_median() -> None:
+    results = [
+        _reldiff_result("ITAIPU", 10, 0, 0, "gen", 0.03),
+        # Same (plant, variable), later stage: the larger rel_diff must win.
+        _reldiff_result("ITAIPU", 10, 0, 1, "gen", 0.05),
+        _reldiff_result("ITAIPU", 10, 0, 0, "vol", 0.20),
+        _reldiff_result("TUCURUI", 20, 1, 0, "gen", 0.10),
+        # Unmatched comparison (rel_diff is None) -> excluded from the ranking
+        # and from the median, mirroring the "-" cell it renders as.
+        _reldiff_result("TUCURUI", 20, 1, 0, "vol", None),
+        # Different entity_type -> filtered out entirely.
+        ResultComparison(
+            entity_type="thermal",
+            entity_name="ANGRA",
+            newave_code=30,
+            cobre_id=2,
+            stage=0,
+            variable="gen",
+            newave_value=10.0,
+            cobre_value=99.0,
+            abs_diff=89.0,
+            rel_diff=8.9,
+        ),
+    ]
+    variables = [("gen", "Generation"), ("vol", "Volume")]
+
+    max_rd, plant_keys, medians = plant_max_reldiff_ranking(results, "hydro", variables)
+
+    assert max_rd == {
+        ("ITAIPU", 10, "gen"): 0.05,
+        ("ITAIPU", 10, "vol"): 0.20,
+        ("TUCURUI", 20, "gen"): 0.10,
+    }
+    # ITAIPU's worst cell (0.20) beats TUCURUI's (0.10) -> ITAIPU sorts first.
+    assert plant_keys == [("ITAIPU", 10), ("TUCURUI", 20)]
+    assert medians["gen"] == pytest.approx(0.075)
+    assert medians["vol"] == pytest.approx(0.20)
+
+
+def test_plant_max_reldiff_ranking_no_matching_rows_returns_none_medians() -> None:
+    results = [_reldiff_result("ANGRA", 30, 2, 0, "gen", 0.1, entity_type="thermal")]
+
+    max_rd, plant_keys, medians = plant_max_reldiff_ranking(
+        results, "hydro", [("gen", "Generation")]
+    )
+
+    assert max_rd == {}
+    assert plant_keys == []
+    # statistics.median on the empty column -> None (the render layer's "-" cell).
+    assert medians == {"gen": None}
+
+
+# ---------------------------------------------------------------------------
+# productivity_scatter_errors (CMP-07: charts.productivity)
+# ---------------------------------------------------------------------------
+
+
+def test_productivity_scatter_errors_computes_mean_and_max_relative_error() -> None:
+    nw_vals = [100.0, 50.0, 200.0]
+    cb_vals = [110.0, 45.0, 200.0]  # rel errs: 0.1, 0.1, 0.0
+
+    mean_rel, max_rel = productivity_scatter_errors(nw_vals, cb_vals)
+
+    assert mean_rel == pytest.approx(0.2 / 3)
+    assert max_rel == pytest.approx(0.1)
+
+
+def test_productivity_scatter_errors_excludes_reference_below_guard() -> None:
+    # The first pair's reference is below the 1e-12 guard and is dropped;
+    # only the second pair (rel err 0.1) contributes.
+    nw_vals = [1e-13, 100.0]
+    cb_vals = [5.0, 90.0]
+
+    mean_rel, max_rel = productivity_scatter_errors(nw_vals, cb_vals)
+
+    assert mean_rel == pytest.approx(0.1)
+    assert max_rel == pytest.approx(0.1)
+
+
+def test_productivity_scatter_errors_empty_input_returns_zero_zero() -> None:
+    assert productivity_scatter_errors([], []) == (0.0, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# fpha_metric_summary (CMP-07: charts.fpha.fpha_metrics_table)
+# ---------------------------------------------------------------------------
+
+
+def test_fpha_metric_summary_aggregates_per_plant_and_sorts_worst_first() -> None:
+    metrics = pl.DataFrame(
+        {
+            "cobre_id": [0, 0, 1],
+            "plant_name": ["ITAIPU", "ITAIPU", "TUCURUI"],
+            "stage": [0, 1, 0],
+            "n_planes_newave": [3, 5, 2],
+            "n_planes_cobre": [4, 6, 2],
+            "n_v": [1, 1, 3],
+            "nmae": [0.02, 0.04, 0.10],
+            "bias": [0.01, -0.01, 0.05],
+            "max_abs_dev": [1.0, 2.0, 3.0],
+            "gh_max_ratio": [1.01, 0.98, 1.10],
+        }
+    )
+
+    agg = fpha_metric_summary(metrics)
+    rows = {int(r["cobre_id"]): r for r in agg.iter_rows(named=True)}
+
+    itaipu = rows[0]
+    assert itaipu["plant_name"] == "ITAIPU"
+    assert itaipu["planes_nw"] == 5
+    assert itaipu["planes_cb"] == 6
+    assert itaipu["mean_nmae"] == pytest.approx(3.0)
+    assert itaipu["worst_nmae"] == pytest.approx(4.0)
+    assert itaipu["mean_bias"] == pytest.approx(0.0)
+    assert itaipu["ghr_min"] == pytest.approx(0.98)
+    assert itaipu["ghr_max"] == pytest.approx(1.01)
+
+    tucurui = rows[1]
+    assert tucurui["mean_nmae"] == pytest.approx(10.0)
+    assert tucurui["worst_nmae"] == pytest.approx(10.0)
+
+    # Sorted worst-NMAE first: TUCURUI (10%) before ITAIPU (4%).
+    assert list(agg["cobre_id"]) == [1, 0]
+
+
+# ---------------------------------------------------------------------------
+# cost_percent_deltas (CMP-07: charts.costs.cost_breakdown_table)
+# ---------------------------------------------------------------------------
+
+
+def test_cost_percent_deltas_computes_rows_and_totals_sorted_by_abs_diff() -> None:
+    categories = [
+        ("Thermal", 100.0, 110.0, "#111"),
+        ("Deficit", 0.0, 5.0, "#222"),
+        ("Exchange", 50.0, 45.0, "#333"),
+    ]
+
+    rows, total_nw, total_cb, total_diff, total_pct = cost_percent_deltas(categories)
+
+    assert rows == [
+        ("Thermal", 100.0, 110.0, 10.0, pytest.approx(10.0), "#111"),
+        # nw_v == 0.0 is below the 0.01 guard -> pct is None, not a ZeroDivisionError.
+        ("Deficit", 0.0, 5.0, 5.0, None, "#222"),
+        ("Exchange", 50.0, 45.0, -5.0, pytest.approx(-10.0), "#333"),
+    ]
+    assert total_nw == pytest.approx(150.0)
+    assert total_cb == pytest.approx(160.0)
+    assert total_diff == pytest.approx(10.0)
+    assert total_pct == pytest.approx(10.0 / 150.0 * 100.0)
+
+
+def test_cost_percent_deltas_zero_total_denominator_yields_none_pct() -> None:
+    categories = [("Only", 0.0, 20.0, "#000")]
+
+    rows, total_nw, total_cb, total_diff, total_pct = cost_percent_deltas(categories)
+
+    assert rows == [("Only", 0.0, 20.0, 20.0, None, "#000")]
+    assert total_nw == 0.0
+    assert total_cb == pytest.approx(20.0)
+    assert total_diff == pytest.approx(20.0)
+    assert total_pct is None

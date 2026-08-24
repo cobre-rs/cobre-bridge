@@ -1,16 +1,9 @@
-"""End-to-end tests for the boundary FCF importer orchestration
-(``fcf/__init__.py::import_boundary_fcf``).
+"""Tests for the boundary FCF importer orchestration
+(``fcf/importer.py::import_boundary_fcf``).
 
-Option C (same-study, 2026-08-03): ``example/decomp-set-24-rv0`` is both the
-convertible deck (``dadger.rv0`` -> the target case) and the boundary cut
-source (its own ``cortesh.dat``/``cortes-010.dat``, a single-stage export
-whose trailer derives boundary stage 10). The deck carries GNL, but the
-epic-2 mapper leaves every ``AnticipatedThermalState`` slot at coefficient 0
-(``pi_gnl`` is epic 3's job) — this converted case's terminal manifest in
-fact carries *no* ``AnticipatedThermalState``/``HydroTransitBucket`` slots at
-all yet (GNL-anticipation emission is deferred at this DECOMP milestone), so
-there is nothing to zero here; the mapper's docstring names this an
-explicitly legitimate case shape, not an error.
+The GNL-ring and diagnostics tests below are tier-1 (synthetic fixtures, no
+deck, no cobre binary); the ``decomp-mar-26-rv2`` block further down is the
+real-deck, real-cobre-binary end-to-end round trip.
 """
 
 from __future__ import annotations
@@ -23,26 +16,25 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from inewave.newave import Cortesh
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.converters.network import MONTH_HOURS
 from cobre_bridge.decomp.anticipated import GnlCommitmentModel, GnlThermal
-from cobre_bridge.decomp.fcf import (
+from cobre_bridge.decomp.case import DecompCase
+from cobre_bridge.decomp.fcf.bootstrap import bootstrap_terminal_manifest
+from cobre_bridge.decomp.fcf.cortes import BoundaryCuts, summarize_cut_families
+from cobre_bridge.decomp.fcf.importer import (
     _coupling_stage_hours,
     _emit_import_diagnostics,
     _gnl_targets_from,
     _post_horizon_start,
     import_boundary_fcf,
-)
-from cobre_bridge.decomp.fcf.cortes import (
-    BoundaryCuts,
-    read_cortes,
-    summarize_cut_families,
 )
 from cobre_bridge.decomp.fcf.mapper import (
     DroppedTerm,
@@ -51,7 +43,7 @@ from cobre_bridge.decomp.fcf.mapper import (
     MappingResult,
     map_boundary_cuts,
 )
-from cobre_bridge.decomp.pipeline import convert_decomp_case
+from cobre_bridge.decomp.pipeline import FcfInputs, convert_decomp_case
 from tests._fcf_fixtures import (
     make_boundary_cuts,
     make_cortes_header,
@@ -61,16 +53,7 @@ from tests._fcf_fixtures import (
     make_mapped_cut,
     make_slot,
 )
-
-# Real, gitignored deck + local cobre build (see example/README.md and
-# tests/test_decomp_fcf_bootstrap.py's identical constants) — CI has
-# neither, so the heavy end-to-end tests (AC 1-3) are skipif-guarded on both
-# plus the writer binding; the no-cut-files no-op (AC 4) needs none of them
-# and runs unconditionally.
-_DECK = Path("example/decomp-set-24-rv0")
-_CORTESH = _DECK / "cortesh.dat"
-_CORTES = _DECK / "cortes-010.dat"
-_COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
+from tests.conftest import make_decomp_case, make_decomp_files
 
 
 def _has_writer_binding() -> bool:
@@ -90,181 +73,12 @@ def _has_writer_binding() -> bool:
 
 _HAS_WRITER_BINDING = _has_writer_binding()
 
-_HAS_E2E_DEPS = _COBRE_BIN.exists() and _DECK.exists() and _HAS_WRITER_BINDING
-_SKIP_REASON = (
-    f"requires the local cobre binary ({_COBRE_BIN}), the "
-    f"decomp-set-24-rv0 deck ({_DECK}), and the write_policy_checkpoint "
-    "writer binding"
-)
-_skip_e2e = pytest.mark.skipif(not _HAS_E2E_DEPS, reason=_SKIP_REASON)
-
-
-@dataclass(frozen=True)
-class _ImportedCase:
-    """One converted-and-boundary-imported case, shared across the AC1-3 tests."""
-
-    case_dir: Path
-    boundary_dir: Path
-
-
-@pytest.fixture(scope="module")
-def imported_case(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> _ImportedCase:
-    """Convert ``decomp-set-24-rv0`` and import its own boundary FCF, once.
-
-    Module-scoped and shared across the three AC1-3 tests below: the deck's
-    ``cortes-010.dat`` is ~176 MB and the bootstrap stage runs a real
-    ``cobre run``, so this ~30s+ path executes exactly once regardless of how
-    many assertions exercise its result. Guarded by the same skip condition
-    as the consuming tests (belt-and-suspenders — a skipped test never
-    reaches its fixtures in this suite's other epic-2 modules, but the
-    explicit ``pytest.skip`` here keeps this fixture safe even if invoked on
-    its own).
-    """
-    if not _HAS_E2E_DEPS:
-        pytest.skip(_SKIP_REASON)
-
-    root = tmp_path_factory.mktemp("fcf_importer_e2e")
-    case_dir = root / "converted"
-    convert_decomp_case(_DECK, case_dir, force=True)
-
-    boundary_dir = import_boundary_fcf(
-        case_dir,
-        _CORTESH,
-        _CORTES,
-        work_dir=root / "work",
-        cost_scale_factor=1.0,
-    )
-    assert boundary_dir is not None
-    return _ImportedCase(case_dir=case_dir, boundary_dir=boundary_dir)
-
-
-@_skip_e2e
-def test_import_boundary_fcf_nongnl_writes_checkpoint(
-    imported_case: _ImportedCase,
-) -> None:
-    """AC 1 — the boundary checkpoint's files exist at the derived stage 10."""
-    boundary_dir = imported_case.boundary_dir
-
-    assert boundary_dir == imported_case.case_dir / "boundary"
-    assert (boundary_dir / "metadata.json").is_file()
-    # cobre 0.14 keys the cut file by pool id (stage 10 -> "010.bin").
-    assert (boundary_dir / "cuts" / "010.bin").is_file()
-    assert (boundary_dir / "basis").is_dir()
-
-    metadata = json.loads((boundary_dir / "metadata.json").read_text())
-    # 0.14 nests the algorithm provenance under a "producer" block.
-    assert metadata["producer"]["cost_scale_factor"] == 1.0
-    assert metadata["num_stages"] == 1
-
-
-@_skip_e2e
-def test_import_boundary_fcf_patches_policy_boundary(
-    imported_case: _ImportedCase,
-) -> None:
-    """AC 2 — config.json's policy.boundary is wired at the derived stage 10."""
-    config = json.loads((imported_case.case_dir / "config.json").read_text())
-
-    assert config["policy"]["boundary"] == {
-        "path": "boundary",
-        "source_stage": 10,
-    }
-    # cobre >= 0.14 infers the inflow-lag depth from the loaded boundary policy,
-    # so the importer no longer writes state_space into the shipped config; it
-    # feeds the cut-derived depth to the bootstrap run as an in-memory override
-    # (this deck's boundary cuts carry pi_qafl terms, so that depth is positive).
-    assert "state_space" not in config
-    # the convert_config sections must survive the policy.boundary patch untouched
-    assert "training" in config
-    assert "simulation" in config
-
-
-@_skip_e2e
-def test_import_boundary_fcf_case_validates(imported_case: _ImportedCase) -> None:
-    """AC 3 — ``cobre validate`` accepts the boundary-injected case.
-
-    Only the exit code gates this test — a non-fatal external-interop
-    warning (e.g. ``inflow_lags``) may legitimately appear on stdout/stderr
-    without flipping it.
-    """
-    completed = subprocess.run(
-        [str(_COBRE_BIN), "validate", str(imported_case.case_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert completed.returncode == 0, (
-        f"cobre validate failed (exit {completed.returncode}):\n"
-        f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
-    )
-
-
-@_skip_e2e
-def test_import_boundary_fcf_emits_diagnostics(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> None:
-    """AC 1/AC 2 (ticket-015) — the importer's two INFO ``Diagnostic``s.
-
-    A fresh convert+import, wrapped in its own ``dx.collect()`` block —
-    ``imported_case``'s call above already ran with no sink installed, and
-    ``diagnostics.emit`` cannot retroactively populate a sink that wasn't
-    active at call time, so this test performs its own run rather than
-    reusing that fixture's result.
-
-    Asserts the dropped-plant table names exactly the two D3-dropped plants
-    (codes 132, 176 — pinned from the epic-2 learnings) and that the
-    cut-family-summary diagnostic's reported figures equal a *direct*
-    ``summarize_cut_families`` call on an independently re-read
-    ``BoundaryCuts`` — proving the diagnostic never re-implements the triage.
-    """
-    root = tmp_path_factory.mktemp("fcf_importer_diagnostics_e2e")
-    case_dir = root / "converted"
-    convert_decomp_case(_DECK, case_dir, force=True)
-
-    with dx.collect() as sink:
-        boundary_dir = import_boundary_fcf(
-            case_dir,
-            _CORTESH,
-            _CORTES,
-            work_dir=root / "work",
-            cost_scale_factor=1.0,
-        )
-    assert boundary_dir is not None
-
-    assert len(sink) == 2
-    by_code = {diagnostic.code: diagnostic for diagnostic in sink}
-    assert set(by_code) == {
-        "boundary-fcf-cut-family-summary",
-        "boundary-fcf-source-only-plants-dropped",
-    }
-
-    dropped_diagnostic = by_code["boundary-fcf-source-only-plants-dropped"]
-    assert dropped_diagnostic.severity is dx.Severity.INFO
-    assert dropped_diagnostic.table is not None
-    assert {row[0] for row in dropped_diagnostic.table.rows} == {132, 176}
-
-    summary_diagnostic = by_code["boundary-fcf-cut-family-summary"]
-    assert summary_diagnostic.severity is dx.Severity.INFO
-
-    cortesh = Cortesh.read(str(_CORTESH))
-    cuts = read_cortes(_CORTES, cortesh, boundary_stage=None)
-    summary = summarize_cut_families(cuts)
-    # ticket-013 Requirement C.1: the figures live in `summary` now, not a
-    # separate restating `notes` bullet (dropped as duplicate bloat).
-    assert summary_diagnostic.notes == []
-    assert str(summary.n_active_cuts) in summary_diagnostic.summary
-    assert str(summary.storage_nonzero_plants) in summary_diagnostic.summary
-    assert str(summary.lag_nonzero_by_depth) in summary_diagnostic.summary
-
 
 def test_emit_import_diagnostics_ac1_ac2_from_synthetic() -> None:
     """AC 1/AC 2 (ticket-015) — both diagnostics fire against fully synthetic
-    inputs: no deck, no cobre binary. ``dropped`` uses codes 20/30 rather
-    than the real deck's 132/176 (see
-    ``test_import_boundary_fcf_emits_diagnostics`` above), so this test
-    carries no hidden dependency on ``example/``.
+    inputs: no deck, no cobre binary. ``dropped`` uses codes 20/30 (not a
+    real deck's plant codes), so this test carries no hidden dependency on
+    ``example/``.
     """
     cuts = make_boundary_cuts((1,), (make_cut_record(pi_varm=(1.5,), rhs=10.0),))
     mapping = MappingResult(
@@ -322,16 +136,16 @@ def test_emit_import_diagnostics_no_dropped_gates_dropped_diagnostic_off() -> No
 def test_import_boundary_fcf_no_cut_files_is_noop(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """AC 4 — ``cortesh_path``/``cortes_path`` both ``None`` is an
+    """AC 4 — ``case.files.cortesh``/``case.files.cortes`` both ``None`` is an
     unconditional no-op: no ``boundary/`` directory, no binary invoked."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
+    case = make_decomp_case(tmp_path)
 
     with caplog.at_level(logging.INFO):
         result = import_boundary_fcf(
             case_dir,
-            None,
-            None,
+            case,
             work_dir=tmp_path / "work",
             cost_scale_factor=1.0,
         )
@@ -339,6 +153,169 @@ def test_import_boundary_fcf_no_cut_files_is_noop(
     assert result is None
     assert not (case_dir / "boundary").exists()
     assert "boundary FCF skipped" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ticket-003/013: thread node_id/graph_stage_id from the bootstrap manifest
+# into `build_stage_cuts_payload`, and into `config.json`'s
+# `policy.boundary.source_stage` (never the cut file's own calendar
+# `boundary_stage`). Every cut-reader/cobre-import seam is monkeypatched
+# (mirrors `test_decomp_fcf_injection.py`'s seam-stubbing convention, kept
+# local per the one-home-per-source-module test convention) — no real deck,
+# cobre binary, or installed cobre wheel needed.
+# ---------------------------------------------------------------------------
+
+
+def _stub_import_seams(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_cuts: BoundaryCuts
+) -> DecompCase:
+    """Monkeypatch the deck/cut-reader/cobre-import seams shared by the
+    node_id/graph_stage_id threading tests below, returning the
+    ``DecompCase`` the importer reads instead of re-parsing a deck."""
+    monkeypatch.setitem(sys.modules, "cobre", SimpleNamespace(__version__="0.13.0"))
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.Cortesh",
+        SimpleNamespace(read=lambda _path: object()),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.read_cortes",
+        lambda *_args, **_kwargs: fake_cuts,
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.ensure_writer_binding", lambda: None
+    )
+
+    files = make_decomp_files(
+        tmp_path,
+        cortesh=tmp_path / "deck" / "cortesh.dat",
+        cortes=tmp_path / "deck" / "cortes-010.dat",
+    )
+    return make_decomp_case(
+        files,
+        dadger=object(),
+        id_map=make_id_map(()),
+        hidr=object(),
+        calendar=[],
+    )
+
+
+def test_import_boundary_fcf_threads_node_and_graph_stage_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 1 — given a bootstrap manifest with node_id=0/graph_stage_id=4 and
+    a cuts file whose boundary_stage=4, `build_stage_cuts_payload` is called
+    with `cost_scale_factor=1.0`, `node_id=0`, `graph_stage_id=4`."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+
+    fake_cuts = make_boundary_cuts(
+        plant_codes=(1,),
+        records=(make_cut_record(pi_varm=(1.5,), rhs=10.0, forward_pass_index=0),),
+        boundary_stage=4,
+    )
+    case = _stub_import_seams(monkeypatch, tmp_path, fake_cuts)
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer._final_stage_block_hours",
+        lambda _case_dir: [648.0],
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.bootstrap_terminal_manifest",
+        lambda *_args, **_kwargs: make_manifest(
+            [make_slot(0, 0, 0)], node_id=0, graph_stage_id=4
+        ),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.map_boundary_cuts",
+        lambda *_args, **_kwargs: MappingResult(
+            cuts=(make_mapped_cut(coefficients=(1.5,)),), dropped=()
+        ),
+    )
+    calls: list[dict[str, object]] = []
+
+    def _spy_build_stage_cuts_payload(
+        *_args: object, **kwargs: object
+    ) -> dict[str, object]:
+        calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.build_stage_cuts_payload",
+        _spy_build_stage_cuts_payload,
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.write_boundary_checkpoint",
+        lambda *_args, **_kwargs: None,
+    )
+
+    import_boundary_fcf(
+        case_dir,
+        case,
+        work_dir=tmp_path / "work",
+        cost_scale_factor=1.0,
+        config={},
+        initial_conditions={},
+    )
+
+    assert len(calls) == 1
+    assert calls[0] == {
+        "stage_id": 4,
+        "cost_scale_factor": 1.0,
+        "node_id": 0,
+        "graph_stage_id": 4,
+    }
+
+
+def test_import_boundary_fcf_source_stage_is_graph_stage_id_not_boundary_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bootstrap manifest's `graph_stage_id` disagreeing with the cut
+    file's own `boundary_stage` is not an error (they are different axes —
+    cobre's own 0-based pool identity vs. the source model's 1-based
+    calendar month count — that only coincidentally share a value):
+    `import_boundary_fcf` patches `config.json`'s `policy.boundary.
+    source_stage` with the manifest's `graph_stage_id` (3), never
+    `boundary_stage` (4), and does not raise."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+
+    fake_cuts = make_boundary_cuts(
+        plant_codes=(1,),
+        records=(make_cut_record(pi_varm=(1.5,), rhs=10.0, forward_pass_index=0),),
+        boundary_stage=4,
+    )
+    case = _stub_import_seams(monkeypatch, tmp_path, fake_cuts)
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer._final_stage_block_hours",
+        lambda _case_dir: [648.0],
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.bootstrap_terminal_manifest",
+        lambda *_args, **_kwargs: make_manifest(
+            [make_slot(0, 0, 0)], node_id=0, graph_stage_id=3
+        ),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.map_boundary_cuts",
+        lambda *_args, **_kwargs: MappingResult(
+            cuts=(make_mapped_cut(coefficients=(1.5,)),), dropped=()
+        ),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.write_boundary_checkpoint",
+        lambda *_args, **_kwargs: None,
+    )
+
+    config: dict[str, object] = {}
+    import_boundary_fcf(
+        case_dir,
+        case,
+        work_dir=tmp_path / "work",
+        cost_scale_factor=1.0,
+        config=config,
+        initial_conditions={},
+    )
+
+    assert config["policy"]["boundary"]["source_stage"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -539,8 +516,8 @@ def test_emit_import_diagnostics_gnl_deviation_gated_off_without_plan() -> None:
 
 
 def test_post_horizon_start_returns_earliest_stage(tmp_path: Path) -> None:
-    """AC 3 — the earliest ``stages[i].start_date`` becomes a ``YYYYMMDD``
-    int, regardless of the list's own order."""
+    """AC 3 — the earliest ``stages[i].start_date`` becomes a ``YYYYMM01``
+    month-anchor, regardless of the list's own order."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
     (case_dir / "post_study_stages.json").write_text(
@@ -557,6 +534,38 @@ def test_post_horizon_start_returns_earliest_stage(tmp_path: Path) -> None:
     )
 
     assert _post_horizon_start(case_dir) == 20260501
+
+
+def test_post_horizon_start_month_anchors_a_mid_month_stage(tmp_path: Path) -> None:
+    """AC 1 — an earliest stage starting mid-month (``2026-05-16``) still
+    anchors to the 1st of that month (``20260501``), never the day it
+    actually starts on: cobre's excised ring dates every surviving slot at
+    month-anchor granularity, so the filter must not rely on the reference
+    deck's day-01 coincidence."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "post_study_stages.json").write_text(
+        json.dumps(
+            {
+                "stages": [{"start_date": "2026-05-16", "duration_hours": 168.0}],
+                "thermal_bounds": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _post_horizon_start(case_dir) == 20260501
+
+
+def test_post_horizon_start_docstring_is_month_anchor_not_full_day() -> None:
+    """AC 4 — the docstring says ``YYYYMM01`` / month-anchor and no longer
+    describes a ``YYYYMMDD`` full-day value or the retired K=0-lead-lane
+    framing (source-text check)."""
+    docstring = _post_horizon_start.__doc__
+    assert docstring is not None
+    assert "YYYYMM01" in docstring or "month-anchor" in docstring
+    assert "YYYYMMDD" not in docstring
+    assert "K=0" not in docstring
 
 
 def test_post_horizon_start_none_when_file_absent(tmp_path: Path) -> None:
@@ -581,7 +590,7 @@ def test_post_horizon_start_none_when_stages_empty(tmp_path: Path) -> None:
 
 def test_post_horizon_start_malformed_start_date_propagates(tmp_path: Path) -> None:
     """Error Handling — a corrupt ``start_date`` is NOT silently downgraded
-    to "no horizon"; the ``ValueError`` from ``int(...)`` propagates
+    to "no horizon"; the ``ValueError`` from ``date.fromisoformat`` propagates
     verbatim."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
@@ -589,7 +598,7 @@ def test_post_horizon_start_malformed_start_date_propagates(tmp_path: Path) -> N
         json.dumps({"stages": [{"start_date": "not-a-date"}]}), encoding="utf-8"
     )
 
-    with pytest.raises(ValueError, match="invalid literal for int"):
+    with pytest.raises(ValueError, match="Invalid isoformat string"):
         _post_horizon_start(case_dir)
 
 
@@ -887,14 +896,117 @@ def test_emit_import_diagnostics_c4_no_remediation_footer() -> None:
     assert deviation.remediation is None
 
 
+# ---------------------------------------------------------------------------
+# ticket-014: the dropped-coverage filter reconciled with the excised ring
+# (ticket-012's in-study-committed-window reason string, never the retired
+# post-study-horizon/K=0 framing). Tier-1: pure Python, no deck, no cobre
+# binary.
+# ---------------------------------------------------------------------------
+
+
+def test_emit_import_diagnostics_gnl_dropped_count_sums_source_and_instudy() -> None:
+    """AC 1/AC 2 -- the dropped-coverage count sums a source-submercado drop
+    (submercado 2 has no live GNL thermal at all) and an in-study
+    non-covered drop (thermal 94's only dated slot falls before the
+    committed-window horizon) to 2, read straight from
+    ``mapping.gnl_dropped``; the summary names both clauses and carries
+    neither the retired ``post-study horizon`` substring nor ``K=0``.
+    """
+    id_map = make_id_map(())
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260401),
+        ]
+    )
+    header = make_cortes_header(
+        (), lag_maximo_gnl=2, n_patamares=3, submercado_codes=(1, 2)
+    )
+    # col(1,p,2) -> flat indices 1,3,5 (thermal 94's ring, submercado 1);
+    # col(2,p,1) -> flat indices 6,8,10 (submercado 2, no live GNL thermal
+    # claims it).
+    pi_gnl = _gnl_row(12, {1: 0.1, 3: 0.2, 5: 0.3, 6: 0.5})
+    record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=5.0)
+    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
+    # thermal 94's only dated slot (20260401) is before this
+    # post_horizon_start (20260501) -- an in-study, non-covered drop.
+    gnl_plan = GnlRingPlan(
+        (GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),),
+        post_horizon_start=20260501,
+    )
+
+    mapping = map_boundary_cuts(
+        cuts, manifest, id_map, cost_unit_hours=MONTH_HOURS, gnl_plan=gnl_plan
+    )
+    assert len(mapping.gnl_dropped) == 2
+
+    with dx.collect() as sink:
+        _emit_import_diagnostics(cuts, mapping, gnl_plan)
+
+    deviation = next(
+        d for d in sink if d.code == "boundary-fcf-gnl-anticipated-deviation"
+    )
+    assert "2 GNL term(s) dropped" in deviation.summary
+    assert "no live thermal in that submercado" in deviation.summary
+    assert "in-study delivery priced by the committed window" in deviation.summary
+    assert "post-study horizon" not in deviation.summary
+    assert "K=0" not in deviation.summary
+
+
+def test_emit_import_diagnostics_gnl_deviation_class4_absent_no_drop() -> None:
+    """AC 3 -- a já-comandada (class-4) slot never reaches the terminal
+    manifest at all (cobre excises it from the ring entirely), so a target
+    carrying only a covered (class-3 signaled) dated slot contributes zero
+    drops; the per-``(submercado, lag)`` spread table still renders its row.
+    """
+    id_map = make_id_map(())
+    manifest = make_manifest(
+        [
+            make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+        ]
+    )
+    header = make_cortes_header(
+        (), lag_maximo_gnl=2, n_patamares=3, submercado_codes=(1,)
+    )
+    pi_gnl = _gnl_row(6, {1: 0.1, 3: 0.2, 5: 0.3})
+    record = make_cut_record(pi_varm=(), pi_gnl=pi_gnl, rhs=5.0)
+    cuts = BoundaryCuts(header=header, boundary_stage=10, records=(record,))
+    gnl_plan = GnlRingPlan(
+        (GnlThermalTarget(thermal_id=94, submercado=1, nl_lag=2),),
+        post_horizon_start=20260501,
+    )
+
+    mapping = map_boundary_cuts(
+        cuts,
+        manifest,
+        id_map,
+        cost_unit_hours=MONTH_HOURS,
+        gnl_plan=gnl_plan,
+        coupling_block_hours=_UNIFORM_GNL_BLOCK_HOURS,
+    )
+    assert mapping.gnl_dropped == ()
+
+    with dx.collect() as sink:
+        _emit_import_diagnostics(cuts, mapping, gnl_plan)
+
+    deviation = next(
+        d for d in sink if d.code == "boundary-fcf-gnl-anticipated-deviation"
+    )
+    assert "0 GNL term(s) dropped" in deviation.summary
+    assert deviation.table is not None
+    assert len(deviation.table.rows) == 1
+
+
 # The real, gitignored `decomp-mar-26-rv2` deck (the empirical READBACK deck) +
 # the local cobre **develop** build. The boundary-pricing / anticipated-
 # reconciliation work has landed in develop (commits `abf73bf1` reconcile-by-
 # dated-fan-out, `7faed7a0` exempt post-horizon anticipated deliveries from the
-# lead-horizon cap), so the develop build is the correct target and equals the
-# sibling `_COBRE_BIN` above. Under the mirror-shift GNL emission the anticipation
-# lead is capped strictly below the horizon (TRACKED COBRE-GAP WORKAROUND C13,
-# `decomp/anticipated.py`), so this deck loads with no K=0 / no dropped deliveries.
+# lead-horizon cap), so the develop build is the correct target. The
+# anticipated post-horizon emission pins the já-comandada (class-4) weeks as
+# fixed past-horizon commitments and leaves the signaled (class-3) weeks as
+# optimizable post-study bounds, so this deck loads with no K=0 / no dropped
+# deliveries.
 # CI has neither the deck nor the binary, so this stays a dev-only tier-3 smoke.
 _MAR26_DECK = Path("example/decomp-mar-26-rv2")
 _MAR26_CORTESH = _MAR26_DECK / "cortesh.dat"
@@ -925,9 +1037,9 @@ def mar26rv2_imported_case(
 ) -> _Mar26ImportedCase:
     """Convert ``decomp-mar-26-rv2`` and import its own boundary FCF, once.
 
-    Module-scoped and shared by both tests below (mirrors ``imported_case``
-    above): the ~20 s convert + bootstrap pass runs exactly once regardless
-    of how many assertions exercise its result. Neither consuming test
+    Module-scoped and shared by both tests below: the ~20 s convert +
+    bootstrap pass runs exactly once regardless of how many assertions
+    exercise its result. Neither consuming test
     mutates this fixture's ``case_dir`` in place -- the run-load test copies
     it into its own scratch directory first -- so test order never matters.
     """
@@ -936,14 +1048,23 @@ def mar26rv2_imported_case(
 
     root = tmp_path_factory.mktemp("fcf_importer_mar26rv2_e2e")
     case_dir = root / "converted"
-    convert_decomp_case(_MAR26_DECK, case_dir, force=True)
+    fcf_inputs = FcfInputs()
+    convert_decomp_case(_MAR26_DECK, case_dir, force=True, fcf_inputs_out=fcf_inputs)
+
+    # Pin the explicitly-named `cortes-004.dat` partition this fixture has
+    # always imported, overriding whatever cortes partition discovery
+    # resolves for this deck (`DecompFiles` is frozen, so `replace` rebuilds
+    # it rather than mutating in place).
+    case = DecompCase.from_directory(_MAR26_DECK)
+    case.files = replace(case.files, cortesh=_MAR26_CORTESH, cortes=_MAR26_CORTES)
 
     boundary_dir = import_boundary_fcf(
         case_dir,
-        _MAR26_CORTESH,
-        _MAR26_CORTES,
+        case,
         work_dir=root / "work",
         cost_scale_factor=1.0,
+        config=fcf_inputs.config,
+        initial_conditions=fcf_inputs.initial_conditions,
     )
     assert boundary_dir is not None
     return _Mar26ImportedCase(case_dir=case_dir, boundary_dir=boundary_dir)
@@ -993,22 +1114,23 @@ def _dated_ring_position(
 def test_import_boundary_fcf_mar26rv2_covered_lane_and_case_validates(
     mar26rv2_imported_case: _Mar26ImportedCase,
 ) -> None:
-    """Post-mirror-shift covered-lane + calendar + validate facts (ticket-006
-    AC4/AC5/AC7).
+    """Covered-lane + calendar + validate facts against the já-comandada
+    (class-4) / signaled (class-3) post-study calendar (ticket-006 AC4/AC5,
+    ticket-012's month-anchor covered-lane filter, ticket-013's node_id fix).
 
-    Under the mirror-shift GNL emission every anticipated plant gets one free
-    forward delivery per study stage on the (C13-capped, H=1008) mirror calendar,
-    so BOTH thermal 94 and thermal 95 now have covered dated ring slots and
-    NEITHER has a non-covered dated slot -- superseding the old thermal-95
-    non-covered `20260401` / `== 0.0` assertion (that pre-horizon April slot no
-    longer exists). thermal 94's covered lane is priced (nonzero, finite); the
-    exact GAP-1 hours-weighted collapse `Σ_p pi_gnl[c]·h_p` is pinned by the
-    tier-1 mapper tests, so here the real-deck fact is that the lane carries a
-    real coefficient. The post-study calendar is the mirror shape. `cobre
-    validate`'s CASE-structural check (the first `Validation: N errors` line it
-    prints) reports `0`; its aggregate exit is C8-gated (a second pass looks for
-    the checkpoint at `case_dir/output/boundary`), so this asserts on the
-    structural line's own count, never the process exit code.
+    Every anticipated plant carries a covered (class-3 signaled, month-anchor
+    `>= horizon_start`) dated ring slot priced nonzero, and a non-covered
+    (in-study) dated slot that stays `0.0` (priced instead by the class-2
+    `past_anticipated_commitments` window, never the ring). thermal 94's and
+    95's covered lane is priced (nonzero, finite); the exact GAP-1
+    hours-weighted collapse `Σ_p pi_gnl[c]·h_p` is pinned by the tier-1 mapper
+    tests, so here the real-deck fact is that the lane carries a real
+    coefficient. The post-study calendar is the já-comandada-fill-then-
+    signaled-mirror shape (`decomp/anticipated.py::_build_post_study_calendar`).
+    `cobre validate`'s CASE-structural check (the first `Validation: N errors`
+    line it prints) reports `0`; its aggregate exit is C8-gated (a second pass
+    looks for the checkpoint at `case_dir/output/boundary`), so this asserts on
+    the structural line's own count, never the process exit code.
     """
     case_dir = mar26rv2_imported_case.case_dir
     import cobre
@@ -1021,11 +1143,10 @@ def test_import_boundary_fcf_mar26rv2_covered_lane_and_case_validates(
     entity_manifest = terminal["entity_manifest"]
     first_cut = terminal["cuts"][0]
 
-    # AC4/AC5: BOTH plants now have a covered (post-horizon May) dated ring slot
-    # priced nonzero -- the core fix: PSERGIPE I (95) was non-covered / 0.0
-    # pre-mirror and now carries a real coefficient, exactly like thermal 94. The
+    # AC4/AC5: BOTH plants have a covered (post-horizon May, class-3 signaled)
+    # dated ring slot priced nonzero -- PSERGIPE I (95) and thermal 94 alike. The
     # exact GAP-1 hours-weighted collapse is pinned by the tier-1 mapper tests;
-    # the real-deck fact asserted here is that the free-only lane is priced. The
+    # the real-deck fact asserted here is that the covered lane is priced. The
     # residual non-covered slot each plant still carries (the reconciliation's
     # in-study April ring slot, `_post_horizon_start` = 20260501) stays 0.0.
     for tid in (94, 95):
@@ -1041,8 +1162,9 @@ def test_import_boundary_fcf_mar26rv2_covered_lane_and_case_validates(
         )
         assert first_cut["coefficients"][non_covered] == 0.0
 
-    # AC7: the C13-capped H=1008 mirror calendar (study stages shifted below the
-    # horizon): a 24 h Fri->Sat stub, two Saturday weekly stages, one monthly.
+    # The já-comandada-fill-then-signaled-mirror calendar: a 24 h Fri->Sat stub
+    # plus two já-comandada (class-4) weekly stages, then four signaled
+    # (class-3) stages mirroring the study — three weekly, one to month-end.
     post_study = json.loads(
         (case_dir / "post_study_stages.json").read_text(encoding="utf-8")
     )
@@ -1051,12 +1173,18 @@ def test_import_boundary_fcf_mar26rv2_covered_lane_and_case_validates(
         "2026-05-02",
         "2026-05-09",
         "2026-05-16",
+        "2026-05-23",
+        "2026-05-30",
+        "2026-06-06",
     ]
     assert [s["duration_hours"] for s in post_study["stages"]] == [
         24.0,
         168.0,
         168.0,
-        648.0,
+        168.0,
+        168.0,
+        168.0,
+        576.0,
     ]
 
     completed = subprocess.run(
@@ -1079,16 +1207,14 @@ def test_import_boundary_fcf_mar26rv2_covered_lane_and_case_validates(
 def test_import_boundary_fcf_mar26rv2_run_loads_boundary(
     mar26rv2_imported_case: _Mar26ImportedCase, tmp_path: Path
 ) -> None:
-    """The bounded real ``cobre run`` LOADS the terminal boundary (ticket-006
-    AC3, RESOLVED under the mirror-shift emission).
+    """The bounded real ``cobre run`` LOADS the terminal boundary.
 
-    Pre-mirror this xfailed: the per-plant emission left an anticipated ring
-    slot at a K=0 sub-stage lead that cobre's boundary-load rejected. The
-    mirror-shift emission (single global lead, C13-capped strictly below the
-    horizon) makes every delivery's decider land in-study, so a fresh
+    The anticipated post-horizon emission pins the já-comandada (class-4)
+    weeks as fixed past-horizon commitments and leaves the signaled (class-3)
+    weeks as optimizable post-study bounds, so a fresh
     ``cobre run <dst> --output <dst>`` (the C8 recipe, 1-iteration) loads the
     boundary cleanly: no LP-builder panic, no "no resolved delivery interval",
-    no K=0 warning, no dropped ``future_anticipated_deliveries``.
+    no K=0 warning, no dropped post-horizon delivery.
 
     Everything asserted here is printed at setup / boundary-load, which is fast;
     the subsequent SDDP iteration over the terminal leaf is expensive, so the
@@ -1195,9 +1321,21 @@ def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
         f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
     )
 
-    assert (dst / "boundary" / "metadata.json").is_file()
+    assert (dst / "boundary" / "manifest.bin").is_file()
+
+    import cobre
+
+    policy = cobre.results.load_policy(dst, policy_subdir="boundary")
+    terminal = max(policy["stage_cuts"], key=lambda stage: stage["stage_id"])
+    # `source_stage` is cobre's own 0-based `graph_stage_id`, never the cut
+    # file's 1-based calendar boundary stage (`4` here) -- see
+    # `_patch_policy_boundary`'s docstring.
     config = json.loads((dst / "config.json").read_text(encoding="utf-8"))
-    assert config["policy"]["boundary"] == {"path": "boundary", "source_stage": 4}
+    assert config["policy"]["boundary"] == {
+        "path": "boundary",
+        "source_stage": terminal["graph_stage_id"],
+    }
+    assert terminal["node_id"] != -1
 
     doc = json.loads(completed.stdout)
     assert doc["summary"]["boundary_fcf"] == {
@@ -1206,10 +1344,6 @@ def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
         "run_constraint": f"--output={dst}",
     }
 
-    import cobre
-
-    policy = cobre.results.load_policy(dst, policy_subdir="boundary")
-    terminal = max(policy["stage_cuts"], key=lambda stage: stage["stage_id"])
     entity_manifest = terminal["entity_manifest"]
     first_cut = terminal["cuts"][0]
     assert any(
@@ -1217,3 +1351,125 @@ def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
         and first_cut["coefficients"][position] != 0.0
         for position, slot in enumerate(entity_manifest)
     ), "no nonzero AnticipatedThermalState coefficient in the terminal cut"
+
+
+# ---------------------------------------------------------------------------
+# ticket-013: the flattened-bootstrap node_id fix, driven against the
+# surviving fast fixture (a 2-leaf terminal fan — the shape that used to trip
+# the `node_id == -1` shared-pool sentinel on every boundary-FCF `convert
+# decomp`). Deck-guarded on `_MAR26_REDUCED_DECK` + writer binding only — no
+# local cobre binary needed, since the bootstrap runs entirely in-process.
+# ---------------------------------------------------------------------------
+
+_MAR26_REDUCED_DECK = Path("example/decomp-mar-26-rv2-reduced")
+_HAS_MAR26_REDUCED_E2E_DEPS = _MAR26_REDUCED_DECK.exists() and _HAS_WRITER_BINDING
+_MAR26_REDUCED_SKIP_REASON = (
+    f"requires the decomp-mar-26-rv2-reduced deck ({_MAR26_REDUCED_DECK}) and "
+    "the write_policy_checkpoint writer binding"
+)
+_skip_mar26_reduced_e2e = pytest.mark.skipif(
+    not _HAS_MAR26_REDUCED_E2E_DEPS, reason=_MAR26_REDUCED_SKIP_REASON
+)
+
+
+@_skip_mar26_reduced_e2e
+def test_convert_decomp_boundary_fcf_reduced_deck_resolves_real_node_id(
+    tmp_path: Path,
+) -> None:
+    """AC 4/5/6 -- `convert decomp` on the 2-leaf-fan reduced deck no longer
+    raises `node_id == -1`: the bootstrap's single-terminal-leaf variant
+    resolves a real node, `config.json`'s `policy.boundary.source_stage` is
+    that same `graph_stage_id` (never the cut file's calendar boundary
+    stage), and the excised já-comandada (class-4) months carry no dated
+    ring slot while a signaled (class-3) month does.
+    """
+    dst = tmp_path / "converted"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "cobre_bridge.cli",
+            "convert",
+            "decomp",
+            str(_MAR26_REDUCED_DECK),
+            str(dst),
+            "--force",
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, (
+        f"convert decomp exited {completed.returncode}:\n"
+        f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+    )
+    assert (dst / "boundary" / "manifest.bin").is_file()
+
+    import cobre
+
+    policy = cobre.results.load_policy(dst, policy_subdir="boundary")
+    terminal = max(policy["stage_cuts"], key=lambda stage: stage["stage_id"])
+    assert terminal["node_id"] != -1
+    assert terminal["state_dimension"] == len(terminal["entity_manifest"])
+
+    config = json.loads((dst / "config.json").read_text(encoding="utf-8"))
+    assert config["policy"]["boundary"]["source_stage"] == terminal["graph_stage_id"]
+
+    # A fresh, standalone bootstrap of this same case resolves to the same
+    # single node/graph-stage identity the authored checkpoint carries.
+    # `state_dimension` only matches it exactly when the boundary prices no
+    # inflow-lag state -- `write_boundary_checkpoint`'s `inflow_lag_depth`
+    # reserves additional canonical HydroInflowLag slots on top of the bare
+    # bootstrap manifest (a documented, deliberate expansion; see that
+    # function's own docstring), so this deck's reloaded state_dimension is
+    # only ever `>=` the fresh bootstrap's.
+    bootstrap_manifest = bootstrap_terminal_manifest(dst, work_dir=tmp_path / "work")
+    assert bootstrap_manifest.node_id == terminal["node_id"]
+    assert bootstrap_manifest.graph_stage_id == terminal["graph_stage_id"]
+    assert terminal["state_dimension"] >= bootstrap_manifest.state_dimension
+
+    post_study = json.loads(
+        (dst / "post_study_stages.json").read_text(encoding="utf-8")
+    )
+    calendar_stages = post_study["stages"]
+    bounded_indices = {
+        bound["post_study_stage_index"] for bound in post_study["thermal_bounds"]
+    }
+
+    def _month_anchor(stage: dict) -> int:
+        start = date.fromisoformat(stage["start_date"])
+        return start.year * 10000 + start.month * 100 + 1
+
+    # A month is "class-3 signaled" when at least one of its calendar stages
+    # carries thermal_bounds; "purely class-4" only when NONE of its stages
+    # do (a month straddling both, as this deck's May does, is not purely
+    # class-4 -- cobre's ring still needs a slot for its signaled remainder).
+    class3_months = {
+        _month_anchor(stage)
+        for index, stage in enumerate(calendar_stages)
+        if index in bounded_indices
+    }
+    class4_only_months = {
+        _month_anchor(stage)
+        for index, stage in enumerate(calendar_stages)
+        if index not in bounded_indices
+    } - class3_months
+
+    horizon_start = _post_horizon_start(dst)
+    assert horizon_start is not None
+    dated_post_study_months = {
+        slot["delivery_date"]
+        for slot in terminal["entity_manifest"]
+        if slot["entity_type"] == _ANTICIPATED_THERMAL_STATE
+        and isinstance(slot["delivery_date"], int)
+        and slot["delivery_date"] >= horizon_start
+    }
+    assert not (dated_post_study_months & class4_only_months), (
+        "a purely já-comandada (class-4) month carries a dated ring slot -- "
+        "cobre's excision of the fixed post-horizon window did not take"
+    )
+    assert dated_post_study_months & class3_months, (
+        "no signaled (class-3) month carries a dated ring slot"
+    )

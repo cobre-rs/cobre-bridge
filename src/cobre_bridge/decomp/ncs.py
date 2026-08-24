@@ -28,23 +28,24 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.converters.network import _NCS_FACTORS_SCHEMA_URL, _NCS_SCHEMA_URL
+from cobre_bridge import cobre_schemas
+from cobre_bridge.tolerances import relative_tolerance
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import date
 
     from idecomp.decomp import Dadger
     from idecomp.libs import Renovaveis
 
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
 _INVARIANT_RTOL = 1e-9
-# TRACKED COBRE-GAP WORKAROUND (C1, plans/conversion-found-improvements.md
-# in the cobre repo): the schema requires factors > 0, but a
-# zero-generation block (solar at the light patamar) is real data. Remove
-# the clamp when factor >= 0 is accepted.
+# TRACKED COBRE-GAP WORKAROUND (C1, the cobre repository's
+# conversion-found-improvements registry): the schema requires factors > 0,
+# but a zero-generation block (solar at the light patamar) is real data.
+# Remove the clamp when factor >= 0 is accepted.
 _MIN_FACTOR = 1e-9
 
 _LOG = logging.getLogger(__name__)
@@ -137,14 +138,12 @@ def _stage_mean_mw(blocks: Sequence[float], stage: OperativeStage) -> float:
 
 
 def convert_non_controllable_sources(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    start_date: date,
-    renovaveis: Renovaveis | None = None,
 ) -> dict:
     """Build ``non_controllable_sources.json`` (``PQ`` + renewable parks)."""
-    op_date = start_date.isoformat()
+    calendar = case.calendar
+    op_date = case.start_date.isoformat()
     entries = [
         {
             "id": s.ncs_id,
@@ -157,22 +156,24 @@ def convert_non_controllable_sources(
             # validated in docs/findings/ncs-must-run-treatment.md.
             "allow_curtailment": False,
         }
-        for s in _all_series(dadger, id_map, calendar, renovaveis)
+        for s in _all_series(case.dadger, id_map, calendar, case.renovaveis)
     ]
-    return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": entries}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/non_controllable_sources.json"),
+        "non_controllable_sources": entries,
+    }
 
 
 def convert_ncs_stats(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    renovaveis: Renovaveis | None = None,
 ) -> pa.Table:
     """Build ``non_controllable_stats`` rows: availability fraction, std 0."""
+    calendar = case.calendar
     ncs_ids: list[int] = []
     stage_ids: list[int] = []
     means: list[float] = []
-    for s in _all_series(dadger, id_map, calendar, renovaveis):
+    for s in _all_series(case.dadger, id_map, calendar, case.renovaveis):
         max_gen = s.max_generation_mw
         for stage in calendar:
             mean_mw = _stage_mean_mw(s.per_stage_blocks[stage.index], stage)
@@ -195,10 +196,8 @@ def convert_ncs_stats(
 
 
 def convert_ncs_factors(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    renovaveis: Renovaveis | None = None,
 ) -> dict:
     """Build ``non_controllable_factors.json`` block shapes per (ncs, stage).
 
@@ -208,9 +207,10 @@ def convert_ncs_factors(
     positive factor — the schema requires factors > 0, and under must-run
     pinning the resulting availability is numerically zero anyway.
     """
+    calendar = case.calendar
     entries: list[dict] = []
     clamped = 0
-    for s in _all_series(dadger, id_map, calendar, renovaveis):
+    for s in _all_series(case.dadger, id_map, calendar, case.renovaveis):
         for stage in calendar:
             blocks = s.per_stage_blocks[stage.index]
             mean_mw = _stage_mean_mw(blocks, stage)
@@ -251,7 +251,12 @@ def convert_ncs_factors(
             clamped,
             _MIN_FACTOR,
         )
-    return {"$schema": _NCS_FACTORS_SCHEMA_URL, "non_controllable_factors": entries}
+    return {
+        "$schema": cobre_schemas.schema_url_for(
+            "scenarios/non_controllable_factors.json"
+        ),
+        "non_controllable_factors": entries,
+    }
 
 
 def _sorted_pee_codes(
@@ -293,12 +298,10 @@ def _sorted_pee_codes(
 
 
 def build_pee_ncs_id_map(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    renovaveis: Renovaveis | None,
 ) -> dict[int, int]:
-    """Public ``codigo_pee -> ncs_id`` map for the emitter (ticket-011), sharing
+    """Public ``codigo_pee -> ncs_id`` map for the emitter, sharing
     :func:`_pee_series`'s ordering via :func:`_sorted_pee_codes`.
 
     ``ncs_id`` continues the ``PQ`` series' id space (:func:`_pq_series`'s
@@ -310,9 +313,11 @@ def build_pee_ncs_id_map(
     renewable parks (mirrors :func:`_all_series`'s "no renovaveis -> PQ
     only" convention).
     """
+    renovaveis = case.renovaveis
     if renovaveis is None:
         return {}
-    first_ncs_id = len(_pq_series(dadger, id_map, calendar))
+    calendar = case.calendar
+    first_ncs_id = len(_pq_series(case.dadger, id_map, calendar))
     sorted_codes = _sorted_pee_codes(renovaveis, calendar)
     return {code: first_ncs_id + offset for offset, code in enumerate(sorted_codes)}
 
@@ -352,8 +357,8 @@ def _pee_series(
     for _, row in ger.iterrows():
         # The PEE-GER-PER-PAT-CEN card is single-período: one `estagio` per row.
         # (idecomp < 1.14.1 mis-modelled it as an estagio_inicial/estagio_final
-        # range, which left `geracao` unreadable — see
-        # plans/idecomp-renovaveis-pee-ger-layout-spec.md; requires idecomp >= 1.14.1.)
+        # range, which left `geracao` unreadable — see the idecomp renovaveis
+        # PEE-GER record layout; requires idecomp >= 1.14.1.)
         estagio = int(row["estagio"])
         stage_index = estagio - 1
         if not 0 <= stage_index < len(calendar):
@@ -374,7 +379,7 @@ def _pee_series(
         # and warn rather than crash or trust the outlier (the max).
         representative = Counter(scenario_values).most_common(1)[0][0]
         spread = max(scenario_values) - min(scenario_values)
-        if spread > 1e-9 * max(abs(representative), 1.0):
+        if spread > relative_tolerance(representative):
             _LOG.warning(
                 "renewable park %d stage %d block %d: generation is not identical "
                 "across %d scenarios (%.6g..%.6g) — DECOMP renewables are "

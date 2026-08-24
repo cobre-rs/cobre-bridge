@@ -1,9 +1,8 @@
 """Operative-calendar temporal conversion for DECOMP-like decks.
 
 Builds the stage calendar (dates, blocks, seasons) from the deck's start
-date (``DT``) and per-stage block durations (``DP``), per
-``plans/decomp-converter-core.md`` §1.1 and the operative-calendar rules of
-``plans/decomp-round-2-revision.md`` §2.2:
+date (``DT``) and per-stage block durations (``DP``). The operative-calendar
+rules:
 
 - the study starts on a Saturday; weekly stages are exactly 168 h and break
   on Saturdays; the single final stage aggregates the second operative
@@ -25,7 +24,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
-from cobre_bridge.converters.temporal import _block_names, monthly_season_definitions
+from cobre_bridge import cobre_schemas
+from cobre_bridge.converters.temporal import block_names, monthly_season_definitions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -33,13 +33,11 @@ if TYPE_CHECKING:
 
     from idecomp.decomp import Dadger
 
+    from cobre_bridge.decomp.case import DecompCase
+
 _SATURDAY = 5
 _WEEK_HOURS = 168.0
 _HOURS_PER_DAY = 24.0
-_STAGES_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/stages.schema.json"
-)
 
 
 @dataclass(frozen=True)
@@ -309,7 +307,7 @@ def stage_records(
     """
     records: list[dict] = []
     for stage in calendar:
-        names = _block_names(len(stage.block_hours))
+        names = block_names(len(stage.block_hours))
         if cvar is not None:
             risk_measure: object = {
                 "cvar": {"alpha": cvar.alpha, "lambda": cvar.lambda_}
@@ -387,7 +385,7 @@ def build_node_graph(
 
 
 def convert_stages(
-    calendar: Sequence[OperativeStage],
+    case: DecompCase,
     *,
     annual_discount_rate: float,
     fan_probabilities: Sequence[float],
@@ -401,10 +399,10 @@ def convert_stages(
     order-0 and pre-study inflows travel as dated windows. ``cvar`` (from
     :func:`resolve_cvar`) applies the deck's CVaR risk measure per stage.
     """
-    stages = stage_records(calendar, cvar)
+    stages = stage_records(case.calendar, cvar)
     nodes, transitions = build_node_graph(len(stages), fan_probabilities)
     return {
-        "$schema": _STAGES_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("stages.json"),
         "season_definitions": monthly_season_definitions(),
         "policy_graph": {
             "type": "finite_horizon",

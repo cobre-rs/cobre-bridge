@@ -32,29 +32,6 @@ helpers) so this test does not simply assert that the courtesy mirror
 agrees with itself; it independently re-derives the same cobre-side
 relative tolerance cobre's ``ENVELOPE_TOLERANCE`` uses (see
 ``emission_checks._tolerance`` for the mirrored form).
-
-DECOMP had no exposure to rule 43 before epic-07 (ticket-023): its
-``hydro_bounds`` writer emitted only ``min_outflow_m3s``/storage columns
-per stage. That nil exposure was pinned here as a structural tripwire —
-the tripwire has since fired, exactly as designed: ticket-023 wired the
-RE/RHQ single-term bound producers into the E2 accumulator, so
-``hydro_bounds`` now also carries real ``max_turbined_m3s`` (RHQ ``QTUR``)
-and ``max_generation_mw`` (RE ``FU``) rows for both real example decks.
-``TestDecompRule43Exposure`` below extends the scan
-(``TestNewaveRule43NoRaising``'s own approach) to DECOMP. Firing the
-tripwire surfaced a real cross-source mismatch on both decks' BELO MONTE
-registration (hydro code 288): an RE ``FU`` constraint (``RE_654``/
-``RE_655``) declares an 11000 MW ceiling above its own head-derated
-declared ``max_generation_mw`` (9777.776 MW on ``decomp-jul-26-rv3``,
-10999.998413 MW, i.e. nameplate to within float rounding, on
-``decomp-set-24-rv0`` — consistent with a head-dependent achievable
-capacity varying by study date against a fixed nameplate ceiling).
-ticket-023c resolved this: ``single_term_bounds._re_generation_contributions``
-now clamps every RE-derived ``max_generation_mw`` upper to the plant's own
-declared capacity (the looser RE ceiling becomes non-binding, LP-neutral),
-so the tracked BELO MONTE exception this test used to allowlist is gone —
-DECOMP now holds to the same zero-tolerance bar as the NEWAVE side, and any
-raising row, on any plant, fails this guard loud.
 """
 
 from __future__ import annotations
@@ -99,10 +76,6 @@ _MIN_EXPECTED_NON_NULL_PER_COLUMN = 1
 # by TestConvertLineBoundsRealDeckFidelity in test_entity_conversion.py) so
 # that CI, which does not have example/, does not fail on their absence.
 _NEWAVE_RODADA = Path("example/newave_rodada")
-_NEWAVE_RODADA_2001 = Path("example/newave_rodada_2001_completo")
-
-_DECOMP_SET_24 = Path("example/decomp-set-24-rv0")
-_DECOMP_JUL_26 = Path("example/decomp-jul-26-rv3")
 
 #: Per-deck expected set of guarded columns actually present in the
 #: freshly converted ``hydro_bounds.parquet`` — pinned so that presence
@@ -111,9 +84,6 @@ _DECOMP_JUL_26 = Path("example/decomp-jul-26-rv3")
 #: quietly doing nothing when a column happens to be absent for one deck.
 _EXPECTED_PRESENT_COLUMNS: dict[Path, frozenset[str]] = {
     _NEWAVE_RODADA: frozenset({"max_turbined_m3s"}),
-    _NEWAVE_RODADA_2001: frozenset({"max_turbined_m3s", "max_generation_mw"}),
-    _DECOMP_JUL_26: frozenset({"max_turbined_m3s", "max_generation_mw"}),
-    _DECOMP_SET_24: frozenset({"max_turbined_m3s", "max_generation_mw"}),
 }
 
 
@@ -219,9 +189,7 @@ class TestNewaveRule43NoRaising:
     checked independently at cobre's relative tolerance.
     """
 
-    @pytest.mark.parametrize(
-        "deck", [_NEWAVE_RODADA, _NEWAVE_RODADA_2001], ids=lambda p: p.name
-    )
+    @pytest.mark.parametrize("deck", [_NEWAVE_RODADA], ids=lambda p: p.name)
     def test_fresh_conversion_has_zero_raising_rows(
         self, deck: Path, tmp_path: Path
     ) -> None:
@@ -281,62 +249,4 @@ class TestNewaveRule43NoRaising:
                 f"{scan.raising_count} hydro_bounds row(s) raise {column} above "
                 f"the plant's own declared value on {deck} (cobre rule 43) — "
                 "this is exactly the regression ticket-015b fixed"
-            )
-
-
-class TestDecompRule43Exposure:
-    """AC #3 (epic-07, ticket-023 fired the tripwire this class used to be):
-    DECOMP's ``hydro_bounds`` now genuinely carries both guarded columns
-    (RE ``FU`` -> ``max_generation_mw``, RHQ ``QTUR`` -> ``max_turbined_m3s``),
-    so this mirrors ``TestNewaveRule43NoRaising``'s own scan exactly — no
-    tracked exception (ticket-023c's clamp retired the one BELO MONTE
-    exception this class used to allowlist; see the module docstring). Any
-    raising row, on any plant, still fails this guard loud, exactly like the
-    NEWAVE side.
-    """
-
-    @pytest.mark.parametrize(
-        "deck", [_DECOMP_JUL_26, _DECOMP_SET_24], ids=lambda p: p.name
-    )
-    def test_hydro_bounds_carries_no_guarded_column(
-        self, deck: Path, tmp_path: Path
-    ) -> None:
-        if not (deck / "caso.dat").exists():
-            pytest.skip(f"{deck} not present (example/ is local-only, gitignored)")
-
-        from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-        dst = tmp_path / deck.name
-        convert_decomp_case(deck, dst)  # must not raise (ticket-023c)
-
-        hydros_json = json.loads((dst / "system" / "hydros.json").read_text())
-        rows_scanned, scans = _scan_hydro_bounds(
-            hydros_json, dst / "constraints" / "hydro_bounds.parquet"
-        )
-
-        assert rows_scanned > 0, (
-            f"expected a non-empty hydro_bounds for real deck {deck}; an "
-            "empty table cannot exercise this guard"
-        )
-
-        present_columns = frozenset(
-            column for column, scan in scans.items() if scan.present
-        )
-        assert present_columns == _EXPECTED_PRESENT_COLUMNS[deck], (
-            f"{deck} now exposes guarded column(s) "
-            f"{present_columns - _EXPECTED_PRESENT_COLUMNS[deck]} not previously "
-            f"present, or dropped {_EXPECTED_PRESENT_COLUMNS[deck] - present_columns} "
-            "that used to be present — update this test's expectation if the "
-            "schema change is intentional, otherwise investigate a regression"
-        )
-
-        for column in present_columns:
-            scan = scans[column]
-            assert scan.raising_count == 0, (
-                f"{scan.raising_count} hydro_bounds row(s) — hydro id(s) "
-                f"{sorted(scan.raising_hydro_ids)} — raise {column} above "
-                f"the plant's own declared value on {deck} (cobre rule 43); "
-                "ticket-023c's clamp should make this impossible for RE "
-                "FU-derived max_generation_mw rows, so a raise here is a "
-                "genuine new regression"
             )

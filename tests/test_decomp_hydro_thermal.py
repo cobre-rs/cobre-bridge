@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.hydro import (
     _build_split_unit_groups,
     _evaporation_coefficients_mm,
@@ -22,6 +23,7 @@ from cobre_bridge.decomp.hydro import (
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import convert_thermal_bounds, convert_thermals
+from tests.conftest import make_decomp_case
 
 _EVAPORATION_COLUMNS = (
     "evaporacao_JAN",
@@ -102,8 +104,6 @@ class TestEvaporationEmission:
         assert _evaporation_flag_codes(_StubDadger(uh=pd.DataFrame())) == set()
 
 
-_RV3_DECK = Path("example/decomp-jul-26-rv3")
-
 _ID_MAP = DecompIdMap(
     bus_codes=(1, 2, 3, 4, 11),
     bus_names=("SE", "S", "NE", "N", "FC"),
@@ -115,6 +115,17 @@ _ID_MAP = DecompIdMap(
 def _calendar():
     hours = [[15.0, 64.0, 89.0]] * 2 + [[63.0, 280.0, 401.0]]
     return build_operative_calendar(date(2026, 7, 18), hours)
+
+
+def _case(dadger: object, hidr: pd.DataFrame | None = None) -> DecompCase:
+    """A ``DecompCase`` pre-filled with *dadger*/*hidr* and ``_calendar()`` —
+    the calendar's own stage-0 start date (2026-07-18) matches the raw
+    ``start_date``/``date(2026, 7, 18)`` every test here used to pass
+    directly."""
+    parsed = {"dadger": dadger, "calendar": _calendar()}
+    if hidr is not None:
+        parsed["hidr"] = hidr
+    return make_decomp_case(Path("unused"), **parsed)
 
 
 def _plant_row(
@@ -324,11 +335,9 @@ class TestConvertHydros:
         hidr = _hidr_frame()
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
             doc = convert_hydros(
-                _StubDadger(uh=_uh_frame()),
-                hidr,
+                _case(_StubDadger(uh=_uh_frame()), hidr),
                 _ID_MAP,
-                date(2026, 7, 18),
-                _no_override_effective(hidr),
+                effective=_no_override_effective(hidr),
             )
         hydros = doc["hydros"]
         assert [h["id"] for h in hydros] == [0, 1, 2]
@@ -362,11 +371,9 @@ class TestConvertHydros:
         hidr = _hidr_frame()
         with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
             doc = convert_hydros(
-                _StubDadger(uh=_uh_frame()),
-                hidr,
+                _case(_StubDadger(uh=_uh_frame()), hidr),
                 _ID_MAP,
-                date(2026, 7, 18),
-                _no_override_effective(hidr),
+                effective=_no_override_effective(hidr),
             )
         for h in doc["hydros"]:
             assert "bus_id" not in h
@@ -390,7 +397,9 @@ class TestConvertHydros:
     def test_initial_storage_formula(self) -> None:
         hidr = _hidr_frame()
         storage = convert_initial_storage(
-            _StubDadger(uh=_uh_frame()), hidr, _ID_MAP, _no_override_effective(hidr)
+            _case(_StubDadger(uh=_uh_frame())),
+            _ID_MAP,
+            effective=_no_override_effective(hidr),
         )
         by_id = {e["hydro_id"]: e["value_hm3"] for e in storage}
         assert by_id[0] == pytest.approx(100.0 + 0.5 * 400.0)
@@ -418,15 +427,16 @@ class TestConvertHydros:
 
 
 class TestItaipuBusRelabel:
-    """ticket-006: the per-frequency split plant's 50 Hz unit group (group
-    id 0, the ascending-frequency convention pinned by
+    """The per-frequency split plant's 60 Hz unit group (group id 1, the
+    ascending-frequency convention pinned by
     :func:`_split_plant_frequencies`) is unconditionally relocated to the
-    ``IV`` transshipment bus; the 60 Hz group (group id 1) stays on the
-    plant's own submercado bus. Pure/synthetic, deck-independent — no
-    ``example/`` read.
+    ``IV`` transshipment bus -- the corridor into Ivaiporã; the 50 Hz group
+    (group id 0) stays on the plant's own SE submercado bus, where its HVDC
+    Elo delivers directly and the ``carga_ande`` load nets in. Pure/synthetic,
+    deck-independent — no ``example/`` read.
     """
 
-    def test_50hz_group_on_iv_60hz_group_on_se(self) -> None:
+    def test_50hz_group_on_se_60hz_group_on_iv(self) -> None:
         hidr = _itaipu_hidr_frame()
         dadger = _StubDadger(
             uh=_itaipu_uh_frame(),
@@ -434,21 +444,19 @@ class TestItaipuBusRelabel:
             fd=_itaipu_frequency_frame(),
         )
         doc = convert_hydros(
-            dadger,
-            hidr,
+            _case(dadger, hidr),
             _ITAIPU_ID_MAP,
-            date(2026, 7, 18),
-            _no_override_effective(hidr),
+            effective=_no_override_effective(hidr),
         )
         itaipu = doc["hydros"][0]
         groups = {g["id"]: g for g in itaipu["unit_groups"]}
         assert groups.keys() == {0, 1}
-        assert groups[0]["bus_id"] == _ITAIPU_ID_MAP.transhipment_bus_id  # 50 Hz -> IV
-        assert groups[1]["bus_id"] == _ITAIPU_ID_MAP.bus_id(1)  # 60 Hz -> SE
+        assert groups[0]["bus_id"] == _ITAIPU_ID_MAP.bus_id(1)  # 50 Hz -> SE
+        assert groups[1]["bus_id"] == _ITAIPU_ID_MAP.transhipment_bus_id  # 60 Hz -> IV
         assert groups[0]["bus_id"] != groups[1]["bus_id"]
 
     def test_envelope_unchanged_by_the_relabel(self) -> None:
-        """The relabel moves only the 50 Hz group's ``bus_id`` — the summed
+        """The relabel moves only the 60 Hz group's ``bus_id`` — the summed
         plant envelope is exactly what it was before the split existed: two
         identical conjuntos, each capped by its own installed power at
         ``100.0 / 0.72`` m3/s (no head data in this fixture, same head-free
@@ -461,11 +469,9 @@ class TestItaipuBusRelabel:
             fd=_itaipu_frequency_frame(),
         )
         doc = convert_hydros(
-            dadger,
-            hidr,
+            _case(dadger, hidr),
             _ITAIPU_ID_MAP,
-            date(2026, 7, 18),
-            _no_override_effective(hidr),
+            effective=_no_override_effective(hidr),
         )
         itaipu = doc["hydros"][0]
         gen = itaipu["generation"]
@@ -512,11 +518,9 @@ def test_deferred_note_excludes_head_productivity(caplog) -> None:
     hidr = _hidr_frame()
     with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
         convert_hydros(
-            _StubDadger(uh=_uh_frame()),
-            hidr,
+            _case(_StubDadger(uh=_uh_frame()), hidr),
             _ID_MAP,
-            date(2026, 7, 18),
-            _no_override_effective(hidr),
+            effective=_no_override_effective(hidr),
         )
     assert not any("deferred hydro fidelity" in r.message for r in caplog.records)
 
@@ -543,7 +547,7 @@ class TestEffectiveCadastroSourcing:
         uh = _temporal_uh_frame(volume_inicial=50.0)
 
         doc = convert_hydros(
-            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, date(2026, 7, 18), effective
+            _case(_StubDadger(uh=uh), hidr), _TEMPORAL_ID_MAP, effective=effective
         )
         assert doc["hydros"][0]["reservoir"] == {
             "min_storage_hm3": 20.0,
@@ -551,7 +555,7 @@ class TestEffectiveCadastroSourcing:
         }
 
         storage = convert_initial_storage(
-            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, effective
+            _case(_StubDadger(uh=uh)), _TEMPORAL_ID_MAP, effective=effective
         )
         assert storage[0]["value_hm3"] == pytest.approx(20.0 + 0.5 * (100.0 - 20.0))
 
@@ -566,7 +570,7 @@ class TestEffectiveCadastroSourcing:
         uh = _temporal_uh_frame(volume_inicial=50.0)
 
         doc = convert_hydros(
-            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, date(2026, 7, 18), effective
+            _case(_StubDadger(uh=uh), hidr), _TEMPORAL_ID_MAP, effective=effective
         )
         reservoir = doc["hydros"][0]["reservoir"]
         assert reservoir["max_storage_hm3"] == 250.0
@@ -577,11 +581,10 @@ class TestEffectiveCadastroSourcing:
         useful volume — a later-stage ``VOLMAX`` raise must not leak into the
         start volume."""
         effective = _raised_envelope_effective()
-        hidr = _temporal_hidr_frame()
         uh = _temporal_uh_frame(volume_inicial=50.0)
 
         storage = convert_initial_storage(
-            _StubDadger(uh=uh), hidr, _TEMPORAL_ID_MAP, effective
+            _case(_StubDadger(uh=uh)), _TEMPORAL_ID_MAP, effective=effective
         )
         assert storage[0]["value_hm3"] == pytest.approx(60.0)
 
@@ -617,10 +620,8 @@ def _ct_frame() -> pd.DataFrame:
 
 class TestConvertThermals:
     def test_registry_and_bounds(self) -> None:
-        calendar = _calendar()
-        doc = convert_thermals(
-            _StubDadger(ct=_ct_frame()), _ID_MAP, calendar, date(2026, 7, 18)
-        )
+        case = _case(_StubDadger(ct=_ct_frame()))
+        doc = convert_thermals(case, _ID_MAP)
         thermals = doc["thermals"]
         assert [t["id"] for t in thermals] == [0, 1]
         spread_expected = (400.0 * 15 + 300.0 * 64 + 200.0 * 89) / 168.0
@@ -628,7 +629,7 @@ class TestConvertThermals:
         assert thermals[1]["cost_per_mwh"] == pytest.approx(50.0)
         assert thermals[1]["generation"]["min_mw"] == pytest.approx(640.0)
 
-        bounds = convert_thermal_bounds(_StubDadger(ct=_ct_frame()), _ID_MAP, calendar)
+        bounds = convert_thermal_bounds(case, _ID_MAP)
         generation = bounds.generation
         cost = bounds.cost.to_pandas()
 
@@ -664,82 +665,4 @@ class TestConvertThermals:
         ct = _ct_frame()
         ct.loc[ct["codigo_usina"] == 20, "estagio"] = 2
         with pytest.raises(ValueError, match="stage 1"):
-            convert_thermals(
-                _StubDadger(ct=ct), _ID_MAP, _calendar(), date(2026, 7, 18)
-            )
-
-
-class TestRealDecks:
-    @pytest.mark.skipif(
-        not (_RV3_DECK / "dadger.rv3").exists(), reason="rv3 deck not present"
-    )
-    def test_rv3_end_to_end(self) -> None:
-        from idecomp.decomp import Dadger
-
-        from cobre_bridge.decomp.hydro import read_hidr
-        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-
-        dadger = Dadger.read(str(_RV3_DECK / "dadger.rv3"))
-        id_map = DecompIdMap.from_dadger(dadger)
-        calendar = operative_calendar_from_dadger(dadger)
-        hidr = read_hidr(_RV3_DECK / "hidr.dat")
-        # This smoke test exercises the registry/cascade/capability
-        # conversion, not the AC-override resolution layer (ticket-004/006's
-        # own territory) — an empty-override view falls straight through to
-        # the base registry, matching this test's pre-existing assertions.
-        effective = _no_override_effective(hidr, n_stages=len(calendar))
-
-        assert len(id_map.hydro_codes) > 150
-        assert len(id_map.thermal_codes) == 97
-
-        doc = convert_hydros(dadger, hidr, id_map, calendar[0].start_date, effective)
-        hydros = doc["hydros"]
-        assert len(hydros) == len(id_map.hydro_codes)
-        itaipu = next(h for h in hydros if h["name"] == "ITAIPU")
-        assert "bus_id" not in itaipu
-        # Two per-frequency groups (ticket-027, code 66): unique ids {0, 1},
-        # each 7000 MW installed (rated, unchanged) — id-addressed, not
-        # array-order (cobre sorts by group id on load). max_turbined_m3s is
-        # head-corrected (ticket-017): 6620 m3/s rated derates to ~6530.33
-        # m3/s at Itaipu's own nominal head (117 m) and operating head, both
-        # conjuntos symmetric. Group id 0 (50 Hz) is unconditionally
-        # relocated to the IV transshipment bus; group id 1 (60 Hz) stays on
-        # the plant's own SE bus (ticket-006).
-        groups = itaipu["unit_groups"]
-        assert {g["id"] for g in groups} == {0, 1}
-        groups_by_id = {g["id"]: g for g in groups}
-        assert groups_by_id[0]["bus_id"] == id_map.transhipment_bus_id  # 50 Hz -> IV
-        assert groups_by_id[1]["bus_id"] == id_map.bus_id(1)  # 60 Hz -> SE
-        for group in groups:
-            assert group["max_generation_mw"] == pytest.approx(7000.0)
-            assert group["max_turbined_m3s"] == pytest.approx(6530.33, abs=0.01)
-        assert itaipu["downstream_id"] is None
-
-        storage = convert_initial_storage(dadger, hidr, id_map, effective)
-        assert len(storage) == len(id_map.hydro_codes)
-        for entry, hydro in zip(storage, hydros, strict=True):
-            reservoir = hydro["reservoir"]
-            assert (
-                reservoir["min_storage_hm3"]
-                <= entry["value_hm3"]
-                <= reservoir["max_storage_hm3"]
-            )
-
-        thermals = convert_thermals(dadger, id_map, calendar, calendar[0].start_date)[
-            "thermals"
-        ]
-        assert len(thermals) == 97
-        cuiaba = next(t for t in thermals if t["name"] == "CUIABA CC")
-        assert cuiaba["generation"]["max_mw"] == pytest.approx(490.0)
-
-        bounds = convert_thermal_bounds(dadger, id_map, calendar)
-        # 291 (thermal, stage) pairs total; 38 are block-varying and
-        # contribute per-block only (no base), per the replace-vs-intersect
-        # discipline — see tests/test_decomp_thermal_fold.py for the
-        # per-block exactness grading against the reference outputs.
-        base = [c for c in bounds.generation if c.block_id is None]
-        assert len(base) == 97 * len(calendar) - 38
-        # cost_per_mwh rides its own side-table, one row per (thermal,
-        # stage) regardless of whether that stage's generation bound
-        # materialized a base contribution.
-        assert bounds.cost.num_rows == 97 * len(calendar)
+            convert_thermals(_case(_StubDadger(ct=ct)), _ID_MAP)

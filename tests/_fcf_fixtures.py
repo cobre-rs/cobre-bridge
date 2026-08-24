@@ -143,9 +143,25 @@ def make_slot(
     }
 
 
-def make_manifest(slots: Sequence[dict[str, object]]) -> TerminalManifest:
-    """A synthetic terminal manifest; `state_dimension` == slot count."""
-    return TerminalManifest(entity_manifest=tuple(slots), state_dimension=len(slots))
+def make_manifest(
+    slots: Sequence[dict[str, object]],
+    *,
+    node_id: int = 0,
+    graph_stage_id: int = 10,
+) -> TerminalManifest:
+    """A synthetic terminal manifest; `state_dimension` == slot count.
+
+    `node_id`/`graph_stage_id` default to a real single node and this
+    module's own terminal-stage convention (`make_boundary_cuts`'s
+    `boundary_stage` and `synthetic_roundtrip`'s `stage_id` both default to
+    `10`), never the `-1` shared-pool sentinel `TerminalManifest` forbids.
+    """
+    return TerminalManifest(
+        entity_manifest=tuple(slots),
+        state_dimension=len(slots),
+        node_id=node_id,
+        graph_stage_id=graph_stage_id,
+    )
 
 
 def make_mapped_cut(
@@ -201,7 +217,7 @@ def synthetic_roundtrip(
     write_boundary_checkpoint -> cobre.results.load_policy` against
     `boundary_dir`, then returns the reloaded policy dict verbatim. `cobre`
     is imported lazily, inside this function body, so the rest of the
-    module stays importable without the optional cobre-python wheel — only
+    module stays importable without the cobre-python wheel — only
     call this from a `@requires_cobre_python`-guarded test. `gnl_plan`
     defaults to `None`, forwarded verbatim to `map_boundary_cuts`, so every
     existing caller keeps leaving the GNL ring at `0.0` unchanged; pass it to
@@ -233,7 +249,14 @@ def synthetic_roundtrip(
         gnl_plan=gnl_plan,
         coupling_block_hours=coupling_block_hours,
     )
-    stage_cuts_payload = build_stage_cuts_payload(mapping, manifest, stage_id=stage_id)
+    stage_cuts_payload = build_stage_cuts_payload(
+        mapping,
+        manifest,
+        stage_id=stage_id,
+        cost_scale_factor=cost_scale_factor,
+        node_id=manifest.node_id,
+        graph_stage_id=manifest.graph_stage_id,
+    )
     completed_iterations = max((cut.iteration for cut in mapping.cuts), default=0)
     metadata = build_metadata(
         num_stages=1,

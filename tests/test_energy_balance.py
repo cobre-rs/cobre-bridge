@@ -1,26 +1,29 @@
 """Unit tests for cobre_bridge.dashboard.tabs.energy_balance.
 
 Covers module constants, can_render, helper functions (_compute_total_gwh,
-_compute_total_avg, _build_metrics_row), chart builders, and the full
+_block_weighted_avg_rate, _build_metrics_row), chart builders, and the full
 render() path using MagicMock data following the pattern in test_v2_overview.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
+import pytest
 
 import cobre_bridge.dashboard.tabs.energy_balance as energy_balance_mod
+from cobre_bridge.dashboard.data import DashboardData
 from cobre_bridge.dashboard.tabs.energy_balance import (
+    _block_weighted_avg_rate,
     _build_hero_data,
     _build_hero_section,
     _build_metrics_row,
     _chart_gen_by_bus,
     _chart_gen_mix_hero,
-    _compute_total_avg,
     _compute_total_gwh,
     _render_deficit_excess,
     _render_ncs_curtailment,
@@ -29,28 +32,13 @@ from cobre_bridge.dashboard.tabs.energy_balance import (
     render,
 )
 
+# Dev-only tier-3 fixture (skipif-guarded below); never imported at module
+# scope, never inlined in the decorator.
+_DECK = Path("example/cobre-mar-26-rv2-reduced")
+
 # ---------------------------------------------------------------------------
 # Helpers / data factories
 # ---------------------------------------------------------------------------
-
-
-def _make_gen_lf(
-    generation_mwh: float = 5_000.0,
-    n_scenarios: int = 2,
-    n_stages: int = 3,
-) -> pl.LazyFrame:
-    """Return a generation LazyFrame with *n_scenarios* x *n_stages* rows."""
-    rows: list[dict] = []
-    for scenario_id in range(n_scenarios):
-        for stage_id in range(n_stages):
-            rows.append(
-                {
-                    "scenario_id": scenario_id,
-                    "stage_id": stage_id,
-                    "generation_mwh": generation_mwh,
-                }
-            )
-    return pl.DataFrame(rows).lazy()
 
 
 def _make_hydros_lf(
@@ -92,52 +80,6 @@ def _make_thermals_lf(
                     "generation_mwh": generation_mwh,
                 }
             )
-    return pl.DataFrame(rows).lazy()
-
-
-def _make_ncs_lf(
-    generation_mwh: float = 1_000.0,
-    curtailment_mwh: float = 200.0,
-    n_scenarios: int = 2,
-    n_stages: int = 3,
-) -> pl.LazyFrame:
-    """Return an NCS LazyFrame with generation_mwh and curtailment_mwh columns."""
-    rows: list[dict] = []
-    for scenario_id in range(n_scenarios):
-        for stage_id in range(n_stages):
-            rows.append(
-                {
-                    "scenario_id": scenario_id,
-                    "stage_id": stage_id,
-                    "non_controllable_id": 0,
-                    "generation_mwh": generation_mwh,
-                    "curtailment_mwh": curtailment_mwh,
-                }
-            )
-    return pl.DataFrame(rows).lazy()
-
-
-def _make_buses_lf(
-    deficit_mwh: float = 500.0,
-    bus_ids: list[int] | None = None,
-    n_scenarios: int = 2,
-    n_stages: int = 3,
-) -> pl.LazyFrame:
-    """Return a buses LazyFrame with deficit_mwh column."""
-    if bus_ids is None:
-        bus_ids = [0, 1]
-    rows: list[dict] = []
-    for scenario_id in range(n_scenarios):
-        for stage_id in range(n_stages):
-            for bus_id in bus_ids:
-                rows.append(
-                    {
-                        "scenario_id": scenario_id,
-                        "stage_id": stage_id,
-                        "bus_id": bus_id,
-                        "deficit_mwh": deficit_mwh,
-                    }
-                )
     return pl.DataFrame(rows).lazy()
 
 
@@ -330,35 +272,61 @@ def test_compute_total_gwh_none_value_returns_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test__compute_total_avg
+# test__block_weighted_avg_rate
 # ---------------------------------------------------------------------------
 
 
-def test_compute_total_avg_returns_sum_mean() -> None:
-    """_compute_total_avg sums per scenario then averages across scenarios."""
-    # Scenario 0: 10.0, Scenario 1: 20.0 -> mean = 15.0
+def test_block_weighted_avg_rate_weights_by_block_hours() -> None:
+    """Weights each block's rate by its hours instead of summing the rows.
+
+    One scenario, one stage, two blocks: 100 m3/s over 6h + 200 m3/s over 2h.
+    Weighted mean = (100*6 + 200*2) / (6+2) = 125.0, not the row sum 300.0.
+    """
     lf = pl.DataFrame(
         {
-            "scenario_id": [0, 1],
+            "scenario_id": [0, 0],
             "stage_id": [0, 0],
-            "spillage_m3s": [10.0, 20.0],
+            "block_id": [0, 1],
+            "spillage_m3s": [100.0, 200.0],
         }
     ).lazy()
-    result = _compute_total_avg(lf, "spillage_m3s")
-    assert abs(result - 15.0) < 0.001
+    bh_df = pl.DataFrame(
+        {
+            "stage_id": [0, 0],
+            "block_id": [0, 1],
+            "_bh": [6.0, 2.0],
+        }
+    )
+    result = _block_weighted_avg_rate(lf, "spillage_m3s", bh_df)
+    assert abs(result - 125.0) < 0.001
 
 
-def test_compute_total_avg_empty_returns_zero() -> None:
-    """_compute_total_avg must return 0.0 for an empty LazyFrame."""
-    lf = pl.LazyFrame({"scenario_id": [], "spillage_m3s": []})
-    result = _compute_total_avg(lf, "spillage_m3s")
+def test_block_weighted_avg_rate_empty_returns_zero() -> None:
+    """_block_weighted_avg_rate must return 0.0 for an empty LazyFrame."""
+    lf = pl.LazyFrame(
+        {
+            "scenario_id": pl.Series([], dtype=pl.Int64),
+            "stage_id": pl.Series([], dtype=pl.Int64),
+            "block_id": pl.Series([], dtype=pl.Int64),
+            "spillage_m3s": pl.Series([], dtype=pl.Float64),
+        }
+    )
+    bh_df = pl.DataFrame(
+        {
+            "stage_id": pl.Series([], dtype=pl.Int64),
+            "block_id": pl.Series([], dtype=pl.Int64),
+            "_bh": pl.Series([], dtype=pl.Float64),
+        }
+    )
+    result = _block_weighted_avg_rate(lf, "spillage_m3s", bh_df)
     assert result == 0.0
 
 
-def test_compute_total_avg_missing_column_returns_zero() -> None:
-    """_compute_total_avg must return 0.0 when the column is absent."""
-    lf = pl.DataFrame({"scenario_id": [0]}).lazy()
-    result = _compute_total_avg(lf, "does_not_exist")
+def test_block_weighted_avg_rate_missing_column_returns_zero() -> None:
+    """_block_weighted_avg_rate must return 0.0 when the rate column is absent."""
+    lf = pl.DataFrame({"scenario_id": [0], "stage_id": [0], "block_id": [0]}).lazy()
+    bh_df = pl.DataFrame({"stage_id": [0], "block_id": [0], "_bh": [6.0]})
+    result = _block_weighted_avg_rate(lf, "does_not_exist", bh_df)
     assert result == 0.0
 
 
@@ -1050,3 +1018,25 @@ def test_build_hero_section_html() -> None:
     assert 'value="p50"' in html
     assert 'value="p90"' in html
     assert 'value="all"' in html
+
+
+# ---------------------------------------------------------------------------
+# test__build_metrics_row — real-deck spillage pin (tier 3, dev-only)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _DECK.exists(), reason=f"real deck not present: {_DECK}")
+def test_block_weighted_avg_rate_spillage_pinned_on_reduced_deck() -> None:
+    """Pins the block-hours-weighted system-total spillage rate on the real deck.
+
+    Guards the row-count-inflation regression: summing spillage_m3s over
+    every (hydro, stage, block) row without block-hours weighting inflates
+    the result by the per-scenario row count (2016x on this deck) instead of
+    producing the time-weighted system-total rate.
+    """
+    data = DashboardData.load(_DECK)
+    result = _block_weighted_avg_rate(data.hydros_lf, "spillage_m3s", data.bh_df)
+    assert result == pytest.approx(59_001.5, abs=0.1)
+
+    html = _build_metrics_row(data)
+    assert "59,001.5" in html

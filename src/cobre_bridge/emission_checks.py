@@ -11,8 +11,8 @@ bridge-side context (entity, stage, column, declared vs. offending value) in
 milliseconds, instead of at ``cobre validate``/``cobre run`` load time.
 
 This is a **courtesy mirror**, not a substitute: cobre remains the authority.
-Each rule is scoped to match cobre's own implementation exactly (see
-``~/git/cobre/crates/cobre-io/src/validation/semantic/``):
+Each rule is scoped to match cobre's own implementation exactly (cobre's
+semantic validation layer):
 
 - Rule 43 — :func:`check_hydro_bounds_no_raising`
   (``block_bounds.rs::check_bound_raises_declared_capacity``).
@@ -39,7 +39,7 @@ unit-testable against hand-built artifacts.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -49,19 +49,15 @@ from cobre_bridge.diagnostics import (
     Diagnostic,
     DiagnosticTable,
     Severity,
+    collect,
     emit,
     format_stage_ranges,
 )
+from cobre_bridge.tolerances import relative_tolerance
 
 _LOG = logging.getLogger(__name__)
 
 _CATEGORY = "Emission self-checks"
-
-#: Mirrors cobre-io's
-#: ``crates/cobre-io/src/validation/semantic/mod.rs::ENVELOPE_TOLERANCE``. A
-#: relative tolerance, not an absolute one — an absolute epsilon would false-fire
-#: on a plant declared at, say, 1e6 m^3/s and float-noise-pass a plant near zero.
-_ENVELOPE_TOLERANCE = 1e-9
 
 #: Both guarded columns for rule 43 / rule 41, checked independently.
 _ENVELOPE_COLUMNS: tuple[str, ...] = ("max_turbined_m3s", "max_generation_mw")
@@ -76,9 +72,13 @@ _CLAMP_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
 )
 
 
+class EmissionCheckError(ValueError):
+    """A post-emission self-check reported at least one ERROR-severity diagnostic."""
+
+
 def _tolerance(declared: float) -> float:
     """``ENVELOPE_TOLERANCE * max(|declared|, 1.0)`` — cobre's envelope tolerance."""
-    return _ENVELOPE_TOLERANCE * max(abs(declared), 1.0)
+    return relative_tolerance(declared)
 
 
 @dataclass(frozen=True)
@@ -97,8 +97,7 @@ class BoundFamily:
     when set, both row-level checks fold into the **key** alongside
     *entity_column*/``stage_id``/``block_id`` instead of treating it as a
     value column — mirroring cobre rule 36's own widened key ``(hydro_id,
-    hydro_unit_group_id, stage_id, block_id, column)``
-    (``crates/cobre-io/src/validation/semantic/block_bounds.rs:338``).
+    hydro_unit_group_id, stage_id, block_id, column)``.
     ``None`` (the default) reproduces the three pre-existing families'
     unchanged, single-entity-key behaviour.
     """
@@ -643,8 +642,8 @@ def check_bound_row_uniqueness(families: Sequence[BoundFamily]) -> None:
     than being treated as a value column — two groups of the same plant
     setting the same column at the same ``(stage, block)`` are distinct
     keys, not a collision, mirroring cobre rule 36's own widened key
-    ``(hydro_id, hydro_unit_group_id, stage_id, block_id, column)``
-    (``block_bounds.rs:338``). A family with ``group_column=None`` (the
+    ``(hydro_id, hydro_unit_group_id, stage_id, block_id, column)``.
+    A family with ``group_column=None`` (the
     three pre-existing families) is unaffected: the finding's rendered
     ``Group ID`` column reflects whether any *actual finding* came from a
     group-scoped family, not merely whether one was present in *families* —
@@ -968,3 +967,40 @@ def check_block_id_not_on_anticipated_thermal(
         ),
         logger=_LOG,
     )
+
+
+def _describe_emission_check_errors(errors: Sequence[Diagnostic]) -> str:
+    """Render *errors* (every entry ``ERROR`` severity) as a multi-line,
+    human-readable block naming the failing rule and the offending entities —
+    the message :func:`run_and_gate` raises when any is found. Each
+    diagnostic's own detail table (hydro/thermal/line id, stage, column) is
+    included, not just its one-line summary, so the exception is actionable
+    on its own without re-running with a diagnostics sink attached.
+    """
+    lines: list[str] = []
+    for diagnostic in errors:
+        lines.append(f"- {diagnostic.code}: {diagnostic.summary}")
+        if diagnostic.table is not None:
+            for row in diagnostic.table.rows:
+                lines.append("    " + ", ".join(str(value) for value in row))
+    return "\n".join(lines)
+
+
+def run_and_gate(run_checks: Callable[[], None]) -> None:
+    """Run *run_checks* inside a diagnostics sink, re-emit every captured
+    diagnostic on this module's logger, and raise :class:`EmissionCheckError`
+    when any of them is ``ERROR`` severity.
+
+    *run_checks* is a zero-argument callable invoking whichever check
+    functions the caller's pipeline needs, so this gate stays track-agnostic.
+    """
+    with collect() as check_diagnostics:
+        run_checks()
+    for diagnostic in check_diagnostics:
+        emit(diagnostic, logger=_LOG)
+    check_errors = [d for d in check_diagnostics if d.severity is Severity.ERROR]
+    if check_errors:
+        raise EmissionCheckError(
+            f"{len(check_errors)} post-emission self-check error(s):\n"
+            f"{_describe_emission_check_errors(check_errors)}"
+        )

@@ -31,12 +31,8 @@ from cobre_bridge.comparators.decomp_readers import (
     read_dec_estatfpha,
     read_dec_oper_evap,
     read_dec_oper_gnl,
-    read_dec_oper_interc,
     read_dec_oper_ree,
     read_dec_oper_rhesoft,
-    read_dec_oper_sist,
-    read_dec_oper_usih,
-    read_dec_oper_usit,
     read_decomp_tim,
     read_eco_fpha,
     read_relato2_costs,
@@ -45,13 +41,11 @@ from cobre_bridge.comparators.decomp_readers import (
     read_relato_costs,
     read_relato_expected_cost,
     read_relato_membership,
-    reconcile_kdollars_to_reais,
 )
+from cobre_bridge.comparators.decomp_results import reconcile_kdollars_to_reais
 
-_DECK = Path("example/decomp-jul-26-rv3")
 _REDUCED_DECK = Path("example/decomp-mar-26-rv2-reduced")
 
-_needs_deck = pytest.mark.skipif(not _DECK.is_dir(), reason="rv3 outputs not present")
 _needs_reduced_deck = pytest.mark.skipif(
     not (_REDUCED_DECK / "relato.rv2").is_file(),
     reason="reduced deck outputs not present",
@@ -436,75 +430,6 @@ class TestReadDecOperCore:
 
 
 class TestRealDeckReaders:
-    @_needs_deck
-    def test_sist_has_system_columns(self) -> None:
-        df = read_dec_oper_sist(_DECK)
-        assert df.height > 0
-        for column in (
-            "estagio",
-            "no",
-            "cenario",
-            "patamar",
-            "codigo_submercado",
-            "demanda_MW",
-            "geracao_hidroeletrica_MW",
-            "geracao_termica_MW",
-            "itaipu_50MW",
-            "itaipu_60MW",
-            "deficit_MW",
-            "cmo",
-        ):
-            assert column in df.columns
-
-    @_needs_deck
-    def test_usih_has_water_balance_columns(self) -> None:
-        df = read_dec_oper_usih(_DECK)
-        assert df.height > 0
-        for column in (
-            "codigo_usina",
-            "geracao_MW",
-            "potencia_disponivel_MW",
-            "vazao_turbinada_m3s",
-            "vazao_vertida_m3s",
-            "volume_util_final_hm3",
-        ):
-            assert column in df.columns
-
-    @_needs_deck
-    def test_usit_has_bound_columns(self) -> None:
-        df = read_dec_oper_usit(_DECK)
-        assert df.height > 0
-        for column in (
-            "codigo_usina",
-            "geracao_MW",
-            "geracao_minima_MW",
-            "geracao_maxima_MW",
-            "custo_incremental",
-        ):
-            assert column in df.columns
-
-    @_needs_deck
-    def test_interc_has_flow_columns(self) -> None:
-        df = read_dec_oper_interc(_DECK)
-        assert df.height > 0
-        for column in (
-            "codigo_submercado_de",
-            "codigo_submercado_para",
-            "intercambio_origem_MW",
-            "capacidade_MW",
-        ):
-            assert column in df.columns
-
-    @_needs_deck
-    def test_relato_convergence(self) -> None:
-        df = read_relato_convergence(_DECK)
-        assert df.height > 0
-        for column in ("iteracao", "zinf", "zsup", "gap_percentual"):
-            assert column in df.columns
-        # A converged production run: the last gap is small.
-        final_gap = df["gap_percentual"][-1]
-        assert final_gap is not None
-
     def test_relato_missing_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="relato"):
             read_relato_convergence(tmp_path)

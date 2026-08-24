@@ -7,6 +7,7 @@ from datetime import date
 
 import pandas as pd
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.converters.hydro import read_cadastro
@@ -15,11 +16,6 @@ from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.plants import filling_hydro_codes
 
 _LOG = logging.getLogger(__name__)
-
-_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/initial_conditions.schema.json"
-)
 
 
 def _filling_row(exph_df: pd.DataFrame, code: int) -> pd.Series:
@@ -188,13 +184,12 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     filling_storage.sort(key=lambda s: s["hydro_id"])
 
     # ── Past anticipated thermal commitments (from adterm.dat) ──────────
-    # Empty for non-GNL cases (despacho_antecipado_gnl=0 in dger.dat). Each entry maps a
-    # thermal's the source model code to its cobre thermal_id.
+    # Empty for non-GNL cases (despacho_antecipado_gnl=0 in dger.dat). Each entry maps
+    # a thermal's source-model code to its cobre thermal_id.
     #
-    # Cobre (>= 0.7.0) honours non-zero pre-horizon seeds: the always-active anticipated
-    # "fishing" equality pins generation to the committed MW at each delivery stage,
-    # faithfully reproducing the source model's pre-commitment. The committed value must
-    # lie within the plant's static generation bounds ``[min_mw, max_mw]``
+    # Cobre honours non-zero pre-horizon seeds: the always-active anticipated "fishing"
+    # equality pins generation to the committed MW at each delivery stage. The committed
+    # value must lie within the plant's static generation bounds ``[min_mw, max_mw]``
     # (``thermals.json`` / ``cobre-io`` semantic validator); an out-of-range seed makes
     # that stage's fishing equality infeasible, so we clamp into range and warn rather
     # than emit a case cobre would reject.
@@ -245,7 +240,7 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     past_anticipated_commitments.sort(key=lambda c: (c["thermal_id"], c["start_date"]))
 
     result: dict = {
-        "$schema": _SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("initial_conditions.json"),
         "storage": storage,
         "filling_storage": filling_storage,
     }

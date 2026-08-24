@@ -2,7 +2,7 @@
 
 Builds aligned entity pairs for hydros, thermals, and exchange lines
 using the same NewaveIdMap that the converter produces, plus the parsed
-``NewaveCase`` for human-readable names and reservoir detection.
+``NewaveCase`` for human-readable names.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ class HydroEntity:
     newave_code: int
     cobre_id: int
     name: str
-    has_reservoir: bool
 
 
 @dataclass(frozen=True)
@@ -66,9 +65,6 @@ class EntityAlignment:
     hydros: list[HydroEntity] = field(default_factory=list)
     thermals: list[ThermalEntity] = field(default_factory=list)
     lines: list[LineEntity] = field(default_factory=list)
-    skipped_hydros: list[int] = field(default_factory=list)
-    skipped_thermals: list[int] = field(default_factory=list)
-    num_newave_stages: int = 0
 
 
 def read_reference_names(
@@ -83,11 +79,9 @@ def read_reference_names(
     thermal_names: dict[int, str] = {}
     subsystem_names: dict[int, str] = {}
 
-    # Hydro names from confhd.dat
     for _, row in case.confhd.usinas.iterrows():
         hydro_names[int(row["codigo_usina"])] = str(row["nome_usina"]).strip()
 
-    # Thermal names from conft.dat
     for _, row in case.conft.usinas.iterrows():
         thermal_names[int(row["codigo_usina"])] = str(row["nome_usina"]).strip()
 
@@ -102,36 +96,6 @@ def read_reference_names(
                 seen.add(code)
 
     return hydro_names, thermal_names, subsystem_names
-
-
-def _detect_reservoir_plants(case: NewaveCase) -> set[int]:
-    """Return the set of the source model hydro codes that have reservoirs.
-
-    A plant has a reservoir when its ``volume_minimo != volume_maximo``
-    in the HIDR cadastro (with permanent MODIF overrides applied).
-    """
-    from cobre_bridge.converters.hydro import read_cadastro
-
-    cadastro = read_cadastro(case)
-    reservoir_codes: set[int] = set()
-    for code, row in cadastro.iterrows():
-        vol_min = float(row["volume_minimo"])
-        vol_max = float(row["volume_maximo"])
-        if vol_min != vol_max:
-            reservoir_codes.add(int(code))  # type: ignore[arg-type]
-    return reservoir_codes
-
-
-def _detect_newave_stages(case: NewaveCase) -> int:
-    """Compute total number of the source model stages from DGER parameters.
-
-    Uses the case's cached :attr:`NewaveCase.horizon`; an empty study
-    (``num_anos_estudo`` of 0/None) reports zero stages.
-    """
-    if not case.dger.num_anos_estudo:
-        return 0
-
-    return case.horizon.total_stages
 
 
 def build_entity_alignment(
@@ -151,36 +115,28 @@ def build_entity_alignment(
         The ``lines`` list from the converted Cobre ``lines.json``.
     """
     hydro_names, thermal_names, subsystem_names = read_reference_names(case)
-    reservoir_codes = _detect_reservoir_plants(case)
-    num_stages = _detect_newave_stages(case)
 
-    alignment = EntityAlignment(num_newave_stages=num_stages)
+    alignment = EntityAlignment()
 
-    # --- Hydros ---
     for nw_code in id_map.all_hydro_codes:
         try:
             cobre_id = id_map.hydro_id(nw_code)
         except KeyError:
-            alignment.skipped_hydros.append(nw_code)
             continue
 
         name = hydro_names.get(nw_code, f"code_{nw_code}")
-        has_reservoir = nw_code in reservoir_codes
         alignment.hydros.append(
             HydroEntity(
                 newave_code=nw_code,
                 cobre_id=cobre_id,
                 name=name,
-                has_reservoir=has_reservoir,
             )
         )
 
-    # --- Thermals ---
     for nw_code in id_map.all_thermal_codes:
         try:
             cobre_id = id_map.thermal_id(nw_code)
         except KeyError:
-            alignment.skipped_thermals.append(nw_code)
             continue
 
         name = thermal_names.get(nw_code, f"code_{nw_code}")
@@ -192,19 +148,10 @@ def build_entity_alignment(
             )
         )
 
-    # --- Lines (exchange) ---
-    # Build a reverse lookup: (source_bus_id, target_bus_id) -> line entry
-    bus_pair_to_line: dict[tuple[int, int], dict] = {}
-    for line in lines_json:
-        key = (int(line["source_bus_id"]), int(line["target_bus_id"]))
-        bus_pair_to_line[key] = line
-
-    # Build reverse bus lookup: cobre_bus_id -> newave_subsystem_code
     bus_id_to_nw: dict[int, int] = {}
     for nw_code in id_map.all_bus_ids:
         bus_id_to_nw[id_map.bus_id(nw_code)] = nw_code
 
-    # For each Cobre line, find the matching the source model subsystem pair
     for line in lines_json:
         line_id = int(line["id"])
         src_bus = int(line["source_bus_id"])
@@ -231,12 +178,10 @@ def build_entity_alignment(
         )
 
     _LOG.debug(
-        "Alignment: %d hydros (%d with reservoir), %d thermals, %d lines, %d stages",
+        "Alignment: %d hydros, %d thermals, %d lines",
         len(alignment.hydros),
-        sum(1 for h in alignment.hydros if h.has_reservoir),
         len(alignment.thermals),
         len(alignment.lines),
-        alignment.num_newave_stages,
     )
 
     return alignment

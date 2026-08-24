@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-08-24
+
+Pairs the bridge with the **cobre 0.15.0** release: the `cobre-python` pin and
+`MIN_COBRE_VERSION` floor move to `0.15.0` (bridge `X.Y.Z` pairs cobre `X.Y.Z`,
+guarded by `tests/test_packaging.py`). The release adds DECOMP anticipated
+post-horizon support and lands a broad correctness and structural pass across
+both conversion tracks.
+
+### Added
+
+- **DECOMP anticipated post-horizon commitments.** `convert decomp` emits the
+  fixed post-horizon anticipated-thermal deliveries cobre 0.15.0 models: the
+  already-decided (já-comandada) generation is pinned as fixed past-horizon
+  commitments, the freshly-signaled post-study generation is left for the solver
+  to re-derive as `post_study_stages.json` thermal bounds, and the anticipation
+  lead is emitted uncapped. The boundary cost-to-go function is authored against
+  the excised anticipated ring and loads into the fanned terminal.
+- **Self-describing `manifest.bin` policy checkpoint.** The boundary policy
+  checkpoint carries its own per-pool provenance — cost scale, node and graph
+  stage ids, entity manifest — so a later layout change fails loudly at load
+  rather than silently; the sidecar `metadata.json` is retired.
+
+### Changed
+
+- **cobre pairing.** `cobre-python>=0.15.0,<0.16` and `MIN_COBRE_VERSION =
+"0.15.0"`; the conversion manifest records the `0.15.0` floor.
+- **Twin-track symmetry.** Physics, calendar/stage weighting, generic-constraint
+  emission, the case write path, and the `DecompCase` parse are single shared
+  implementations across the NEWAVE and DECOMP tracks; neither track imports the
+  other's private names.
+- **Exit-code and `--json` contracts.** An error status and a non-zero exit code
+  travel together; every failure path — early CLI-level ones included — emits one
+  `{schema_version, command, status, summary, diagnostics}` envelope.
+- **Presentation boundary.** Converters emit structured `Diagnostic` objects
+  through the `collect()` sink instead of pre-formatted strings, and Rich
+  rendering is confined to the `ui` package.
+- **Internals.** The comparators' chart code and the hydro converter are split
+  into packages; the compare data layer converges on one dataset model; the
+  Plotly model is unified across the dashboard and the compare report.
+- `convert decomp` gains `--force` pre-clear and rollback parity with the NEWAVE
+  track.
+
+### Fixed
+
+- **Chart and axis titles render again under plotly.js 3.x.** plotly.js 3.0
+  dropped bare-string `title` support, so raw-dict layouts reaching the browser —
+  the compare report's charts and the dashboard's client-side charts — lost their
+  titles; titles are normalized to the object form at both the Python and the
+  client-side seams.
+- **Itaipu 50/60 Hz split and the ANDE load.** `convert decomp` places the 50 Hz
+  unit group on the Sudeste bus with the ANDE load netted into it, and the 60 Hz
+  group on the Ivaiporã transshipment node, matching the source model.
+- **Dashboard VminOP / RHE constraint scale.** The dashboard evaluates a
+  storage-scaled constraint's left-hand side with the solver's per-stage
+  `rho_acum` override, so the plotted band and its bound share one scale.
+- **`compare` artifact export.** The comparison metadata stores each plant's bus
+  label as a JSON-native list, so `compare` writes its JSON artifacts instead of
+  raising at export.
+- Dashboard KPI weighting and guard corrections, and the migration of the NEWAVE
+  converter warnings to structured diagnostics.
+
+### Removed
+
+- The comparator's standalone bounds engine; bounds now compare through the
+  shared constraint evaluator both tracks use.
+
 ## [0.14.3] - 2026-08-19
 
 Pairs the bridge with the **cobre 0.14.3** release and restores the boundary

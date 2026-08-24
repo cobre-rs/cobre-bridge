@@ -2,12 +2,14 @@
 
 No deck (synthetic contributions only). Covers the axis registry (contents,
 two-sided/stage-level flags — including the diversion/spillage axes
-epic-06/ticket-021+022 widened/added — unknown-pair raise), the per-axis
-``intersect`` (tightest pair, unbounded sentinel, empty-intersection and
-upper-only raises), ``resolve`` (base vs per-block materialization + the
-stage-level guard), and ``build_bound_tables`` (the pyarrow fan-out into the
-hydro/thermal/pumping schemas, one row per cell — including a two-sided
-diversion/spillage group landing both endpoints in one cell).
+epic-06/ticket-021+022 widened/added, and the ``line``/``hydro_unit_group``/
+``contract``/``water_withdrawal`` axes ticket-010 registered — unknown-pair
+raise), the per-axis ``intersect`` (tightest pair, unbounded sentinel,
+empty-intersection and both upper-only/lower-only raises), ``resolve`` (base
+vs per-block materialization + the stage-level guard), and
+``build_bound_tables`` (the pyarrow fan-out into the hydro/thermal/pumping
+schemas, one row per cell — including a two-sided diversion/spillage group
+landing both endpoints in one cell).
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from cobre_bridge.decomp.bounds_accumulator import (
     AxisSpec,
     BoundContribution,
     ResolvedRow,
+    _effective,
     axis_spec,
     build_bound_tables,
     intersect,
@@ -62,6 +65,79 @@ def test_thermal_and_pumping_axes_registered() -> None:
 def test_unknown_axis_raises() -> None:
     with pytest.raises(ValueError, match="hydro.*bogus"):
         axis_spec("hydro", "bogus")
+
+
+def test_line_direct_and_reverse_axes_are_upper_only_block_eligible() -> None:
+    """``decomp.network.convert_lines``/``convert_line_bounds`` emit one
+    capacity per flow direction (``direct_mw``/``reverse_mw``), not a
+    min/max pair — each direction registers as its own upper-only axis."""
+    for axis, column in (("direct", "direct_mw"), ("reverse", "reverse_mw")):
+        spec = axis_spec("line", axis)
+        assert spec.family == "line"
+        assert spec.lower_column is None
+        assert spec.upper_column == column
+        assert spec.block_eligible is True
+
+
+def test_hydro_unit_group_axes_are_two_sided_block_eligible() -> None:
+    """``group_bounds.convert_hydro_unit_group_bounds`` emits four
+    block-eligible bound columns forming two two-sided axes."""
+    turbined = axis_spec("hydro_unit_group", "turbined")
+    assert turbined.lower_column == "min_turbined_m3s"
+    assert turbined.upper_column == "max_turbined_m3s"
+    assert turbined.block_eligible is True
+
+    generation = axis_spec("hydro_unit_group", "generation")
+    assert generation.lower_column == "min_generation_mw"
+    assert generation.upper_column == "max_generation_mw"
+    assert generation.block_eligible is True
+
+
+def test_contract_power_axis_is_two_sided_block_eligible() -> None:
+    """``contracts.convert_contract_bounds`` emits ``min_mw``/``max_mw`` as a
+    two-sided, block-eligible axis; its ``price_per_mwh`` column is a price,
+    not a bound, and is never registered in ``AXES``."""
+    spec = axis_spec("contract", "power")
+    assert spec.family == "contract"
+    assert spec.lower_column == "min_mw"
+    assert spec.upper_column == "max_mw"
+    assert spec.block_eligible is True
+    assert ("contract", "price") not in AXES
+    assert ("contract", "price_per_mwh") not in AXES
+
+
+def test_hydro_water_withdrawal_axis_is_lower_only_stage_level() -> None:
+    """``bounds.convert_irrigation_withdrawal`` supplies a per-(hydro, stage)
+    compulsory removal with no per-block dimension — registered lower-only
+    and stage-level, mirroring ``storage``'s ``block_eligible=False``."""
+    spec = axis_spec("hydro", "water_withdrawal")
+    assert spec.family == "hydro"
+    assert spec.lower_column == "water_withdrawal_m3s"
+    assert spec.upper_column is None
+    assert spec.block_eligible is False
+
+
+def test_pre_existing_eight_axes_unchanged() -> None:
+    """AC3: every axis registered before this ticket resolves to the exact
+    same :class:`AxisSpec` it always did — the six new families/axes are
+    additive only."""
+    expected = {
+        ("hydro", "turbined"): ("min_turbined_m3s", "max_turbined_m3s", True),
+        ("hydro", "outflow"): ("min_outflow_m3s", "max_outflow_m3s", True),
+        ("hydro", "generation"): ("min_generation_mw", "max_generation_mw", True),
+        ("hydro", "storage"): ("min_storage_hm3", "max_storage_hm3", False),
+        ("hydro", "diversion"): ("min_diversion_m3s", "max_diversion_m3s", True),
+        ("hydro", "spillage"): ("min_spillage_m3s", "max_spillage_m3s", True),
+        ("thermal", "generation"): ("min_generation_mw", "max_generation_mw", True),
+        ("pumping", "flow"): ("min_m3s", "max_m3s", True),
+    }
+    assert len(expected) == 8
+    for (family, axis), (lower, upper, block_eligible) in expected.items():
+        spec = axis_spec(family, axis)
+        assert spec.family == family
+        assert spec.lower_column == lower
+        assert spec.upper_column == upper
+        assert spec.block_eligible is block_eligible
 
 
 def test_hydro_turbined_and_outflow_axes_are_two_sided_block_eligible() -> None:
@@ -124,6 +200,15 @@ def test_intersect_tightest_pair() -> None:
     assert intersect(contribs, spec) == (20.0, 80.0)
 
 
+def test_effective_normalizes_unbounded_sentinel_to_none() -> None:
+    """``_effective`` delegates to the shared
+    :func:`cobre_bridge.generic_constraint_builder.is_bounded` sentinel check
+    (single source) — a magnitude at the sentinel normalizes to
+    ``None``, while a genuine bound passes through unchanged."""
+    assert _effective(1e21) is None
+    assert _effective(5.0) == 5.0
+
+
 def test_intersect_ignores_unbounded_sentinel() -> None:
     spec = axis_spec("hydro", "outflow")
     contribs = [
@@ -144,10 +229,10 @@ def test_empty_intersection_raises() -> None:
 
 
 def test_lower_on_upper_only_axis_raises() -> None:
-    """No axis in the live :data:`AXES` registry is upper-only any more
-    (diversion widened in ticket-021), but ``intersect`` must still enforce
-    the guard for a hypothetical one — built directly, not looked up via
-    :func:`axis_spec`, mirroring ``test_axis_spec_is_frozen``'s approach."""
+    """``intersect`` enforces the upper-only guard independently of any
+    axis actually registered in :data:`AXES` — built directly, not looked
+    up via :func:`axis_spec`, mirroring ``test_axis_spec_is_frozen``'s
+    approach (``("line", "direct")`` below covers the live-registry case)."""
     spec = AxisSpec(
         family="hydro",
         lower_column=None,
@@ -167,6 +252,47 @@ def test_lower_on_upper_only_axis_raises() -> None:
         )
     ]
     with pytest.raises(ValueError, match="upper-only"):
+        intersect(contribs, spec)
+
+
+def test_lower_on_registered_line_direct_axis_raises() -> None:
+    """AC2: a genuinely registered upper-only axis (``line``'s ``direct``,
+    added by this ticket) still loud-fails on a lower contribution."""
+    spec = axis_spec("line", "direct")
+    contribs = [
+        BoundContribution(
+            family="line",
+            entity_id=2,
+            stage_id=0,
+            block_id=None,
+            axis="direct",
+            lower=15.0,
+            upper=None,
+            contributor="patamar-factor",
+        )
+    ]
+    with pytest.raises(ValueError, match="upper-only"):
+        intersect(contribs, spec)
+
+
+def test_upper_on_registered_water_withdrawal_axis_raises() -> None:
+    """The symmetric guard: a genuinely registered lower-only axis
+    (``hydro``'s ``water_withdrawal``, added by this ticket) loud-fails on
+    an upper contribution."""
+    spec = axis_spec("hydro", "water_withdrawal")
+    contribs = [
+        BoundContribution(
+            family="hydro",
+            entity_id=5,
+            stage_id=0,
+            block_id=None,
+            axis="water_withdrawal",
+            lower=None,
+            upper=3.0,
+            contributor="TI",
+        )
+    ]
+    with pytest.raises(ValueError, match="lower-only"):
         intersect(contribs, spec)
 
 

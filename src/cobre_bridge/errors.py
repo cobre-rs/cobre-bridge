@@ -109,6 +109,10 @@ _TYPE_MAP: dict[type[BaseException], tuple[str, str, str | None]] = {
         "Comparison failure",
         "→ Re-run cobre at the required version to produce this partition.",
     ),
+    # Base-class fallback (last, for readability — a concrete subclass above
+    # always wins the MRO walk regardless of dict order). No remediation: an
+    # unmapped BridgeError has no knowable specific fix.
+    BridgeError: ("conversion-error", "Conversion failure", None),
 }
 
 _FALLBACK: tuple[str, str, str | None] = (

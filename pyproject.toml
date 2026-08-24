@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.14.3"
+version = "0.15.0"
 description = "Anything-to-Cobre converter"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -24,7 +24,7 @@ dependencies = [
     # boundary FCF by default and `convert --validate` / `compare` load cobre
     # output, so `import cobre` must work out of the box. Keep the floor in
     # lockstep with MIN_COBRE_VERSION in cli.py (which documents the contract).
-    "cobre-python>=0.14.3,<0.15",
+    "cobre-python>=0.15.0,<0.16",
 ]
 
 [project.optional-dependencies]
@@ -46,10 +46,23 @@ packages = ["src/cobre_bridge"]
 testpaths = ["tests"]
 addopts = "--tb=short"
 
+[tool.coverage.run]
+source = [
+    "cobre_bridge.comparators.newave_readers",
+    "cobre_bridge.comparators.alignment",
+    "cobre_bridge.comparators.constraints_compare",
+]
+
+[tool.coverage.report]
+fail_under = 83
+# Ratchet: raise as coverage improves, never lower to dodge a regression — this is the combined aggregate over the 3 `source` modules above, not a per-module threshold.
+
 [tool.pyright]
-# Editor aid only — CI gates ruff (ruff.toml) and `ty`. Point at the venv so the
-# typed first-party deps (idecomp/inewave ship py.typed) resolve instead of
-# raising phantom missing-import errors.
+# Editor aid only — CI gates ruff (ruff.toml, whole tree) and the drift
+# checks that follow it in the lint job.
+# `ty` and pyright are local/editor aids only; neither is a CI step. Point
+# at the venv so the typed first-party deps (idecomp/inewave ship
+# py.typed) resolve instead of raising phantom missing-import errors.
 include = ["src", "tests"]
 venvPath = "."
 venv = ".venv"

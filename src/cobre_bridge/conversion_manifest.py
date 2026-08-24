@@ -4,7 +4,9 @@ Defines :class:`ConversionManifest`, a provenance record emitted alongside a
 converted Cobre case directory so that a downstream agent can know exactly which
 bridge version, git state, source-model case directory, and input files produced
 a given conversion, plus the entity counts and the diagnostics raised during the
-run. It mirrors :mod:`cobre_bridge.comparators.manifest`.
+run. It mirrors :mod:`cobre_bridge.comparators.manifest`; both subclass
+:class:`cobre_bridge.provenance_manifest.ProvenanceManifest` for their shared
+``to_json``/``from_json`` behaviour.
 
 The shared :func:`cobre_bridge._git.git_sha` runs the git subprocess only
 inside :meth:`ConversionManifest.create`, never at import time.
@@ -12,28 +14,29 @@ inside :meth:`ConversionManifest.create`, never at import time.
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
-from collections import Counter
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import cobre_bridge
 from cobre_bridge._git import git_sha
-from cobre_bridge.newave_files import NewaveFiles
+from cobre_bridge.cobre_compat import MIN_COBRE_VERSION
+from cobre_bridge.provenance_manifest import ProvenanceManifest
+from cobre_bridge.ui.console import print_status
 
 if TYPE_CHECKING:
-    from cobre_bridge.decomp.pipeline import DecompFiles
-    from cobre_bridge.diagnostics import Diagnostic
+    from collections.abc import Callable
 
-_HASH_CHUNK_BYTES = 8192
+    from rich.console import Console
+
+    from cobre_bridge.decomp.pipeline import DecompFiles
+    from cobre_bridge.newave_files import NewaveFiles
+    from cobre_bridge.pipeline import ConversionReport
 
 
 @dataclass
-class ConversionManifest:
+class ConversionManifest(ProvenanceManifest):
     """Provenance record for a conversion run.
 
     Carries the originating command, the source-model and output paths, the
@@ -58,6 +61,8 @@ class ConversionManifest:
     # field round-trips through ``from_json`` unchanged. Appended last so existing
     # positional construction stays unchanged.
     min_cobre_version: str | None = None
+
+    _NOT_FOUND_LABEL: ClassVar[str] = "Conversion manifest"
 
     @classmethod
     def create(
@@ -97,95 +102,74 @@ class ConversionManifest:
             min_cobre_version=min_cobre_version,
         )
 
-    def to_json(self, path: Path) -> None:
-        """Write the manifest to ``path`` as indented JSON.
 
-        Parent directories are created if missing.
-        """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+def _write_conversion_manifest(
+    report: ConversionReport,
+    src: Path,
+    dst: Path,
+    *,
+    command: str,
+    discover: Callable[[Path], NewaveFiles | DecompFiles],
+    console: Console,
+) -> None:
+    """Write the conversion provenance manifest into ``dst`` as JSON.
 
-    @classmethod
-    def from_json(cls, path: Path) -> ConversionManifest:
-        """Reconstruct a manifest from a JSON file written by :meth:`to_json`.
+    Rediscovers the source-model input files via *discover* (each command
+    passes its own files-dataclass constructor) to hash, builds a
+    :class:`ConversionManifest` labelled with *command* from the bridge
+    version/git SHA, the entity counts in *report*, and its diagnostics, then
+    writes it to ``dst / "conversion_manifest.json"``.
 
-        Unknown keys (e.g. from a manifest written by a newer bridge) are
-        dropped, and absent optional keys fall back to their dataclass defaults,
-        so reading a manifest across bridge versions does not raise. Raises
-        :class:`FileNotFoundError` (naming ``path``) when the file is absent.
-        """
-        if not path.exists():
-            raise FileNotFoundError(f"Conversion manifest not found: {path}")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        known = {f.name for f in fields(cls)}
-        filtered = {k: v for k, v in data.items() if k in known}
-        return cls(**filtered)
-
-
-def hash_input_files(files: NewaveFiles | DecompFiles) -> list[dict[str, object]]:
-    """Hash every ``Path``-valued input file of *files* into a sorted list.
-
-    Introspects :func:`dataclasses.fields` of *files* (the instance, so any
-    files dataclass works), skipping the ``directory`` field and any field
-    whose value is not a :class:`~pathlib.Path` (which also skips an absent
-    optional, stored as ``None``, and a non-path field such as
-    :class:`~cobre_bridge.decomp.pipeline.DecompFiles`'s ``revision``). For
-    each remaining ``(name, path)`` it produces an entry
-    ``{"field", "path", "sha256", "size_bytes"}`` where ``sha256`` is the
-    SHA-256 hex digest of the file's raw bytes and ``size_bytes`` is the file
-    size.
-
-    A file that cannot be read (:class:`OSError`) is recorded with
-    ``sha256=None`` and ``size_bytes=None`` rather than aborting the manifest.
-    The returned list is sorted by ``"field"`` for deterministic ordering.
+    Both a discovery failure and a write failure are reported as warnings and
+    swallowed — the conversion itself already succeeded, so neither changes the
+    exit code.
     """
-    entries: list[dict[str, object]] = []
-    for spec in fields(files):
-        if spec.name == "directory":
-            continue
-        value = getattr(files, spec.name)
-        if not isinstance(value, Path):
-            continue
-        path: Path = value
-        sha256, size_bytes = _hash_file(path)
-        entries.append(
-            {
-                "field": spec.name,
-                "path": str(path),
-                "sha256": sha256,
-                "size_bytes": size_bytes,
-            }
-        )
-    entries.sort(key=lambda entry: entry["field"])
-    return entries
+    from cobre_bridge.provenance_manifest import (
+        hash_input_files,
+        summarize_diagnostics,
+    )
 
-
-def _hash_file(path: Path) -> tuple[str | None, int | None]:
-    """Return the SHA-256 hex digest and byte size of *path*.
-
-    Reads the file in ``_HASH_CHUNK_BYTES``-byte binary chunks. The size is read
-    from the open descriptor (``os.fstat``) so it is consistent with the bytes
-    just hashed even if the file is replaced afterwards. On :class:`OSError`
-    (unreadable / missing file) returns ``(None, None)`` so the caller records
-    the failure instead of raising.
-    """
-    digest = hashlib.sha256()
     try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(_HASH_CHUNK_BYTES), b""):
-                digest.update(chunk)
-            size_bytes = os.fstat(handle.fileno()).st_size
-    except OSError:
-        return None, None
-    return digest.hexdigest(), size_bytes
+        files = discover(src)
+    except OSError as exc:
+        print_status(
+            f"Warning: failed to discover source files for conversion manifest: {exc}",
+            console=console,
+            style="#F5A623",
+        )
+        return
 
+    entity_counts = {
+        "hydros": report.hydro_count,
+        "thermals": report.thermal_count,
+        "buses": report.bus_count,
+        "lines": report.line_count,
+        "stages": report.stage_count,
+    }
+    # Record the minimum cobre version the output requires. Every converted case
+    # now emits a ``training.parallelism.backward_scheduler`` block (cobre 0.12.0+),
+    # ``operational_start_date`` on all system entities (cobre 0.10.0+), and a
+    # mandatory hydro ``unit_groups`` array with the top-level ``bus_id`` removed
+    # (cobre 0.13.0+), so the output is only loadable by cobre >= MIN_COBRE_VERSION.
+    manifest = ConversionManifest.create(
+        command,
+        src,
+        dst,
+        entity_counts=entity_counts,
+        input_files=hash_input_files(files),
+        diagnostics_summary=summarize_diagnostics(report.diagnostics),
+        diagnostics=[d.to_dict() for d in report.diagnostics],
+        min_cobre_version=MIN_COBRE_VERSION,
+    )
 
-def summarize_diagnostics(diagnostics: list[Diagnostic]) -> dict[str, int]:
-    """Count *diagnostics* by severity value, omitting absent severities.
-
-    Returns a plain ``dict[str, int]`` keyed by ``severity.value`` (``"info"`` /
-    ``"warning"`` / ``"error"``); a severity with no diagnostics is absent from
-    the result rather than mapped to zero.
-    """
-    counts = Counter(diagnostic.severity.value for diagnostic in diagnostics)
-    return dict(counts)
+    path = dst / "conversion_manifest.json"
+    try:
+        manifest.to_json(path)
+    except OSError as exc:
+        print_status(
+            f"Warning: failed to write conversion manifest: {exc}",
+            console=console,
+            style="#F5A623",
+        )
+    else:
+        print_status(f"Conversion manifest written to {path}", console=console)

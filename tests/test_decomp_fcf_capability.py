@@ -104,6 +104,9 @@ def test_ensure_boundary_fcf_capability_raises_when_delivery_date_missing(
         "stage_cuts": [
             {
                 "stage_id": 0,
+                "cost_scale_factor": 1.0,
+                "node_id": 0,
+                "graph_stage_id": 0,
                 "entity_manifest": [
                     {
                         "entity_type": 0,
@@ -128,6 +131,48 @@ def test_ensure_boundary_fcf_capability_raises_when_delivery_date_missing(
         assert marker in str(exc_info.value)
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert "delivery_date" in str(exc_info.value.__cause__)
+
+
+def test_ensure_boundary_fcf_capability_raises_when_cost_scale_factor_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC 2 (failure variant) -- a wheel that writes and reloads fine, and
+    whose reloaded terminal pool carries `delivery_date` on its manifest
+    slot, but whose reloaded terminal pool itself omits `cost_scale_factor`
+    (a wheel that drops the self-describing fields on reload) still raises --
+    proving the probe checks the pool-level fields, not merely the slot-level
+    `delivery_date`.
+    """
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "node_id": 0,
+                "graph_stage_id": 0,
+                "entity_manifest": [
+                    {
+                        "entity_type": 0,
+                        "entity_id": 0,
+                        "subindex": 0,
+                        "was_active": True,
+                    }
+                ],
+            }
+        ]
+    }
+    stub_cobre = SimpleNamespace(
+        write_policy_checkpoint=lambda *args, **kwargs: None,
+        results=SimpleNamespace(load_policy=lambda *args, **kwargs: fake_policy),
+    )
+    monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ensure_boundary_fcf_capability()
+
+    for marker in _REMEDIATION_MARKERS:
+        assert marker in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "cost_scale_factor" in str(exc_info.value.__cause__)
 
 
 def test_capability_module_imports_with_cobre_absent(

@@ -9,8 +9,11 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
+from cobre_bridge import diagnostics as dx
+from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.constraints import (
     _curve_seasonalizes,
+    _ElectricTermSkip,
     _is_stored_energy_reservoir,
     _parse_formula,
     _vminop_energy_factor,
@@ -23,9 +26,39 @@ from cobre_bridge.converters.constraints import (
 )
 from cobre_bridge.converters.network import C_M3S2HM3
 from cobre_bridge.converters.scalar_parameters import build_scalar_parameters
+from cobre_bridge.diagnostics import Severity, finalize_diagnostics
+from cobre_bridge.generic_constraint_builder import (
+    GENERIC_BOUNDS_SCHEMA,
+    ConstraintIdAllocator,
+)
 from cobre_bridge.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
 from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
+
+# The remediation/summary/title/notes strings constraints.py emits reach a
+# pip-installed user with no repo checkout — none may leak a repo-internal
+# reference (mirrors test_decomp_fcf_capability.py's own marker scan, plus the
+# two extra markers the migration ticket calls out).
+_REPO_INTERNAL_LEAKS = (
+    "docs/",
+    "plans/",
+    "~/git",
+    "feat/",
+    "ticket-",
+    "epic-",
+    "src/",
+    ".py",
+)
+
+
+def _assert_no_repo_internal_leaks(collected: list[dx.Diagnostic]) -> None:
+    for diag in collected:
+        strings = [diag.title, diag.summary, *diag.notes]
+        if diag.remediation is not None:
+            strings.append(diag.remediation)
+        for s in strings:
+            for leak in _REPO_INTERNAL_LEAKS:
+                assert leak not in s, f"diagnostic {diag.code!r} leaks {leak!r}: {s!r}"
 
 
 def _make_cadastro() -> pd.DataFrame:
@@ -142,6 +175,43 @@ class TestNonFixaPenalizationWarning:
 
     def test_malformed_first_field_does_not_warn(self) -> None:
         assert _warn_if_non_fixa_penalization(["x"]) is False
+
+    def test_non_fixa_emits_structured_warning_diagnostic(self) -> None:
+        with dx.collect() as collected:
+            fired = _warn_if_non_fixa_penalization([1, 11, 1])
+
+        assert fired is True
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.code == "vminop-penalization-not-fixa"
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Special constraints"
+        assert "non-FIXA" in diag.summary
+
+    def test_fixa_emits_structured_info_diagnostic(self) -> None:
+        with dx.collect() as collected:
+            fired = _warn_if_non_fixa_penalization([0, 11, 1])
+
+        assert fired is False
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.code == "vminop-penalization-fixa"
+        assert diag.severity is Severity.INFO
+        assert diag.category == "Special constraints"
+        assert "FIXA" in diag.summary
+        assert "matches" in diag.summary
+
+    def test_non_fixa_no_sink_fallback_logs_one_warning(self, caplog) -> None:
+        """With no active collect() sink, emit() degrades to a single logging
+        record — the pre-migration caplog contract keeps working."""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            _warn_if_non_fixa_penalization([1, 11, 1])
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+        assert "non-FIXA" in warnings[0].message
 
 
 class TestCurveSeasonalizes:
@@ -457,6 +527,135 @@ class TestConvertVminopConstraints:
         assert convert_vminop_constraints(case, id_map) is None
 
 
+def _make_vminop_no_hydro_case(tmp_path: Path) -> tuple[NewaveCase, NewaveIdMap]:
+    """A VminOP case where REE 1 has a curva.dat entry but zero hydro plants."""
+    from datetime import datetime as _dt
+    from unittest.mock import MagicMock
+
+    dger = MagicMock()
+    dger.mes_inicio_estudo = 1
+    dger.ano_inicio_estudo = 2020
+    dger.num_anos_estudo = 1
+    dger.num_anos_pos_estudo = 0
+    dger.curva_aversao = 1
+
+    curva = MagicMock()
+    curva.curva_seguranca = pd.DataFrame(
+        {"codigo_ree": [1], "data": [_dt(2020, 1, 1)], "valor": [50.0]}
+    )
+    curva.configuracoes_penalizacao = [0, 11, 1]
+    curva.custos_penalidades = None
+
+    confhd = MagicMock()
+    confhd.usinas = pd.DataFrame(
+        columns=[
+            "codigo_usina",
+            "nome_usina",
+            "usina_existente",
+            "codigo_usina_jusante",
+            "ree",
+            "posto",
+            "volume_inicial_percentual",
+        ]
+    )
+
+    hidr = MagicMock()
+    hidr.cadastro = pd.DataFrame()
+
+    ree = MagicMock()
+    ree.rees = pd.DataFrame({"codigo": [1], "nome": ["SUDESTE"]})
+
+    case = make_case(
+        tmp_path, dger=dger, curva=curva, confhd=confhd, hidr=hidr, ree=ree
+    )
+    id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
+    return case, id_map
+
+
+class TestConvertVminopConstraintsEmission:
+    """Emission-shape coverage for the two loop-accumulated VminOP diagnostics."""
+
+    def test_ree_with_no_hydro_plants_emits_not_expressible(
+        self, tmp_path: Path
+    ) -> None:
+        case, id_map = _make_vminop_no_hydro_case(tmp_path)
+
+        with dx.collect() as collected:
+            result = convert_vminop_constraints(case, id_map)
+
+        assert result is None  # no constraint survives -> builder.result() is None
+        by_code = {d.code: d for d in collected}
+        assert set(by_code) == {
+            "vminop-penalization-fixa",
+            "vminop-ree-not-expressible",
+        }
+        diag = by_code["vminop-ree-not-expressible"]
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Special constraints"
+        assert diag.table is not None
+        assert diag.table.columns == ["REE", "Name", "Reason"]
+        assert len(diag.table.rows) == 1
+        assert diag.table.rows[0][0] == 1
+        assert diag.table.rows[0][1] == "SUDESTE"
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_nonpositive_penalty_emits_clamp_diagnostic(self, tmp_path: Path) -> None:
+        from datetime import datetime as _dt
+        from unittest.mock import MagicMock
+
+        cadastro = _make_cadastro()
+        cadastro["tipo_regulacao"] = "M"  # stored-energy reservoirs (EARM set)
+        confhd_df = _make_confhd_df()
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1
+        dger.num_anos_pos_estudo = 0
+        dger.curva_aversao = 1
+
+        curva = MagicMock()
+        curva.curva_seguranca = pd.DataFrame(
+            {"codigo_ree": [1], "data": [_dt(2020, 1, 1)], "valor": [50.0]}
+        )
+        curva.configuracoes_penalizacao = [0, 11, 1]
+        curva.custos_penalidades = pd.DataFrame(
+            {"codigo_ree": [1], "penalidade": [-5.0]}
+        )
+
+        confhd = MagicMock()
+        confhd.usinas = confhd_df
+
+        hidr = MagicMock()
+        hidr.cadastro = cadastro
+
+        ree = MagicMock()
+        ree.rees = pd.DataFrame({"codigo": [1], "nome": ["SUDESTE"]})
+
+        case = make_case(
+            tmp_path, dger=dger, curva=curva, confhd=confhd, hidr=hidr, ree=ree
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2, 3], thermal_codes=[])
+
+        with dx.collect() as collected:
+            result = convert_vminop_constraints(case, id_map)
+
+        assert result is not None
+        by_code = {d.code: d for d in collected}
+        assert "vminop-penalty-nonpositive" in by_code
+        diag = by_code["vminop-penalty-nonpositive"]
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Special constraints"
+        assert diag.table is not None
+        assert diag.table.columns == ["REE", "Name", "Declared", "Applied"]
+        assert diag.table.rows == [[1, "SUDESTE", -5.0, 1000.0]]
+
+        _assert_no_repo_internal_leaks(collected)
+
+        _assert_no_repo_internal_leaks(collected)
+
+
 # ---------------------------------------------------------------------------
 # _parse_formula unit tests
 # ---------------------------------------------------------------------------
@@ -489,7 +688,9 @@ class TestParseFormula:
         """Single hydro generation term with implicit coefficient."""
         id_map = self._id_map()
         line_map = self._line_map()
-        result = _parse_formula("ger_usih(285) + ger_usih(287)", id_map, line_map)
+        result = _parse_formula(
+            "ger_usih(285) + ger_usih(287)", id_map, line_map, constraint_code=1
+        )
         assert result is not None
         assert "hydro_generation(" in result
         # Both plants must appear; no coefficient prefix for coeff=1.0
@@ -499,7 +700,7 @@ class TestParseFormula:
         """Coefficient of 0.5 must appear in the expression."""
         id_map = self._id_map()
         line_map = self._line_map()
-        result = _parse_formula("0.5ger_usih(66)", id_map, line_map)
+        result = _parse_formula("0.5ger_usih(66)", id_map, line_map, constraint_code=1)
         assert result is not None
         assert "0.5 * hydro_generation(" in result
 
@@ -512,7 +713,9 @@ class TestParseFormula:
         """
         id_map = self._id_map()
         line_map = self._line_map()
-        result = _parse_formula("1.0ener_interc(1,2)", id_map, line_map)
+        result = _parse_formula(
+            "1.0ener_interc(1,2)", id_map, line_map, constraint_code=1
+        )
         assert result is not None
         assert "line_direct(0)" in result
         assert "line_reverse" not in result
@@ -522,7 +725,9 @@ class TestParseFormula:
         """ener_interc(B,A) with B>A (reverse of canonical) emits ``line_reverse``."""
         id_map = self._id_map()
         line_map = self._line_map()
-        result = _parse_formula("1.0ener_interc(2,1)", id_map, line_map)
+        result = _parse_formula(
+            "1.0ener_interc(2,1)", id_map, line_map, constraint_code=1
+        )
         assert result is not None
         assert "line_reverse(0)" in result
         # No legacy signed line_exchange in the new output.
@@ -531,18 +736,67 @@ class TestParseFormula:
         assert "- " not in result
 
     def test_unknown_hydro_code_skipped(self) -> None:
-        """Unknown hydro code produces a warning and the term is dropped."""
+        """Unknown hydro code drops the term (and, when recorded, is captured
+        as a ``hydro-unmapped`` skip naming the constraint and the code)."""
         id_map = self._id_map()
         line_map = self._line_map()
-        result = _parse_formula("ger_usih(9999)", id_map, line_map)
+        skipped: list[_ElectricTermSkip] = []
+        result = _parse_formula(
+            "ger_usih(9999)", id_map, line_map, constraint_code=7, skipped=skipped
+        )
         assert result is None  # all terms dropped => None
+        assert len(skipped) == 1
+        assert skipped[0].constraint_code == 7
+        assert skipped[0].kind == "hydro-unmapped"
+        assert skipped[0].source == "formula"
+        assert skipped[0].hydro_code == 9999
+
+    def test_unknown_hydro_code_not_recorded_by_default(self) -> None:
+        """The default ``skipped=None`` records nothing — the seam that keeps
+        a direct unit-test call unchanged."""
+        id_map = self._id_map()
+        line_map = self._line_map()
+        result = _parse_formula("ger_usih(9999)", id_map, line_map, constraint_code=1)
+        assert result is None
+
+    def test_ener_interc_malformed_args_recorded(self) -> None:
+        """``ener_interc`` with fewer than 2 args is dropped and recorded as
+        ``malformed``, carrying the raw argument fragment."""
+        id_map = self._id_map()
+        line_map = self._line_map()
+        skipped: list[_ElectricTermSkip] = []
+        result = _parse_formula(
+            "ener_interc(1)", id_map, line_map, constraint_code=3, skipped=skipped
+        )
+        assert result is None
+        assert len(skipped) == 1
+        assert skipped[0].kind == "malformed"
+        assert skipped[0].raw == "1"
+
+    def test_ener_interc_no_line_recorded(self) -> None:
+        """An interchange pair with no matching cobre line is dropped and
+        recorded as ``no-line``, naming both subsystems."""
+        id_map = self._id_map()
+        line_map = self._line_map()
+        skipped: list[_ElectricTermSkip] = []
+        result = _parse_formula(
+            "ener_interc(2,3)", id_map, line_map, constraint_code=5, skipped=skipped
+        )
+        assert result is None
+        assert len(skipped) == 1
+        assert skipped[0].kind == "no-line"
+        assert skipped[0].sys_from == 2
+        assert skipped[0].sys_to == 3
 
     def test_mixed_formula(self) -> None:
         """Mixed ener_interc and ger_usih terms are both translated."""
         id_map = self._id_map()
         line_map = self._line_map()
         result = _parse_formula(
-            "1.0ener_interc(2,1) + 0.5ger_usih(66)", id_map, line_map
+            "1.0ener_interc(2,1) + 0.5ger_usih(66)",
+            id_map,
+            line_map,
+            constraint_code=1,
         )
         assert result is not None
         # ener_interc(2,1) → reverse direction → line_reverse
@@ -553,6 +807,42 @@ class TestParseFormula:
 # ---------------------------------------------------------------------------
 # convert_electric_constraints integration tests
 # ---------------------------------------------------------------------------
+
+
+def _make_electric_re_case(tmp_path: Path) -> tuple[NewaveCase, NewaveIdMap]:
+    """Return a ``(case, id_map)`` pair for a single-code electric constraint:
+    ``indices.csv`` -> ``restricao-eletrica.csv`` declaring a two-sided
+    ``[50, 200]`` limit on ``ger_usih(10)`` over 2020, with ``dger``/``sistema``
+    mocked to a 1-year 2020 study carrying no exchange/deficit data.
+    """
+    from unittest.mock import MagicMock
+
+    indices = tmp_path / "indices.csv"
+    indices.write_text(
+        "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
+        encoding="latin-1",
+    )
+    re_path = tmp_path / "restricao-eletrica.csv"
+    re_path.write_text(
+        "RE;1;1.0ger_usih(10)\n"
+        "RE-HORIZ-PER;1;2020/01;2020/12\n"
+        "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
+        encoding="latin-1",
+    )
+
+    dger = MagicMock()
+    dger.mes_inicio_estudo = 1
+    dger.ano_inicio_estudo = 2020
+    dger.num_anos_estudo = 1
+    dger.num_anos_pos_estudo = 0
+
+    sistema = MagicMock()
+    sistema.limites_intercambio = None
+    sistema.custo_deficit = None
+
+    case = make_case(tmp_path, dger=dger, sistema=sistema, re_dat=None)
+    id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+    return case, id_map
 
 
 class TestConvertElectricConstraints:
@@ -582,33 +872,7 @@ class TestConvertElectricConstraints:
         unlike the DECOMP ``_GenericBuilder``, which does collapse a genuine
         band into one id). Each keeps today's row semantics: one endpoint
         populated, the other null (AC1/AC2)."""
-        from unittest.mock import MagicMock
-
-        indices = tmp_path / "indices.csv"
-        indices.write_text(
-            "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
-            encoding="latin-1",
-        )
-        re_path = tmp_path / "restricao-eletrica.csv"
-        re_path.write_text(
-            "RE;1;1.0ger_usih(10)\n"
-            "RE-HORIZ-PER;1;2020/01;2020/12\n"
-            "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
-            encoding="latin-1",
-        )
-
-        dger = MagicMock()
-        dger.mes_inicio_estudo = 1
-        dger.ano_inicio_estudo = 2020
-        dger.num_anos_estudo = 1
-        dger.num_anos_pos_estudo = 0
-
-        sistema = MagicMock()
-        sistema.limites_intercambio = None
-        sistema.custo_deficit = None
-
-        case = make_case(tmp_path, dger=dger, sistema=sistema, re_dat=None)
-        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+        case, id_map = _make_electric_re_case(tmp_path)
 
         result = convert_electric_constraints(case, id_map)
 
@@ -642,6 +906,418 @@ class TestConvertElectricConstraints:
         upper_ids = {r["constraint_id"] for r in upper_rows}
         assert lower_ids != upper_ids
         assert lower_ids | upper_ids == set(by_cid)
+
+    def test_bounds_schema_matches_canonical_generic_bounds_schema(
+        self, tmp_path: Path
+    ) -> None:
+        """NEWAVE's emitted bounds table now shares the canonical
+        ``GENERIC_BOUNDS_SCHEMA`` (``constraint_id``/``stage_id`` non-nullable)
+        instead of the legacy bare-``pa.table`` schema (all-nullable) — both
+        tracks route through the same ``GenericConstraintBuilder``, so NEWAVE
+        now matches DECOMP's schema strictness. This is a deliberate,
+        data-safe tightening (neither column is ever actually null on either
+        track), pinned here so it stays intentional rather than drifting."""
+        case, id_map = _make_electric_re_case(tmp_path)
+
+        result = convert_electric_constraints(case, id_map)
+
+        assert result is not None
+        assert result.bounds.schema.equals(GENERIC_BOUNDS_SCHEMA)
+
+
+def _valid_ree_reader():
+    """A REE.DAT reader with a clean individualizado cutoff (no diagnostic)."""
+    from unittest.mock import MagicMock
+
+    ree = MagicMock()
+    ree.rees = pd.DataFrame(
+        {
+            "codigo": [1],
+            "nome": ["SUDESTE"],
+            "mes_fim_individualizado": [12],
+            "ano_fim_individualizado": [2020],
+        }
+    )
+    return ree
+
+
+class TestConvertElectricConstraintsEmission:
+    """Emission-shape coverage for convert_electric_constraints' diagnostics."""
+
+    def test_hydro_unmapped_from_formula_and_re_dat_sources(
+        self, tmp_path: Path
+    ) -> None:
+        """AC: one hydro-unmapped term from a formula and one from an
+        RE.DAT-only constraint both land in the same diagnostic, with the
+        Source column distinguishing them."""
+        from unittest.mock import MagicMock
+
+        indices = tmp_path / "indices.csv"
+        indices.write_text(
+            "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
+            encoding="latin-1",
+        )
+        re_path = tmp_path / "restricao-eletrica.csv"
+        re_path.write_text(
+            "RE;1;1.0ger_usih(10) + 1.0ger_usih(9999)\n"
+            "RE-HORIZ-PER;1;2020/01;2020/12\n"
+            "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
+            encoding="latin-1",
+        )
+
+        re_dat_reader = MagicMock()
+        re_dat_reader.usinas_conjuntos = pd.DataFrame(
+            {"conjunto": [2, 2], "codigo_usina": [10, 9998]}
+        )
+        re_dat_reader.restricoes = pd.DataFrame(
+            {
+                "conjunto": [2],
+                "mes_inicio": [1],
+                "ano_inicio": [2020],
+                "mes_fim": [12],
+                "ano_fim": [2020],
+                "patamar": [0],
+                "restricao": [500.0],
+            }
+        )
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1
+        dger.num_anos_pos_estudo = 0
+
+        sistema = MagicMock()
+        sistema.limites_intercambio = None
+        sistema.custo_deficit = None
+
+        files = make_nw_files(tmp_path, re_dat=tmp_path / "RE.DAT")
+        case = make_case(
+            files,
+            dger=dger,
+            sistema=sistema,
+            re_dat=re_dat_reader,
+            ree=_valid_ree_reader(),
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+
+        with dx.collect() as collected:
+            result = convert_electric_constraints(case, id_map)
+
+        assert result is not None
+        by_code = {d.code: d for d in collected}
+        diag = by_code["electric-constraint-hydro-unmapped"]
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Special constraints"
+        assert diag.table is not None
+        assert diag.table.columns == ["Constraint", "Hydro code", "Source"]
+        rows = {(r[1], r[2]) for r in diag.table.rows}
+        assert rows == {(9999, "formula"), (9998, "RE.DAT")}
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_interchange_no_line_recorded(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        indices = tmp_path / "indices.csv"
+        indices.write_text(
+            "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
+            encoding="latin-1",
+        )
+        re_path = tmp_path / "restricao-eletrica.csv"
+        re_path.write_text(
+            "RE;1;1.0ger_usih(10) + 1.0ener_interc(2,3)\n"
+            "RE-HORIZ-PER;1;2020/01;2020/12\n"
+            "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
+            encoding="latin-1",
+        )
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1
+        dger.num_anos_pos_estudo = 0
+
+        sistema = MagicMock()
+        sistema.limites_intercambio = None
+        sistema.custo_deficit = None
+
+        case = make_case(
+            tmp_path,
+            dger=dger,
+            sistema=sistema,
+            re_dat=None,
+            ree=_valid_ree_reader(),
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+
+        with dx.collect() as collected:
+            result = convert_electric_constraints(case, id_map)
+
+        assert result is not None
+        by_code = {d.code: d for d in collected}
+        diag = by_code["electric-constraint-interchange-no-line"]
+        assert diag.table is not None
+        assert diag.table.columns == ["Constraint", "From", "To"]
+        assert diag.table.rows == [[1, 2, 3]]
+        assert diag.remediation is not None
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_malformed_term_recorded(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        indices = tmp_path / "indices.csv"
+        indices.write_text(
+            "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
+            encoding="latin-1",
+        )
+        re_path = tmp_path / "restricao-eletrica.csv"
+        re_path.write_text(
+            "RE;1;1.0ger_usih(10) + 1.0ener_interc(2)\n"
+            "RE-HORIZ-PER;1;2020/01;2020/12\n"
+            "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
+            encoding="latin-1",
+        )
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1
+        dger.num_anos_pos_estudo = 0
+
+        sistema = MagicMock()
+        sistema.limites_intercambio = None
+        sistema.custo_deficit = None
+
+        case = make_case(
+            tmp_path,
+            dger=dger,
+            sistema=sistema,
+            re_dat=None,
+            ree=_valid_ree_reader(),
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+
+        with dx.collect() as collected:
+            result = convert_electric_constraints(case, id_map)
+
+        assert result is not None
+        by_code = {d.code: d for d in collected}
+        diag = by_code["electric-constraint-malformed-term"]
+        assert diag.table is not None
+        assert diag.table.columns == ["Constraint", "Term"]
+        assert diag.table.rows == [[1, "2"]]
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_constraint_skipped_no_valid_terms_and_no_bound_data(
+        self, tmp_path: Path
+    ) -> None:
+        """Two constraint codes hit the two ``electric-constraint-skipped``
+        reasons: code 1 has only an unmapped hydro term (no valid terms);
+        code 2 has a valid expression but a horizon carrying no bound rows."""
+        from unittest.mock import MagicMock
+
+        indices = tmp_path / "indices.csv"
+        indices.write_text(
+            "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
+            encoding="latin-1",
+        )
+        re_path = tmp_path / "restricao-eletrica.csv"
+        re_path.write_text(
+            "RE;1;1.0ger_usih(9999)\n"
+            "RE;2;1.0ger_usih(10)\n"
+            "RE-HORIZ-PER;1;2020/01;2020/12\n"
+            "RE-HORIZ-PER;2;2020/01;2020/12\n"
+            "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
+            encoding="latin-1",
+        )
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1
+        dger.num_anos_pos_estudo = 0
+
+        sistema = MagicMock()
+        sistema.limites_intercambio = None
+        sistema.custo_deficit = None
+
+        case = make_case(
+            tmp_path,
+            dger=dger,
+            sistema=sistema,
+            re_dat=None,
+            ree=_valid_ree_reader(),
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+
+        with dx.collect() as collected:
+            result = convert_electric_constraints(case, id_map)
+
+        assert result is None  # both codes dropped -> no surviving constraint
+        by_code = {d.code: d for d in collected}
+        diag = by_code["electric-constraint-skipped"]
+        assert diag.table is not None
+        assert diag.table.columns == ["Constraint", "Reason"]
+        reasons = {r[0]: r[1] for r in diag.table.rows}
+        assert reasons[1] == "no valid terms in expression"
+        assert reasons[2] == "no bound data"
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_electric_penalty_unreadable_records_exception_text(
+        self, tmp_path: Path
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        class _BadPenalid:
+            @property
+            def penalidades(self) -> pd.DataFrame:
+                raise ValueError("corrupt PENALID.DAT")
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1
+        dger.num_anos_pos_estudo = 0
+
+        sistema = MagicMock()
+        sistema.limites_intercambio = None
+        sistema.custo_deficit = None
+
+        files = make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat")
+        indices = tmp_path / "indices.csv"
+        indices.write_text(
+            "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
+            encoding="latin-1",
+        )
+        re_path = tmp_path / "restricao-eletrica.csv"
+        re_path.write_text(
+            "RE;1;1.0ger_usih(10)\n"
+            "RE-HORIZ-PER;1;2020/01;2020/12\n"
+            "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
+            encoding="latin-1",
+        )
+
+        case = make_case(
+            files,
+            dger=dger,
+            sistema=sistema,
+            re_dat=None,
+            penalid=_BadPenalid(),
+            ree=_valid_ree_reader(),
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+
+        with dx.collect() as collected:
+            result = convert_electric_constraints(case, id_map)
+
+        assert result is not None
+        by_code = {d.code: d for d in collected}
+        diag = by_code["electric-penalty-unreadable"]
+        assert diag.severity is Severity.WARNING
+        assert diag.table is None
+        assert diag.notes == ["corrupt PENALID.DAT"]
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_re_dat_unreadable_records_diagnostic(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        indices = tmp_path / "indices.csv"
+        indices.write_text(
+            "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
+            encoding="latin-1",
+        )
+        re_path = tmp_path / "restricao-eletrica.csv"
+        re_path.write_text(
+            "RE;1;1.0ger_usih(10)\n"
+            "RE-HORIZ-PER;1;2020/01;2020/12\n"
+            "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
+            encoding="latin-1",
+        )
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1
+        dger.num_anos_pos_estudo = 0
+
+        sistema = MagicMock()
+        sistema.limites_intercambio = None
+        sistema.custo_deficit = None
+
+        files = make_nw_files(tmp_path, re_dat=tmp_path / "RE.DAT")
+        case = NewaveCase(files=files)
+        case.__dict__["dger"] = dger
+        case.__dict__["sistema"] = sistema
+        case.__dict__["ree"] = _valid_ree_reader()
+        case.__dict__["hidr"] = MagicMock(cadastro=pd.DataFrame())
+        # ``case.re_dat`` is a cached_property; deleting the pre-seeded slot and
+        # patching the class descriptor to raise reproduces a genuine read
+        # failure without touching disk.
+        with patch.object(
+            NewaveCase, "re_dat", property(lambda self: (_ for _ in ()).throw(OSError))
+        ):
+            id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+
+            with dx.collect() as collected:
+                result = convert_electric_constraints(case, id_map)
+
+        assert result is not None
+        by_code = {d.code: d for d in collected}
+        diag = by_code["re-dat-unreadable"]
+        assert diag.severity is Severity.WARNING
+        assert "skipped" in diag.summary
+
+        _assert_no_repo_internal_leaks(collected)
+
+    def test_individualizado_cutoff_unknown_no_entries(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        indices = tmp_path / "indices.csv"
+        indices.write_text(
+            "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
+            encoding="latin-1",
+        )
+        re_path = tmp_path / "restricao-eletrica.csv"
+        re_path.write_text(
+            "RE;1;1.0ger_usih(10)\n"
+            "RE-HORIZ-PER;1;2020/01;2020/12\n"
+            "RE-LIM-FORM-PER-PAT;1;2020/01;2020/12;1;50.;200.\n",
+            encoding="latin-1",
+        )
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1
+        dger.num_anos_pos_estudo = 0
+
+        sistema = MagicMock()
+        sistema.limites_intercambio = None
+        sistema.custo_deficit = None
+
+        empty_ree = MagicMock()
+        empty_ree.rees = pd.DataFrame()
+
+        case = make_case(
+            tmp_path, dger=dger, sistema=sistema, re_dat=None, ree=empty_ree
+        )
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+
+        with dx.collect() as collected:
+            result = convert_electric_constraints(case, id_map)
+
+        assert result is not None
+        by_code = {d.code: d for d in collected}
+        diag = by_code["individualizado-cutoff-unknown"]
+        assert diag.severity is Severity.WARNING
+        assert diag.table is None
+
+        _assert_no_repo_internal_leaks(collected)
 
 
 # ---------------------------------------------------------------------------
@@ -722,7 +1398,7 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value=fake_line_map,
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         constraints, bounds_table = result
@@ -743,15 +1419,15 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         for c in result[0]:
             assert set(c) == {"id", "name", "description", "expression", "slack"}
             assert c["slack"]["enabled"] is False
 
-    def test_start_id_offset_applied(self, tmp_path: Path) -> None:
-        """start_id is added to all constraint IDs."""
+    def test_allocator_offset_applied(self, tmp_path: Path) -> None:
+        """A non-default allocator's starting id is added to all constraint IDs."""
         agrint_path = tmp_path / "agrint.dat"
         agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
         (tmp_path / "dger.dat").touch()
@@ -765,8 +1441,10 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
-            result_0 = convert_agrint_constraints(case, id_map, start_id=0)
-            result_5 = convert_agrint_constraints(case, id_map, start_id=5)
+            result_0 = convert_agrint_constraints(case, id_map)
+            result_5 = convert_agrint_constraints(
+                case, id_map, allocator=ConstraintIdAllocator(5)
+            )
 
         assert result_0 is not None and result_5 is not None
         ids_0 = [c["id"] for c in result_0[0]]
@@ -788,7 +1466,7 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         _, bounds_table = result
@@ -832,7 +1510,7 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         _, bounds = result
@@ -888,7 +1566,7 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 11): 3, (3, 11): 4},
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         constraints, _ = result
@@ -924,7 +1602,7 @@ class TestConvertAgrintConstraints:
             "cobre_bridge.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
-            result = convert_agrint_constraints(case, id_map, start_id=0)
+            result = convert_agrint_constraints(case, id_map)
 
         assert result is not None
         # Group 1: flow(1->3), canonical (1,3) => line_direct, no leading '-'.
@@ -940,12 +1618,110 @@ class TestConvertAgrintConstraints:
         assert not c2["expression"].startswith("-")
 
 
+class TestConvertAgrintConstraintsEmission:
+    """Emission-shape coverage for convert_agrint_constraints' diagnostics."""
+
+    def test_no_line_and_empty_group_both_recorded(self, tmp_path: Path) -> None:
+        """Group 1 has one resolvable term and one unresolvable term (dropped,
+        recorded); group 2 has only an unresolvable term (the whole group is
+        dropped, recorded separately)."""
+        content = (
+            "AGRUPAMENTOS DE INTERCAMBIO\n"
+            " #AG A   B   COEF\n"
+            " XXX XXX XXX XX.XXXX\n"
+            "   1   1   3  1.0000\n"
+            "   1   2   9  1.0000\n"
+            "   2   5   6  1.0000\n"
+            " 999\n"
+            "LIMITES POR GRUPO\n"
+            "  #AG MI ANOI MF ANOF LIM_P1  LIM_P2  LIM_P3\n"
+            " XXX  XX XXXX XX XXXX XXXXXX. XXXXXX. XXXXXX.\n"
+            "   1   1 2020 12 2020  10000.  10000.  10000.\n"
+            "   2   1 2020 12 2020   5000.   5000.   5000.\n"
+            " 999\n"
+        )
+        agrint_path = tmp_path / "agrint.dat"
+        agrint_path.write_text(content, encoding="latin-1")
+        (tmp_path / "dger.dat").touch()
+
+        case = _make_minimal_case(
+            tmp_path, agrint=agrint_path, dger=_make_dger_mock_for_agrint()
+        )
+        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
+
+        with patch(
+            "cobre_bridge.converters.constraints._build_line_id_map",
+            return_value={(1, 3): 0},
+        ):
+            with dx.collect() as collected:
+                result = convert_agrint_constraints(case, id_map)
+
+        assert result is not None  # group 1 still yields a constraint
+        by_code = {d.code: d for d in collected}
+
+        no_line = by_code["agrint-interchange-no-line"]
+        assert no_line.severity is Severity.WARNING
+        assert no_line.category == "Special constraints"
+        assert no_line.table is not None
+        assert no_line.table.columns == ["Group", "From", "To"]
+        # Group 2's only term is also unresolvable, so it is recorded here too
+        # (per-term), in addition to the whole-group record below.
+        assert no_line.table.rows == [[1, 2, 9], [2, 5, 6]]
+
+        empty_group = by_code["agrint-group-empty"]
+        assert empty_group.table is not None
+        assert empty_group.table.columns == ["Group"]
+        assert empty_group.table.rows == [[2]]
+
+        _assert_no_repo_internal_leaks(collected)
+
+
+class TestNewaveCrossEmitterAllocatorContiguity:
+    """Threading one ``ConstraintIdAllocator`` across emitter calls (as the
+    pipeline does) keeps ids contiguous, closing the old per-emitter
+    ``start_id`` arithmetic's gap-on-skip risk."""
+
+    def test_electric_then_agrint_share_contiguous_ids(self, tmp_path: Path) -> None:
+        electric_case, electric_id_map = _make_electric_re_case(tmp_path)
+
+        agrint_dir = tmp_path / "agrint_case"
+        agrint_dir.mkdir()
+        agrint_path = agrint_dir / "agrint.dat"
+        agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
+        (agrint_dir / "dger.dat").touch()
+        agrint_case = _make_minimal_case(
+            agrint_dir, agrint=agrint_path, dger=_make_dger_mock_for_agrint()
+        )
+        agrint_id_map = NewaveIdMap(
+            subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[]
+        )
+
+        allocator = ConstraintIdAllocator()
+        with patch(
+            "cobre_bridge.converters.constraints._build_line_id_map",
+            return_value={(1, 3): 0},
+        ):
+            electric_result = convert_electric_constraints(
+                electric_case, electric_id_map, allocator=allocator
+            )
+            agrint_result = convert_agrint_constraints(
+                agrint_case, agrint_id_map, allocator=allocator
+            )
+
+        assert electric_result is not None and agrint_result is not None
+        electric_ids = [c["id"] for c in electric_result.constraints]
+        agrint_ids = [c["id"] for c in agrint_result.constraints]
+        # The two-sided bound still yields two single-sided ids under the
+        # shared allocator (Req 3's byte-preservation is unaffected by Req 5's
+        # id-threading change).
+        assert len(electric_ids) == 2
+        assert min(agrint_ids) == max(electric_ids) + 1
+
+
 class TestConstraintResultTypes:
     """The constraint converters return named tuples (named + index access)."""
 
     def test_vminop_result_named_and_tuple_access(self) -> None:
-        import pyarrow as pa
-
         from cobre_bridge.converters.constraints import VminopResult
 
         bounds = pa.table({"constraint_id": [0]})
@@ -962,8 +1738,6 @@ class TestConstraintResultTypes:
         assert ids == [3, 4]
 
     def test_generic_constraint_result_named_and_tuple_access(self) -> None:
-        import pyarrow as pa
-
         from cobre_bridge.converters.constraints import GenericConstraintResult
 
         bounds = pa.table({"constraint_id": [0]})
@@ -1006,3 +1780,31 @@ class TestVminopEnergyFactor:
         # via the month-hours ratio instead (April = 30 d = 720 h).
         apr = _vminop_energy_factor(2025, 4, 0)
         assert apr == pytest.approx(C_M3S2HM3 * 720 / 730)
+
+
+class TestConstraintsNoLongerBridgesLegacyWarning:
+    """After the migration, constraints.py has no ``_LOG.warning(...)`` call
+    left to be swept into a generic ``legacy-warning`` panel (OQ3); the
+    residual bridge in :func:`finalize_diagnostics` still wraps an unrelated
+    captured legacy string, so that fallback path stays intact for any
+    not-yet-migrated module."""
+
+    def test_vminop_skip_under_collect_carries_no_legacy_warning(
+        self, tmp_path: Path
+    ) -> None:
+        case, id_map = _make_vminop_no_hydro_case(tmp_path)
+
+        with dx.collect() as collected:
+            convert_vminop_constraints(case, id_map)
+
+        assert not any(d.code == "legacy-warning" for d in collected)
+
+    def test_finalize_diagnostics_still_wraps_an_unrelated_legacy_string(
+        self,
+    ) -> None:
+        legacy_messages = ["some other warning"]
+        result = finalize_diagnostics([], legacy_messages)
+
+        assert len(result) == 1
+        assert result[0].code == "legacy-warning"
+        assert result[0].summary == "some other warning"

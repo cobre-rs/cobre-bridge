@@ -26,6 +26,7 @@ style). Covers:
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -37,6 +38,7 @@ from cobre_bridge.decomp.bounds_accumulator import (
     resolve,
 )
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintCensus,
     ConstraintRecord,
@@ -45,9 +47,11 @@ from cobre_bridge.decomp.constraint_registers import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.network import convert_pumping_stations, pumping_station_id_map
+from cobre_bridge.decomp.pipeline import _row_group_contributions
 from cobre_bridge.decomp.single_term_bounds import single_term_bound_contributions
 from cobre_bridge.decomp.temporal import OperativeStage
 from cobre_bridge.decomp.thermal import ThermalBounds, convert_thermal_bounds
+from tests.conftest import make_decomp_case
 
 
 class _StubDadger:
@@ -82,6 +86,10 @@ def _hidr_frame(code: int, **columns: float) -> pd.DataFrame:
 
 def _effective(hidr: pd.DataFrame, n_stages: int = 1) -> EffectiveCadastro:
     return EffectiveCadastro(base=hidr, n_stages=n_stages, stage_varying={})
+
+
+def _case(dadger: _StubDadger, calendar: list[OperativeStage]) -> DecompCase:
+    return make_decomp_case(Path("unused"), dadger=dadger, calendar=calendar)
 
 
 def _rq_dadger(pct_blocks: list[float], *, code: int = 1, ree: int = 1) -> _StubDadger:
@@ -132,7 +140,7 @@ class TestContributionNativeReturnTypes:
         effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0))
 
         contributions = convert_hydro_bounds(
-            _rq_dadger([50.0]), id_map, calendar, effective
+            _case(_rq_dadger([50.0]), calendar), id_map, effective=effective
         )
 
         assert isinstance(contributions, list)
@@ -147,7 +155,9 @@ class TestContributionNativeReturnTypes:
             stage_varying={(1, "volume_maximo"): (250.0,)},
         )
 
-        contributions = convert_storage_bounds(effective, id_map, calendar)
+        contributions = convert_storage_bounds(
+            _case(_StubDadger(), calendar), id_map, effective=effective
+        )
 
         assert isinstance(contributions, list)
         assert all(isinstance(c, BoundContribution) for c in contributions)
@@ -160,7 +170,7 @@ class TestContributionNativeReturnTypes:
         id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), thermal_codes=(1,))
 
         bounds = convert_thermal_bounds(
-            _ct_dadger([100.0, 100.0], [0.0, 0.0]), id_map, calendar
+            _case(_ct_dadger([100.0, 100.0], [0.0, 0.0]), calendar), id_map
         )
 
         assert isinstance(bounds, ThermalBounds)
@@ -185,7 +195,7 @@ class TestReplaceVsIntersectDiscipline:
         effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0))
 
         contributions = convert_hydro_bounds(
-            _rq_dadger([50.0, 50.0]), id_map, calendar, effective
+            _case(_rq_dadger([50.0, 50.0]), calendar), id_map, effective=effective
         )
 
         assert len(contributions) == 1
@@ -201,7 +211,7 @@ class TestReplaceVsIntersectDiscipline:
         effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0))
 
         contributions = convert_hydro_bounds(
-            _rq_dadger([100.0, 0.0]), id_map, calendar, effective
+            _case(_rq_dadger([100.0, 0.0]), calendar), id_map, effective=effective
         )
 
         assert len(contributions) == 2
@@ -214,7 +224,7 @@ class TestReplaceVsIntersectDiscipline:
         id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), thermal_codes=(1,))
 
         bounds = convert_thermal_bounds(
-            _ct_dadger([100.0, 100.0], [0.0, 0.0], cvu=10.0), id_map, calendar
+            _case(_ct_dadger([100.0, 100.0], [0.0, 0.0], cvu=10.0), calendar), id_map
         )
 
         assert len(bounds.generation) == 1
@@ -233,7 +243,7 @@ class TestReplaceVsIntersectDiscipline:
         id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), thermal_codes=(1,))
 
         bounds = convert_thermal_bounds(
-            _ct_dadger([100.0, 50.0], [0.0, 0.0], cvu=10.0), id_map, calendar
+            _case(_ct_dadger([100.0, 50.0], [0.0, 0.0], cvu=10.0), calendar), id_map
         )
 
         assert len(bounds.generation) == 2
@@ -256,7 +266,7 @@ class TestCollisionIntersection:
         effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0))
 
         rq_contribs = convert_hydro_bounds(
-            _rq_dadger([50.0]), id_map, calendar, effective
+            _case(_rq_dadger([50.0]), calendar), id_map, effective=effective
         )
         assert rq_contribs == [
             BoundContribution(
@@ -284,7 +294,12 @@ class TestCollisionIntersection:
             by_family={"HQ": (qdef_record,)}, to_bounds=(qdef_record,)
         )
         rhq_contribs = single_term_bound_contributions(
-            census, id_map, {}, calendar, effective, {}
+            _case(_StubDadger(), calendar),
+            id_map,
+            census=census,
+            pumping_station_ids={},
+            effective=effective,
+            hydro_capacities={},
         )
         assert len(rhq_contribs) == 1
 
@@ -299,6 +314,161 @@ class TestCollisionIntersection:
         assert row.axis == "outflow"
         assert row.lower == pytest.approx(30.0)  # max(20.0 RQ, 30.0 RHQ)
         assert row.upper is None
+
+    def test_line_direct_axis_collision_intersects_to_min_upper(self) -> None:
+        """A colliding pair on the ``line`` family's ``direct`` axis (now
+        routed through the accumulator, ticket-011) intersects to the
+        min-of-uppers -- an upper-only axis has no lower side to raise."""
+        contribs = [
+            BoundContribution(
+                family="line",
+                entity_id=0,
+                stage_id=0,
+                block_id=None,
+                axis="direct",
+                lower=None,
+                upper=500.0,
+                contributor="IA",
+            ),
+            BoundContribution(
+                family="line",
+                entity_id=0,
+                stage_id=0,
+                block_id=None,
+                axis="direct",
+                lower=None,
+                upper=300.0,
+                contributor="RE_12",
+            ),
+        ]
+
+        rows = resolve(contribs, {0: 1})
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.family == "line"
+        assert row.entity_id == 0
+        assert row.stage_id == 0
+        assert row.block_id is None
+        assert row.axis == "direct"
+        assert row.lower is None
+        assert row.upper == pytest.approx(300.0)  # min(500.0, 300.0)
+
+
+class TestRowGroupContributionsAsymmetricBaseOnlyColumn:
+    """``hydro_unit_group`` bounds can carry one axis side that varies per
+    block (``min_generation_mw``) alongside a sibling side that never does
+    (``max_generation_mw`` -- a base-only ceiling). ``_row_group_contributions``
+    must feed the base-only side into ``resolve()`` as its own base
+    contribution so it folds onto every materialized block row, rather than
+    being dropped along with the (block-varying) side's now-redundant base
+    average."""
+
+    def test_base_only_max_survives_onto_every_block_row(self) -> None:
+        rows = [
+            {
+                "hydro_unit_group_id": 0,
+                "stage_id": 0,
+                "block_id": None,
+                "min_turbined_m3s": None,
+                "max_turbined_m3s": None,
+                "min_generation_mw": 6300.0,
+                "max_generation_mw": 7000.0,
+            },
+            {
+                "hydro_unit_group_id": 0,
+                "stage_id": 0,
+                "block_id": 0,
+                "min_turbined_m3s": None,
+                "max_turbined_m3s": None,
+                "min_generation_mw": 6503.0,
+                "max_generation_mw": None,
+            },
+            {
+                "hydro_unit_group_id": 0,
+                "stage_id": 0,
+                "block_id": 1,
+                "min_turbined_m3s": None,
+                "max_turbined_m3s": None,
+                "min_generation_mw": 6139.0,
+                "max_generation_mw": None,
+            },
+        ]
+
+        contribs = _row_group_contributions(
+            rows,
+            family="hydro_unit_group",
+            id_column="hydro_unit_group_id",
+            axes=("turbined", "generation"),
+            contributor="group_bounds",
+        )
+
+        resolved = resolve(contribs, {0: 2})
+        generation_rows = {r.block_id: r for r in resolved if r.axis == "generation"}
+
+        assert set(generation_rows) == {0, 1}
+        assert all(row.block_id is not None for row in generation_rows.values())
+        assert generation_rows[0].lower == pytest.approx(6503.0)
+        assert generation_rows[0].upper == pytest.approx(7000.0)
+        assert generation_rows[1].lower == pytest.approx(6139.0)
+        assert generation_rows[1].upper == pytest.approx(7000.0)
+        # turbined has no value on either the base or the block rows --
+        # it must resolve to nothing, never a spurious empty row.
+        assert not any(row.axis == "turbined" for row in resolved)
+
+
+class TestWaterWithdrawalBaseOnlyAxis:
+    """AC3: ``("hydro", "water_withdrawal")`` is registered ``block_eligible =
+    False`` (ticket-010) — a hydro with a withdrawal value and no per-block
+    bound on the same (hydro, stage) must resolve to exactly the base row,
+    never a fabricated per-block row, even when the stage carries multiple
+    blocks. A deck that declares no withdrawal at all must leave
+    ``hydro_bounds`` untouched rather than resolving an empty contribution
+    list."""
+
+    def test_withdrawal_only_resolves_to_base_row_no_fabricated_blocks(
+        self,
+    ) -> None:
+        contribs = [
+            BoundContribution(
+                family="hydro",
+                entity_id=0,
+                stage_id=0,
+                block_id=None,
+                axis="water_withdrawal",
+                lower=12.5,
+                upper=None,
+                contributor="convert_irrigation_withdrawal",
+            )
+        ]
+
+        rows = resolve(contribs, {0: 3})
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.family == "hydro"
+        assert row.entity_id == 0
+        assert row.stage_id == 0
+        assert row.block_id is None
+        assert row.axis == "water_withdrawal"
+        assert row.lower == pytest.approx(12.5)
+        assert row.upper is None
+
+    def test_no_withdrawal_rows_is_a_noop(self) -> None:
+        """No accumulator resolution happens when the deck declares no
+        irrigation withdrawal -- ``hydro_bounds`` returns unchanged."""
+        import pyarrow as pa
+
+        from cobre_bridge.decomp.pipeline import _attach_water_withdrawal
+
+        hydro_bounds = pa.table(
+            {
+                "hydro_id": pa.array([1], pa.int32()),
+                "stage_id": pa.array([0], pa.int32()),
+                "block_id": pa.array([None], pa.int32()),
+            }
+        )
+        assert _attach_water_withdrawal(hydro_bounds, None, {0: 1}) is hydro_bounds
 
 
 class TestPumpingStationIdMapSingleAuthority:
@@ -337,7 +507,7 @@ class TestPumpingStationIdMapSingleAuthority:
         # Position in codigo_usina-sorted order: 10 -> 0, 30 -> 1.
         assert station_ids == {10: 0, 30: 1}
 
-        doc = convert_pumping_stations(dadger, id_map, date(2026, 7, 18))
+        doc = convert_pumping_stations(_case(dadger, [_stage(0, (10.0,))]), id_map)
         stations_by_name = {s["name"]: s for s in doc["pumping_stations"]}
         for name, code in (("UE30", 30), ("UE10", 10)):
             assert stations_by_name[name]["id"] == station_ids[code]
@@ -373,11 +543,15 @@ class TestByteIdenticalRegression:
         )
 
         hydro_contribs = [
-            *convert_hydro_bounds(_rq_dadger([50.0]), id_map, calendar, effective),
-            *convert_storage_bounds(effective, id_map, calendar),
+            *convert_hydro_bounds(
+                _case(_rq_dadger([50.0]), calendar), id_map, effective=effective
+            ),
+            *convert_storage_bounds(
+                _case(_StubDadger(), calendar), id_map, effective=effective
+            ),
         ]
         thermal_bounds = convert_thermal_bounds(
-            _ct_dadger([100.0, 100.0], [0.0, 0.0], cvu=10.0), id_map, calendar
+            _case(_ct_dadger([100.0, 100.0], [0.0, 0.0], cvu=10.0), calendar), id_map
         )
 
         block_counts = {stage.index: len(stage.block_hours) for stage in calendar}

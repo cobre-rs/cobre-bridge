@@ -12,13 +12,10 @@ from pathlib import Path
 import pytest
 
 import cobre_bridge
-from cobre_bridge.conversion_manifest import (
-    ConversionManifest,
-    hash_input_files,
-    summarize_diagnostics,
-)
+from cobre_bridge.conversion_manifest import ConversionManifest
 from cobre_bridge.conversion_manifest import git_sha as conversion_git_sha
 from cobre_bridge.diagnostics import Diagnostic, Severity
+from cobre_bridge.provenance_manifest import hash_input_files, summarize_diagnostics
 from tests.conftest import make_nw_files
 
 

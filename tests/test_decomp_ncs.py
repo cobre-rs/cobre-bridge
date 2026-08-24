@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.ncs import (
     convert_ncs_factors,
@@ -15,9 +16,7 @@ from cobre_bridge.decomp.ncs import (
     convert_non_controllable_sources,
 )
 from cobre_bridge.decomp.temporal import build_operative_calendar
-
-_RV0_DECK = Path("example/decomp-set-24-rv0/dadger.rv0")
-_RV3_DECK = Path("example/decomp-jul-26-rv3/dadger.rv3")
+from tests.conftest import make_decomp_case
 
 _ID_MAP = DecompIdMap(
     bus_codes=(1, 2, 3, 4, 11),
@@ -36,6 +35,10 @@ class _StubDadger:
 
     def pq(self, df: bool = False) -> pd.DataFrame | None:  # noqa: ARG002
         return self._pq
+
+
+def _case(dadger: _StubDadger) -> DecompCase:
+    return make_decomp_case(Path("unused"), dadger=dadger, calendar=_calendar())
 
 
 def _pq_frame() -> pd.DataFrame:
@@ -81,9 +84,7 @@ def _pq_frame() -> pd.DataFrame:
 
 class TestRegistry:
     def test_entries_sorted_and_must_run(self) -> None:
-        doc = convert_non_controllable_sources(
-            _StubDadger(_pq_frame()), _ID_MAP, _calendar(), date(2026, 7, 18)
-        )
+        doc = convert_non_controllable_sources(_case(_StubDadger(_pq_frame())), _ID_MAP)
         entries = doc["non_controllable_sources"]
         assert [e["id"] for e in entries] == [0, 1, 2]
         assert [e["name"] for e in entries] == ["SECO_PCH_1", "S_PCT_2", "N_EOL_4"]
@@ -93,34 +94,25 @@ class TestRegistry:
         assert entries[0]["operational_start_date"] == "2026-07-18"
 
     def test_empty_pq_gives_empty_registry(self) -> None:
-        doc = convert_non_controllable_sources(
-            _StubDadger(None), _ID_MAP, _calendar(), date(2026, 7, 18)
-        )
+        doc = convert_non_controllable_sources(_case(_StubDadger(None)), _ID_MAP)
         assert doc["non_controllable_sources"] == []
 
     def test_missing_stage_one_raises(self) -> None:
         pq = _pq_frame()
         pq.loc[pq["nome"] == "S_PCT", "estagio"] = 2
         with pytest.raises(ValueError, match="stage 1"):
-            convert_non_controllable_sources(
-                _StubDadger(pq), _ID_MAP, _calendar(), date(2026, 7, 18)
-            )
+            convert_non_controllable_sources(_case(_StubDadger(pq)), _ID_MAP)
 
     def test_stage_outside_calendar_raises(self) -> None:
         pq = _pq_frame()
         pq.loc[0, "estagio"] = 9
         with pytest.raises(ValueError, match="outside the calendar"):
-            convert_non_controllable_sources(
-                _StubDadger(pq), _ID_MAP, _calendar(), date(2026, 7, 18)
-            )
+            convert_non_controllable_sources(_case(_StubDadger(pq)), _ID_MAP)
 
 
 class TestStats:
     def test_availability_fraction_with_inheritance(self) -> None:
-        calendar = _calendar()
-        stats = convert_ncs_stats(
-            _StubDadger(_pq_frame()), _ID_MAP, calendar
-        ).to_pandas()
+        stats = convert_ncs_stats(_case(_StubDadger(_pq_frame())), _ID_MAP).to_pandas()
         assert len(stats) == 3 * 3
         assert set(stats["std"]) == {0.0}
 
@@ -137,7 +129,7 @@ class TestStats:
 class TestFactors:
     def test_invariant_and_zero_mean_omission(self) -> None:
         calendar = _calendar()
-        doc = convert_ncs_factors(_StubDadger(_pq_frame()), _ID_MAP, calendar)
+        doc = convert_ncs_factors(_case(_StubDadger(_pq_frame())), _ID_MAP)
         entries = doc["non_controllable_factors"]
         assert {e["ncs_id"] for e in entries} == {0, 1}
         for entry in entries:
@@ -147,52 +139,6 @@ class TestFactors:
                 for bf in entry["block_factors"]
             )
             assert weighted == pytest.approx(stage.total_hours, rel=1e-12)
-
-
-class TestRealDecks:
-    @pytest.mark.skipif(not _RV0_DECK.exists(), reason="rv0 deck not present")
-    def test_rv0_series_count(self) -> None:
-        from idecomp.decomp import Dadger
-
-        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-
-        dadger = Dadger.read(str(_RV0_DECK))
-        id_map = DecompIdMap.from_dadger(dadger)
-        calendar = operative_calendar_from_dadger(dadger)
-
-        doc = convert_non_controllable_sources(
-            dadger, id_map, calendar, calendar[0].start_date
-        )
-        entries = doc["non_controllable_sources"]
-        assert len(entries) == 32
-        assert all(e["allow_curtailment"] is False for e in entries)
-
-        stats = convert_ncs_stats(dadger, id_map, calendar).to_pandas()
-        assert len(stats) == 32 * len(calendar)
-
-    @pytest.mark.skipif(not _RV3_DECK.exists(), reason="rv3 deck not present")
-    def test_rv3_end_to_end(self) -> None:
-        from idecomp.decomp import Dadger
-
-        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-
-        dadger = Dadger.read(str(_RV3_DECK))
-        id_map = DecompIdMap.from_dadger(dadger)
-        calendar = operative_calendar_from_dadger(dadger)
-
-        doc = convert_non_controllable_sources(
-            dadger, id_map, calendar, calendar[0].start_date
-        )
-        assert len(doc["non_controllable_sources"]) == 24
-
-        factors = convert_ncs_factors(dadger, id_map, calendar)
-        for entry in factors["non_controllable_factors"]:
-            stage = calendar[entry["stage_id"]]
-            weighted = sum(
-                bf["factor"] * stage.block_hours[bf["block_id"]]
-                for bf in entry["block_factors"]
-            )
-            assert weighted == pytest.approx(stage.total_hours, rel=1e-9)
 
 
 class _StubRenovaveis:

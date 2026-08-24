@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Pre-commit hook for cobre-bridge
+# Install: ln -sf ../../scripts/pre-commit .git/hooks/pre-commit
+
+RUFF="${RUFF:-.venv/bin/ruff}"
+command -v "$RUFF" >/dev/null 2>&1 || RUFF=ruff
+
+echo "==> ruff format --check (whole tree)..."
+"$RUFF" format --check .
+
+echo "==> ruff check (whole tree)..."
+"$RUFF" check .
+
+echo "==> plan-structure leak gate..."
+python3 scripts/ci/check_no_plan_leaks.py
+
+echo "==> rot-proof reference gate..."
+python3 scripts/ci/check_comment_refs.py
+
+echo "==> shipped-doc path gate..."
+python3 scripts/ci/check_doc_paths.py
+
+echo "==> Pre-commit checks passed."

@@ -1,4 +1,4 @@
-"""Tests for the reference-label indirection (ticket-021, D-LABEL Option A).
+"""Tests for the reference-label indirection.
 
 ``build_comparison_report`` and ``print_results_summary_from_dataset`` hard-coded
 the reference series' display label as the literal string ``"NEWAVE"`` across
@@ -33,17 +33,21 @@ import contextlib
 import io
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import MagicMock
+
+import polars as pl
+import pytest
+from rich.console import Console
+from typer.testing import CliRunner
 
 from cobre_bridge.comparators.analyze import build_results_dataset
 from cobre_bridge.comparators.dataset import ComparisonDataset
 from cobre_bridge.comparators.report import print_results_summary_from_dataset
 from cobre_bridge.comparators.report_builder import build_comparison_report
-from tests.test_chart_helpers import (
-    _GOLDEN_DIR,
-    _report_fixture_pct,
-    _report_fixture_results,
-    _strip_chart_id,
-)
+from cobre_bridge.comparators.results import PercentileData, ResultComparison
+from tests.conftest import _extract_tab_content
+from tests.golden_utils import assert_html_golden
+from tests.test_chart_helpers import _report_fixture_pct, _report_fixture_results
 
 _NW_DIR = Path("/fake/nw")
 _COBRE_DIR = Path("/fake/cobre")
@@ -80,20 +84,14 @@ def test_build_comparison_report_default_label_matches_golden() -> None:
     """
     html = build_comparison_report(_build_dataset())
 
-    golden = (_GOLDEN_DIR / "build_comparison_report_full.html").read_text(
-        encoding="utf-8"
-    )
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "build_comparison_report_full.html")
 
 
 def test_build_comparison_report_explicit_newave_label_matches_golden() -> None:
     """Explicitly passing ``reference_label="NEWAVE"`` matches the default."""
     html = build_comparison_report(_build_dataset(), reference_label="NEWAVE")
 
-    golden = (_GOLDEN_DIR / "build_comparison_report_full.html").read_text(
-        encoding="utf-8"
-    )
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "build_comparison_report_full.html")
 
 
 # ---------------------------------------------------------------------------
@@ -214,3 +212,273 @@ def test_print_results_summary_decomp_label_keeps_newave_dir_param_name() -> Non
     )
 
     assert f"DECOMP case:  {_NW_DIR}" in text
+
+
+# ---------------------------------------------------------------------------
+# console threading: --no-color / --quiet through the CLI
+# ---------------------------------------------------------------------------
+
+
+def _patch_compare_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch the shared NEWAVE case/alignment loaders for the CLI.
+
+    ``read_cobre_lines`` is left unpatched: its consumer
+    (``build_entity_alignment``) is mocked above, and the empty ``tmp_path``
+    cobre dir yields ``[]`` from the real reader anyway.
+    """
+    from tests.conftest import make_nw_files
+
+    # ``.files`` must be a real ``NewaveFiles`` dataclass (not a further
+    # MagicMock attribute) — ``hash_input_files`` reflects over it via
+    # ``dataclasses.fields``, which raises on a non-dataclass. The paths
+    # need not exist: a missing file degrades to a ``None`` hash/size.
+    monkeypatch.setattr(
+        "cobre_bridge.case.NewaveCase.from_directory",
+        classmethod(
+            lambda cls, _dir: MagicMock(
+                id_map=MagicMock(), files=make_nw_files(Path("nw"))
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.alignment.build_entity_alignment",
+        lambda *a, **k: MagicMock(),
+    )
+
+
+def _one_row_results_dataset() -> ComparisonDataset:
+    """A one-row results dataset built through the shared assembly kernel."""
+    results = [
+        ResultComparison(
+            entity_type="hydro",
+            entity_name="ITAIPU",
+            newave_code=10,
+            cobre_id=0,
+            stage=0,
+            variable="generation_mw",
+            newave_value=100.0,
+            cobre_value=110.0,
+            abs_diff=10.0,
+            rel_diff=0.1,
+        ),
+    ]
+    return build_results_dataset(results, PercentileData(), 1e-2)
+
+
+def _invoke_compare_newave(
+    argv_tail: list[str], monkeypatch: pytest.MonkeyPatch, cobre_dir: Path
+) -> object:
+    """Invoke ``compare newave`` through the real Typer app via ``CliRunner``."""
+    from cobre_bridge.cli import app
+
+    _patch_compare_context(monkeypatch)
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.results.compare_results",
+        lambda **_k: _one_row_results_dataset(),
+    )
+    argv = [
+        "compare",
+        "newave",
+        str(cobre_dir.parent / "nw"),
+        str(cobre_dir),
+        *argv_tail,
+    ]
+    return CliRunner().invoke(app, argv)
+
+
+def test_compare_newave_no_color_summary_has_no_ansi_escapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dumb_terminal: None
+) -> None:
+    """``--no-color`` threads through the results-summary renderer.
+
+    Under ``CliRunner`` the captured stream is never a TTY, so Rich withholds
+    ANSI regardless of ``--no-color`` — an ANSI-absence assertion alone is
+    tautological and can never fail. Spy on the ``console`` actually handed to
+    :func:`print_results_summary_from_dataset` instead, and assert it was
+    built with ``no_color=True`` only when the flag is passed (``False``
+    without it), so the test genuinely fails if the flag stops threading.
+    """
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    cobre_dir_flagged = tmp_path / "cobre_no_color"
+    cobre_dir_flagged.mkdir()
+    cobre_dir_plain = tmp_path / "cobre_plain"
+    cobre_dir_plain.mkdir()
+
+    captured: list[Console] = []
+    original: Callable[..., None] = print_results_summary_from_dataset
+
+    def _spy(*args: object, **kwargs: object) -> None:
+        console = kwargs["console"]
+        assert isinstance(console, Console)
+        captured.append(console)
+        original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "cobre_bridge.comparators.report.print_results_summary_from_dataset", _spy
+    )
+
+    no_color_result = _invoke_compare_newave(
+        ["--no-color"], monkeypatch, cobre_dir_flagged
+    )
+    plain_result = _invoke_compare_newave([], monkeypatch, cobre_dir_plain)
+
+    assert no_color_result.exit_code == 0
+    assert plain_result.exit_code == 0
+    assert "Cobre vs NEWAVE Results Comparison" in no_color_result.stdout
+    assert "\x1b[" not in no_color_result.stdout
+    assert [c.no_color for c in captured] == [True, False]
+
+
+def test_compare_newave_quiet_suppresses_summary_but_writes_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--quiet`` suppresses the summary render; artifacts are still written."""
+    cobre_dir = tmp_path / "cobre"
+    cobre_dir.mkdir()
+
+    result = _invoke_compare_newave(["--quiet"], monkeypatch, cobre_dir)
+
+    assert result.exit_code == 0
+    assert "Cobre vs NEWAVE Results Comparison" not in result.stdout
+    assert "generation_mw" not in result.stdout
+    artifacts_dir = cobre_dir / "comparison_artifacts"
+    assert artifacts_dir.exists()
+    assert any(artifacts_dir.iterdir())
+
+
+class TestReportBuilderProductivityGateDecoupling:
+    """ticket-016 decoupled report_builder's single ``if prod_df.is_empty():
+    ... else: ...`` Productivity-tab gate into two independent gates (one per
+    frame) so DECOMP's realized-only shape can render. This guards the
+    NEWAVE-shaped case -- both frames populated, which is what NEWAVE always
+    has -- still renders every section in the exact original order/content,
+    i.e. ``compare newave`` is unaffected by the decoupling."""
+
+    @staticmethod
+    def _both_frames_dataset() -> ComparisonDataset:
+        from cobre_bridge.comparators.analyze import (
+            _PRODUCTIVITY_DETAIL_SCHEMA,
+            build_results_dataset,
+        )
+        from cobre_bridge.comparators.results import PercentileData
+
+        results = [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="ALPHA",
+                newave_code=1,
+                cobre_id=0,
+                stage=0,
+                variable="productivity_mw_per_m3s",
+                newave_value=0.78,
+                cobre_value=0.80,
+                abs_diff=0.02,
+                rel_diff=0.026,
+            )
+        ]
+        prod_detail = pl.DataFrame(
+            {
+                "plant_name": ["ALPHA"],
+                "newave_code": [1],
+                "cobre_id": [0],
+                "nw_altura_min": [0.69],
+                "nw_altura_65": [0.81],
+                "nw_altura_max": [0.85],
+                "nw_equivalent": [0.7865],
+                "nw_accumulated_earm": [5.35],
+                "nw_specific_productivity": [0.009],
+                "nw_tailwater_m": [672.0],
+                "nw_losses_m": [0.8],
+                "nw_vmin_hm3": [100.0],
+                "nw_vmax_hm3": [500.0],
+                "cb_point": [0.811],
+                "cb_equivalent": [0.7860],
+                "cb_accumulated": [5.349],
+                "cb_specific_productivity": [0.009],
+                "cb_tailwater_m": [672.0],
+                "cb_losses_m": [0.8],
+                "cb_vmin_hm3": [100.0],
+                "cb_vmax_hm3": [500.0],
+            },
+            schema=_PRODUCTIVITY_DETAIL_SCHEMA,
+        )
+        pct = PercentileData(productivity_detail=prod_detail)
+        return build_results_dataset(results, pct, 0.05)
+
+    def test_both_populated_renders_all_three_sections_in_the_original_order(
+        self,
+    ) -> None:
+        dataset = self._both_frames_dataset()
+
+        html = build_comparison_report(dataset)
+        productivity_tab = _extract_tab_content(html, "tab-productivity")
+
+        static_idx = productivity_tab.index(
+            "Static productivity — pmo vs cobre-bridge conversion"
+        )
+        realized_idx = productivity_tab.index("Realized productivity across stages")
+        blocks_idx = productivity_tab.index("Productivity Building Blocks")
+        assert static_idx < realized_idx < blocks_idx
+        assert "No productivity data available." not in productivity_tab
+
+    def test_only_detail_populated_renders_static_only_no_realized_section(
+        self,
+    ) -> None:
+        """The mirror case: ``prod_df`` non-empty, ``per_stage_df`` empty --
+        the realized section must NOT render. Proves the two gates are
+        independent, not still coupled to one another."""
+        from cobre_bridge.comparators.analyze import build_results_dataset
+        from cobre_bridge.comparators.results import PercentileData
+
+        detail_only = self._both_frames_dataset()
+        pct = PercentileData(productivity_detail=detail_only.render.productivity_detail)
+        dataset = build_results_dataset([], pct, 0.05)
+
+        html = build_comparison_report(dataset)
+        productivity_tab = _extract_tab_content(html, "tab-productivity")
+
+        assert "Productivity Building Blocks" in productivity_tab
+        assert "Realized productivity across stages" not in productivity_tab
+
+
+class TestReportBuilderReeSectionByteIdentityGuard:
+    """ticket-018 requirement 5: the REE section is additive and must leave
+    ``compare newave`` untouched -- it renders only when ``entity_type ==
+    "ree"`` rows exist, which a NEWAVE-shaped dataset never carries."""
+
+    def test_newave_shaped_dataset_has_no_ree_section(self) -> None:
+        from cobre_bridge.comparators.analyze import build_results_dataset
+        from cobre_bridge.comparators.results import PercentileData
+
+        results = [
+            ResultComparison(
+                entity_type="hydro",
+                entity_name="CAMARGOS",
+                newave_code=1,
+                cobre_id=0,
+                stage=0,
+                variable="generation_mw",
+                newave_value=100.0,
+                cobre_value=98.0,
+                abs_diff=2.0,
+                rel_diff=0.02,
+            ),
+            ResultComparison(
+                entity_type="bus",
+                entity_name="SE",
+                newave_code=1,
+                cobre_id=0,
+                stage=0,
+                variable="deficit_mw",
+                newave_value=0.0,
+                cobre_value=0.0,
+                abs_diff=0.0,
+                rel_diff=None,
+            ),
+        ]
+        dataset = build_results_dataset(results, PercentileData(), 0.05)
+        assert dataset.tidy.filter(pl.col("entity_type") == "ree").is_empty()
+
+        html = build_comparison_report(dataset)
+
+        assert "REE Energy" not in html

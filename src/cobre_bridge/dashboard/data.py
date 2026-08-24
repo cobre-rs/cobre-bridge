@@ -18,6 +18,11 @@ import polars as pl
 import pyarrow.parquet as pq
 
 from cobre_bridge.cobre_io import resolve_hydro_productivities
+from cobre_bridge.comparators.cobre_readers import (
+    read_cobre_line_bounds,
+    read_cobre_lines,
+    read_cobre_training_metadata,
+)
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 from cobre_bridge.errors import CobreOutputError
 
@@ -132,7 +137,7 @@ def resolve_hydro_bus_id(hydro: dict, *, hydros_path: Path) -> int | None:
     Single implementation of the pre-0.13 top-level ``hydros.json``
     ``bus_id`` -> 0.13 ``unit_groups[].bus_id`` relocation, shared by
     ``load_hydro_bus_map`` and ``load_hydro_metadata`` so the two never
-    disagree on a plant's bus (AC5).
+    disagree on a plant's bus.
 
     - Every plant either pipeline emits today carries exactly one distinct
       ``bus_id`` across its groups (cobre rule 41's mirror invariant) -- that
@@ -142,8 +147,8 @@ def resolve_hydro_bus_id(hydro: dict, *, hydros_path: Path) -> int | None:
       **not** duplicated across every bus it touches either (that would
       double-count it wherever a caller sums per bus) -- the same dilemma the
       compare layer resolved the same way in
-      ``comparators.analyze._bus_name_lookups``. Implementation note (the
-      deliberate degraded-rendering choice for this ticket): a ``WARNING``
+      ``comparators.analyze._bus_name_lookups``. Implementation note (a
+      deliberate degraded-rendering choice): a ``WARNING``
       :class:`~cobre_bridge.diagnostics.Diagnostic` is emitted and ``None``
       is returned. Callers must omit the plant from any single-bus-keyed
       view: ``load_hydro_bus_map``'s id->bus map has no room for more than
@@ -372,13 +377,13 @@ def _compute_lp_load(
 
 
 def _aggregate_timing_by_iteration(timing_raw: pd.DataFrame) -> pd.DataFrame:
-    """Collapse the post-epic-04b multi-row-per-iteration timing shape.
+    """Collapse the multi-row-per-iteration timing shape.
 
-    Post-epic-04b cobre (``training/timing/iterations.parquet``) emits one
+    Newer cobre (``training/timing/iterations.parquet``) emits one
     rank-aggregated row plus N per-worker rows per iteration — per-worker
     rows only carry fwd/bwd wall + setup, rank rows carry everything else.
     ``SUM(col) GROUP BY iteration`` reconstructs the single-row totals that
-    the pre-epic-04b chart code expects. Legacy frames (no ``rank``/
+    the single-row chart code expects. Legacy frames (no ``rank``/
     ``worker_id`` columns) pass through unchanged.
 
     The sum semantics are correct for the rank-only columns (one contributing
@@ -468,13 +473,6 @@ def compute_non_fictitious_bus_ids(load_stats: pd.DataFrame) -> list[int]:
 
 # ---------------------------------------------------------------------------
 # Section loaders
-#
-# ``DashboardData.load`` is composed from these cohesive, independently
-# callable section loaders instead of one monolithic block. Each owns a single
-# slice of the case and returns a small sub-struct, which keeps the loading
-# grouped by concern and lets a future partial/lazy dashboard pull only the
-# sections it needs. The aggregate ``DashboardData`` still exposes the flat
-# fields every tab already consumes, so tab code is unaffected.
 # ---------------------------------------------------------------------------
 
 
@@ -487,6 +485,9 @@ class TemporalContext:
     stages_data: dict
     stage_hours: dict[int, float]
     block_hours: dict[tuple[int, int], float]
+
+    # Block-hours join key for weighted-average chart computations.
+    # Columns: ["stage_id", "block_id", "_bh"]
     bh_df: pl.DataFrame
     line_meta: list[dict]
 
@@ -512,6 +513,36 @@ def load_temporal_context(case_dir: Path) -> TemporalContext:
     if pg_rate is not None:
         discount_rate = float(pg_rate)
 
+    # A non-empty node list is a scenario tree with per-branch probabilities;
+    # every mean/quantile downstream still averages leaf paths uniformly (full
+    # probability-weighting is a separate follow-up), so the reader needs a
+    # signal that the aggregates are not weighted expectations.
+    nodes = stages_data.get("policy_graph", {}).get("nodes")
+    if nodes:
+        emit(
+            Diagnostic(
+                code="dashboard-unweighted-tree-averages",
+                severity=Severity.WARNING,
+                category="Dashboard data",
+                title="Scenario tree averages are not probability-weighted",
+                summary=(
+                    "This case is built from a scenario tree whose branches "
+                    "occur with different probabilities, but every mean and "
+                    "percentile band in this dashboard treats each scenario "
+                    "path with equal weight. The reported statistics are "
+                    "unweighted averages across scenario paths, not the "
+                    "probability-weighted expectations the underlying "
+                    "optimization targets."
+                ),
+                remediation=(
+                    "Read the displayed means and percentile bands as "
+                    "unweighted scenario-path averages, not probability-"
+                    "weighted expectations."
+                ),
+            ),
+            logger=logger,
+        )
+
     stage_hours: dict[int, float] = {}
     for s in stages_data["stages"]:
         stage_hours[s["id"]] = sum(b["hours"] for b in s["blocks"])
@@ -530,9 +561,7 @@ def load_temporal_context(case_dir: Path) -> TemporalContext:
         }
     )
 
-    lines_path = case_dir / "system" / "lines.json"
-    with lines_path.open() as f:
-        line_meta: list[dict] = json.load(f)["lines"]
+    line_meta: list[dict] = read_cobre_lines(case_dir / "output")
 
     return TemporalContext(
         config=config,
@@ -563,7 +592,7 @@ def load_entity_metadata(case_dir: Path) -> EntityMetadata:
     """Load entity name maps and hydro/thermal metadata dictionaries.
 
     ``hydro_bus_map`` is resolved once via :func:`load_hydro_bus_map` and
-    reused by :func:`load_hydro_metadata` (FINDING-5: both loaders resolve
+    reused by :func:`load_hydro_metadata` (both loaders resolve
     every plant's bus over the same ``system/hydros.json``; without sharing
     the map, an ambiguous plant's ``hydro-unit-groups-multi-bus`` warning
     fires twice per dashboard build instead of once).
@@ -699,18 +728,13 @@ def load_scenario_inputs(case_dir: Path) -> ScenarioInputs:
         pq.read_table(ih_path).to_pandas() if ih_path.exists() else pd.DataFrame()
     )
 
-    lb_path = case_dir / "constraints" / "line_bounds.parquet"
-    line_bounds = (
-        pq.read_table(lb_path).to_pandas() if lb_path.exists() else pd.DataFrame()
-    )
-    # Cobre 0.13 deleted the standalone per-block exchange-factor JSON
-    # document and folded it into absolute-MW override rows inside
-    # line_bounds.parquet (see converters/network.py::convert_line_bounds):
-    # block_id is non-null only on those rows, never on the stage-level base
-    # row. Do not reconstruct a factor by dividing back through the base —
-    # that reintroduces the division cobre's decision removed and can divide
-    # by a zero base. A line-stage whose blocks are uniform legitimately has
-    # no override row, so an empty frame here is a correct steady state.
+    line_bounds = read_cobre_line_bounds(case_dir / "output").to_pandas()
+    # ``block_id`` is non-null only on the absolute-MW per-block override rows
+    # (the exchange factor lives there now), never on the stage-level base row.
+    # Do not reconstruct a factor by dividing back through the base — that
+    # reintroduces the removed division and can divide by a zero base. A
+    # uniform-block line-stage legitimately has no override row, so an empty
+    # frame here is a correct steady state, not an error.
     line_block_bounds = (
         line_bounds[line_bounds["block_id"].notna()].reset_index(drop=True)
         if "block_id" in line_bounds.columns
@@ -742,6 +766,12 @@ def load_scenario_inputs(case_dir: Path) -> ScenarioInputs:
 class SolverPerformance:
     """Training/simulation solver timing and diagnostics (optional)."""
 
+    # ``timing`` is aggregated to one row per iteration for backward
+    # compatibility with older chart code. ``timing_raw`` retains the
+    # multi-row-per-iteration view from newer cobre outputs, where each
+    # iteration has one rank-aggregated row (``worker_id`` NULL) and N
+    # per-worker rows (``worker_id`` populated) — see
+    # ``build_worker_timing_records`` in cobre-sddp training_output.rs.
     timing: pd.DataFrame
     timing_raw: pd.DataFrame
     solver_train: pd.DataFrame
@@ -752,15 +782,10 @@ class SolverPerformance:
     lp_bounds: pd.DataFrame
 
 
-#: cobre 0.14 gave every diagnostic-output axis a single canonical spelling
-#: (``stage`` -> ``stage_id``, ``opening`` -> ``opening_index``,
-#: ``upper_bound_mean`` -> ``upper_bound``) and switched the not-applicable
-#: stage/opening marker from a ``-1`` sentinel to ``NULL``. The dashboard's chart
-#: layer was written against the pre-0.14 spellings; every raw diagnostic frame
-#: is normalized back to them at this single load choke point (mirroring
-#: :func:`cobre_bridge.comparators.cobre_readers.read_cobre_convergence`), so no
-#: chart needs to change and a pre-0.14 output directory — which already uses the
-#: legacy names — passes through untouched.
+#: Renames cobre 0.14's canonical diagnostic-output axes back to the pre-0.14
+#: spellings the dashboard's chart layer was written against, applied at this
+#: single load choke point (mirroring
+#: :func:`cobre_bridge.comparators.cobre_readers.read_cobre_convergence`).
 _OUTPUT_COLUMN_ALIASES: dict[str, str] = {
     "stage_id": "stage",
     "opening_index": "opening",
@@ -863,22 +888,54 @@ class StochasticData:
 
 
 def load_stochastic_data(case_dir: Path) -> StochasticData:
-    """Load output/stochastic/* (inflow fit, AR coefficients, correlation)."""
+    """Load output/stochastic/* (inflow fit, AR coefficients, correlation).
+
+    Every file below is optional: a directory that exists but is missing one
+    of them (e.g. a fit with no AR-coefficient file) degrades that one field
+    to an empty DataFrame/dict with a WARNING instead of raising.
+    """
     stochastic_dir = case_dir / "output" / "stochastic"
     available = stochastic_dir.exists()
     if available:
-        inflow_stats_stoch = pq.read_table(
-            stochastic_dir / "inflow_seasonal_stats.parquet"
-        ).to_pandas()
-        ar_coefficients = pq.read_table(
-            stochastic_dir / "inflow_ar_coefficients.parquet"
-        ).to_pandas()
-        noise_openings = pq.read_table(
-            stochastic_dir / "noise_openings.parquet"
-        ).to_pandas()
-        fitting_report: dict = json.load(
-            (stochastic_dir / "fitting_report.json").open()
-        )
+        stats_path = stochastic_dir / "inflow_seasonal_stats.parquet"
+        if stats_path.exists():
+            inflow_stats_stoch = pq.read_table(stats_path).to_pandas()
+        else:
+            logger.warning(
+                "output/stochastic/inflow_seasonal_stats.parquet missing; "
+                "using empty DataFrame"
+            )
+            inflow_stats_stoch = pd.DataFrame()
+
+        ar_path = stochastic_dir / "inflow_ar_coefficients.parquet"
+        if ar_path.exists():
+            ar_coefficients = pq.read_table(ar_path).to_pandas()
+        else:
+            logger.warning(
+                "output/stochastic/inflow_ar_coefficients.parquet missing; "
+                "using empty DataFrame"
+            )
+            ar_coefficients = pd.DataFrame()
+
+        noise_path = stochastic_dir / "noise_openings.parquet"
+        if noise_path.exists():
+            noise_openings = pq.read_table(noise_path).to_pandas()
+        else:
+            logger.warning(
+                "output/stochastic/noise_openings.parquet missing; using "
+                "empty DataFrame"
+            )
+            noise_openings = pd.DataFrame()
+
+        report_path = stochastic_dir / "fitting_report.json"
+        if report_path.exists():
+            fitting_report: dict = json.load(report_path.open())
+        else:
+            logger.warning(
+                "output/stochastic/fitting_report.json missing; using empty dict"
+            )
+            fitting_report = {}
+
         corr_path = stochastic_dir / "correlation.json"
         if corr_path.exists():
             correlation: dict = json.load(corr_path.open())
@@ -903,9 +960,52 @@ def load_stochastic_data(case_dir: Path) -> StochasticData:
     )
 
 
+#: Every exception type an ``output/policy`` checkpoint read can fail with,
+#: mirroring ``decomp.fcf.capability``'s CBVF round-trip probe: cobre absent
+#: or missing the ``results`` binding, a malformed reloaded pool/dict, or any
+#: ``cobre.errors.CobreError`` leaf (each subclasses one of ``ValueError``/
+#: ``OSError``/``RuntimeError``). Never a bare ``except``.
+_POLICY_READ_FAILURE_TYPES: tuple[type[Exception], ...] = (
+    ModuleNotFoundError,
+    AttributeError,
+    KeyError,
+    TypeError,
+    ValueError,
+    OSError,
+    RuntimeError,
+)
+
+
+def _load_policy_metadata(case_dir: Path) -> dict:
+    """Load ``output/policy``'s terminal ``state_dimension`` via cobre.
+
+    Returns ``{}`` immediately when ``case_dir/output/policy`` does not
+    exist, without importing cobre. Otherwise imports cobre lazily (kept out
+    of module scope so this module stays importable in a cobre-free
+    environment), reads the checkpoint via ``cobre.results.load_policy``,
+    and selects the terminal pool (max ``stage_id``). Degrades to ``{}``
+    with one ``logger.warning`` on any failure in
+    :data:`_POLICY_READ_FAILURE_TYPES` — a training-only case with no (or an
+    unreadable) policy output must still render.
+    """
+    if not (case_dir / "output" / "policy").exists():
+        return {}
+    try:
+        import cobre
+
+        policy = cobre.results.load_policy(case_dir / "output", policy_subdir="policy")
+        terminal = max(policy["stage_cuts"], key=lambda stage: stage["stage_id"])
+        return {"state_dimension": int(terminal["state_dimension"])}
+    except _POLICY_READ_FAILURE_TYPES as exc:
+        logger.warning("output/policy metadata could not be loaded: %s", exc)
+        return {}
+
+
 @dataclasses.dataclass
 class OutputMetadata:
-    """``metadata.json`` from each output subdirectory."""
+    """Per-``output/`` subdirectory metadata: ``training``/``simulation`` from
+    each ``metadata.json``, ``policy`` from the self-describing ``manifest.bin``
+    checkpoint (see :func:`load_output_metadata`)."""
 
     training: dict
     simulation: dict
@@ -913,7 +1013,13 @@ class OutputMetadata:
 
 
 def load_output_metadata(case_dir: Path) -> OutputMetadata:
-    """Load output/{training,simulation,policy}/metadata.json (empty if absent)."""
+    """Load output/{training,simulation,policy} metadata (empty if absent).
+
+    ``training``/``simulation`` still read the sibling ``metadata.json``
+    file; ``policy`` reads the self-describing ``manifest.bin`` checkpoint
+    instead (see :func:`_load_policy_metadata`) — that subdirectory carries
+    no ``metadata.json`` of its own.
+    """
 
     def _load_metadata(subdir: str) -> dict:
         meta_path = case_dir / "output" / subdir / "metadata.json"
@@ -927,9 +1033,9 @@ def load_output_metadata(case_dir: Path) -> OutputMetadata:
             return {}
 
     return OutputMetadata(
-        training=_load_metadata("training"),
+        training=read_cobre_training_metadata(case_dir / "output"),
         simulation=_load_metadata("simulation"),
-        policy=_load_metadata("policy"),
+        policy=_load_policy_metadata(case_dir),
     )
 
 
@@ -981,114 +1087,36 @@ def load_generic_constraints(case_dir: Path) -> GenericConstraintData:
 class DashboardData:
     """All data sources required to render the Cobre dashboard.
 
-    Populated via ``DashboardData.load(case_dir)``.  Fields match the local
-    variables previously declared inside ``build_dashboard()``.
+    Holds the eight ``load_*``-produced sub-structs verbatim (``temporal``,
+    ``entities``, ``simulation``, ``scenario``, ``performance``,
+    ``stochastic``, ``metadata``, ``gc``) plus the handful of values derived
+    at load time that belong to none of them. Every historical flat
+    ``data.<field>`` name a tab module reads is exposed as a read-only
+    ``@property`` forwarding to its sub-struct, so tab code keeps working
+    unchanged. Populated via ``DashboardData.load(case_dir)``.
     """
 
     case_dir: Path
     case_name: str
 
-    # Training — small single-file parquets loaded as pandas
+    # Training — small single-file parquet loaded eagerly as pandas.
     conv: pd.DataFrame
-
-    # Simulation entity data — large hive-partitioned parquets kept as LazyFrames
-    hydros_lf: pl.LazyFrame
-    thermals_lf: pl.LazyFrame
-    ncs_lf: pl.LazyFrame
-    buses_lf: pl.LazyFrame
-    exchanges_lf: pl.LazyFrame
-
-    # Costs (~236 K rows) collected to pandas for chart_cost_* functions
-    costs: pd.DataFrame
-
-    # Optional line bounds
-    line_bounds: pd.DataFrame
-
-    # Entity name/metadata dictionaries
-    names: dict[tuple[str, int], str]
-    stage_labels: dict[int, str]
-    stage_dates: dict[int, str]
-    hydro_bus_map: dict[int, int]
-    thermal_meta: dict[int, dict]
-    ncs_bus_map: dict[int, int]
-    hydro_meta: dict[int, dict]
-    bus_names: dict[int, str]
-    non_fictitious_bus_ids: list[int]
-
-    # Temporal resolution
-    stage_hours: dict[int, float]
-    block_hours: dict[tuple[int, int], float]
-
-    # Block-hours DataFrame for weighted-average joins in chart functions
-    # Columns: ["stage_id", "block_id", "_bh"]
-    bh_df: pl.DataFrame
-
-    # Line metadata for exchange calculations
-    line_meta: list[dict]
-
-    # LP load input data
-    load_stats: pd.DataFrame
-    load_factors_list: list[dict]
-
-    # Performance / solver data (optional — empty DataFrame when absent).
-    # ``timing`` is aggregated to one row per iteration for backward
-    # compatibility with v0.4.4-era chart code. ``timing_raw`` retains the
-    # multi-row-per-iteration view from post-epic-04b cobre outputs where
-    # each iteration has one rank-aggregated row (``worker_id`` NULL) and
-    # N per-worker rows (``worker_id`` populated) — see
-    # ``build_worker_timing_records`` in cobre-sddp training_output.rs.
-    timing: pd.DataFrame
-    timing_raw: pd.DataFrame
-    solver_train: pd.DataFrame
-    solver_sim: pd.DataFrame
-    scaling_report: dict
-    cut_selection: pd.DataFrame
 
     # True when ``output/simulation/costs/`` contains parquet files. When
     # ``False`` the simulation-dependent tabs (overview, energy balance,
     # costs, plants, network, constraints) are hidden.
     simulation_available: bool
-
-    # Stochastic model output (optional)
-    stochastic_available: bool
-    inflow_stats_stoch: pd.DataFrame
-    ar_coefficients: pd.DataFrame
-    noise_openings: pd.DataFrame
-    fitting_report: dict
-    inflow_history: pd.DataFrame
-    correlation: dict
-    inflow_lags_lf: pl.LazyFrame
-
-    # Output metadata (from metadata.json in each output subdirectory)
-    training_metadata: dict
-    simulation_metadata: dict
-    policy_metadata: dict
-
-    # New v2 fields: config
-    config: dict
-    discount_rate: float
-    stages_data: dict
-
-    # Resolved LP bounds (optional)
-    lp_bounds: pd.DataFrame
-
-    # Generic constraints (optional)
-    gc_constraints: list[dict]
-    gc_bounds: pd.DataFrame
-    gc_violations: pd.DataFrame
-
-    # Input constraint bounds (optional — ticket-002)
-    hydro_bounds: pd.DataFrame
-    thermal_bounds: pd.DataFrame
-    ncs_stats: pd.DataFrame
-    # Per-block line_bounds override rows (block_id non-null); a case whose
-    # lines are uniform across blocks legitimately has none (ticket-013).
-    line_block_bounds: pd.DataFrame
-    retry_histogram: pd.DataFrame
-
-    # Summary counts
     n_scenarios: int
     n_stages: int
+
+    temporal: TemporalContext
+    entities: EntityMetadata
+    simulation: SimulationData
+    scenario: ScenarioInputs
+    performance: SolverPerformance
+    stochastic: StochasticData
+    metadata: OutputMetadata
+    gc: GenericConstraintData
 
     # ---------------------------------------------------------------------------
     # Factory
@@ -1099,10 +1127,11 @@ class DashboardData:
         """Load all dashboard data from a Cobre case directory.
 
         Thin orchestrator: each cohesive section is read by a dedicated
-        ``load_*`` loader returning a sub-struct, then composed into the flat
-        aggregate every tab consumes. Raises ``FileNotFoundError`` if required
-        files (convergence.parquet, stages.json) are missing; optional files
-        fall back to empty DataFrames / empty dicts inside each loader.
+        ``load_*`` loader returning a sub-struct, which :class:`DashboardData`
+        holds directly (see the flat-field ``@property`` shims below). Raises
+        ``FileNotFoundError`` if required files (convergence.parquet,
+        stages.json) are missing; optional files fall back to empty
+        DataFrames / empty dicts inside each loader.
         """
         logger.info("Loading dashboard data from %s", case_dir)
 
@@ -1120,7 +1149,7 @@ class DashboardData:
         performance = load_solver_performance(case_dir, conv)
         stochastic = load_stochastic_data(case_dir)
         metadata = load_output_metadata(case_dir)
-        constraints = load_generic_constraints(case_dir)
+        gc = load_generic_constraints(case_dir)
 
         case_name = case_dir.resolve().name
         costs = simulation.costs
@@ -1139,70 +1168,241 @@ class DashboardData:
             "" if simulation_available else " (training-only; no simulation)",
         )
 
-        # Filter simulation solver to actual scenario count from metadata
+        # Filter simulation solver to actual scenario count from metadata,
+        # folded into the held struct so data.solver_sim and
+        # data.performance.solver_sim never diverge.
         actual_sim_scenarios = metadata.simulation.get("scenarios", {}).get(
             "completed", n_scenarios
         )
-        solver_sim = performance.solver_sim
-        if not solver_sim.empty:
-            solver_sim = solver_sim.head(actual_sim_scenarios)
+        if not performance.solver_sim.empty:
+            performance = dataclasses.replace(
+                performance,
+                solver_sim=performance.solver_sim.head(actual_sim_scenarios),
+            )
 
         return cls(
             case_dir=case_dir,
             case_name=case_name,
             conv=conv,
-            hydros_lf=simulation.hydros_lf,
-            thermals_lf=simulation.thermals_lf,
-            ncs_lf=simulation.ncs_lf,
-            buses_lf=simulation.buses_lf,
-            exchanges_lf=simulation.exchanges_lf,
-            costs=costs,
-            line_bounds=scenario.line_bounds,
-            names=entities.names,
-            stage_labels=entities.stage_labels,
-            stage_dates=entities.stage_dates,
-            hydro_bus_map=entities.hydro_bus_map,
-            thermal_meta=entities.thermal_meta,
-            ncs_bus_map=entities.ncs_bus_map,
-            hydro_meta=entities.hydro_meta,
-            bus_names=entities.bus_names,
-            non_fictitious_bus_ids=scenario.non_fictitious_bus_ids,
-            stage_hours=temporal.stage_hours,
-            block_hours=temporal.block_hours,
-            bh_df=temporal.bh_df,
-            line_meta=temporal.line_meta,
-            load_stats=scenario.load_stats,
-            load_factors_list=scenario.load_factors_list,
-            timing=performance.timing,
-            timing_raw=performance.timing_raw,
-            solver_train=performance.solver_train,
-            solver_sim=solver_sim,
-            scaling_report=performance.scaling_report,
-            cut_selection=performance.cut_selection,
             simulation_available=simulation_available,
-            stochastic_available=stochastic.available,
-            inflow_stats_stoch=stochastic.inflow_stats_stoch,
-            ar_coefficients=stochastic.ar_coefficients,
-            noise_openings=stochastic.noise_openings,
-            fitting_report=stochastic.fitting_report,
-            inflow_history=scenario.inflow_history,
-            correlation=stochastic.correlation,
-            inflow_lags_lf=simulation.inflow_lags_lf,
-            training_metadata=metadata.training,
-            simulation_metadata=metadata.simulation,
-            policy_metadata=metadata.policy,
-            config=temporal.config,
-            discount_rate=temporal.discount_rate,
-            stages_data=temporal.stages_data,
-            lp_bounds=performance.lp_bounds,
-            gc_constraints=constraints.constraints,
-            gc_bounds=constraints.bounds,
-            gc_violations=simulation.gc_violations,
-            hydro_bounds=scenario.hydro_bounds,
-            thermal_bounds=scenario.thermal_bounds,
-            ncs_stats=scenario.ncs_stats,
-            line_block_bounds=scenario.line_block_bounds,
-            retry_histogram=performance.retry_histogram,
             n_scenarios=n_scenarios,
             n_stages=n_stages,
+            temporal=temporal,
+            entities=entities,
+            simulation=simulation,
+            scenario=scenario,
+            performance=performance,
+            stochastic=stochastic,
+            metadata=metadata,
+            gc=gc,
         )
+
+    # ---------------------------------------------------------------------------
+    # Flat-field shims — read-only pass-throughs onto the held sub-structs
+    # above, preserved so every existing tab module keeps reading
+    # ``data.<field>`` without change.
+    # ---------------------------------------------------------------------------
+
+    @property
+    def hydros_lf(self) -> pl.LazyFrame:
+        return self.simulation.hydros_lf
+
+    @property
+    def thermals_lf(self) -> pl.LazyFrame:
+        return self.simulation.thermals_lf
+
+    @property
+    def ncs_lf(self) -> pl.LazyFrame:
+        return self.simulation.ncs_lf
+
+    @property
+    def buses_lf(self) -> pl.LazyFrame:
+        return self.simulation.buses_lf
+
+    @property
+    def exchanges_lf(self) -> pl.LazyFrame:
+        return self.simulation.exchanges_lf
+
+    @property
+    def costs(self) -> pd.DataFrame:
+        return self.simulation.costs
+
+    @property
+    def line_bounds(self) -> pd.DataFrame:
+        return self.scenario.line_bounds
+
+    @property
+    def names(self) -> dict[tuple[str, int], str]:
+        return self.entities.names
+
+    @property
+    def stage_labels(self) -> dict[int, str]:
+        return self.entities.stage_labels
+
+    @property
+    def stage_dates(self) -> dict[int, str]:
+        return self.entities.stage_dates
+
+    @property
+    def hydro_bus_map(self) -> dict[int, int]:
+        return self.entities.hydro_bus_map
+
+    @property
+    def thermal_meta(self) -> dict[int, dict]:
+        return self.entities.thermal_meta
+
+    @property
+    def ncs_bus_map(self) -> dict[int, int]:
+        return self.entities.ncs_bus_map
+
+    @property
+    def hydro_meta(self) -> dict[int, dict]:
+        return self.entities.hydro_meta
+
+    @property
+    def bus_names(self) -> dict[int, str]:
+        return self.entities.bus_names
+
+    @property
+    def non_fictitious_bus_ids(self) -> list[int]:
+        return self.scenario.non_fictitious_bus_ids
+
+    @property
+    def stage_hours(self) -> dict[int, float]:
+        return self.temporal.stage_hours
+
+    @property
+    def block_hours(self) -> dict[tuple[int, int], float]:
+        return self.temporal.block_hours
+
+    @property
+    def bh_df(self) -> pl.DataFrame:
+        return self.temporal.bh_df
+
+    @property
+    def line_meta(self) -> list[dict]:
+        return self.temporal.line_meta
+
+    @property
+    def load_stats(self) -> pd.DataFrame:
+        return self.scenario.load_stats
+
+    @property
+    def load_factors_list(self) -> list[dict]:
+        return self.scenario.load_factors_list
+
+    @property
+    def timing(self) -> pd.DataFrame:
+        return self.performance.timing
+
+    @property
+    def timing_raw(self) -> pd.DataFrame:
+        return self.performance.timing_raw
+
+    @property
+    def solver_train(self) -> pd.DataFrame:
+        return self.performance.solver_train
+
+    @property
+    def solver_sim(self) -> pd.DataFrame:
+        return self.performance.solver_sim
+
+    @property
+    def scaling_report(self) -> dict:
+        return self.performance.scaling_report
+
+    @property
+    def cut_selection(self) -> pd.DataFrame:
+        return self.performance.cut_selection
+
+    @property
+    def stochastic_available(self) -> bool:
+        return self.stochastic.available
+
+    @property
+    def inflow_stats_stoch(self) -> pd.DataFrame:
+        return self.stochastic.inflow_stats_stoch
+
+    @property
+    def ar_coefficients(self) -> pd.DataFrame:
+        return self.stochastic.ar_coefficients
+
+    @property
+    def noise_openings(self) -> pd.DataFrame:
+        return self.stochastic.noise_openings
+
+    @property
+    def fitting_report(self) -> dict:
+        return self.stochastic.fitting_report
+
+    @property
+    def inflow_history(self) -> pd.DataFrame:
+        return self.scenario.inflow_history
+
+    @property
+    def correlation(self) -> dict:
+        return self.stochastic.correlation
+
+    @property
+    def inflow_lags_lf(self) -> pl.LazyFrame:
+        return self.simulation.inflow_lags_lf
+
+    @property
+    def training_metadata(self) -> dict:
+        return self.metadata.training
+
+    @property
+    def simulation_metadata(self) -> dict:
+        return self.metadata.simulation
+
+    @property
+    def policy_metadata(self) -> dict:
+        return self.metadata.policy
+
+    @property
+    def config(self) -> dict:
+        return self.temporal.config
+
+    @property
+    def discount_rate(self) -> float:
+        return self.temporal.discount_rate
+
+    @property
+    def stages_data(self) -> dict:
+        return self.temporal.stages_data
+
+    @property
+    def lp_bounds(self) -> pd.DataFrame:
+        return self.performance.lp_bounds
+
+    @property
+    def gc_constraints(self) -> list[dict]:
+        return self.gc.constraints
+
+    @property
+    def gc_bounds(self) -> pd.DataFrame:
+        return self.gc.bounds
+
+    @property
+    def gc_violations(self) -> pd.DataFrame:
+        return self.simulation.gc_violations
+
+    @property
+    def hydro_bounds(self) -> pd.DataFrame:
+        return self.scenario.hydro_bounds
+
+    @property
+    def thermal_bounds(self) -> pd.DataFrame:
+        return self.scenario.thermal_bounds
+
+    @property
+    def ncs_stats(self) -> pd.DataFrame:
+        return self.scenario.ncs_stats
+
+    @property
+    def line_block_bounds(self) -> pd.DataFrame:
+        return self.scenario.line_block_bounds
+
+    @property
+    def retry_histogram(self) -> pd.DataFrame:
+        return self.performance.retry_histogram

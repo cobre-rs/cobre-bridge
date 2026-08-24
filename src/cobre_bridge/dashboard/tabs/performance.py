@@ -289,7 +289,7 @@ def render(data: DashboardData) -> str:
     2. Top-Level Timing — non-overlapping phases that sum to iteration total.
     3. Forward / Backward Wall-Time Breakdown — decomposes each wall phase
        into its sub-components (sums exactly to the parent wall).
-    4. Parallel Overhead Decomposition — epic-01 setup/imbalance/scheduling.
+    4. Parallel Overhead Decomposition — setup/imbalance/scheduling.
     5. Parallel Efficiency — aggregate worker setup CPU vs parallel wall.
     6. Solver Progression — LP solves, simplex, failures, retries per iter.
     7. Solver CPU Components — per-iteration breakdown of solve vs setup work.
@@ -423,7 +423,7 @@ def render(data: DashboardData) -> str:
 
     retry_content = chart_grid(
         [
-            _chart_retry_histogram(data.retry_histogram),
+            wrap_chart(_chart_retry_histogram(data.retry_histogram)),
             wrap_chart(chart_retry_level_heatmap(data.retry_histogram)),
         ]
     )

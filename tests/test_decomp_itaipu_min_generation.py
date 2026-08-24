@@ -9,6 +9,7 @@ synthetic-calendar idiom ``test_decomp_group_bounds.py`` uses.
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -17,6 +18,7 @@ import pytest
 from cobre_bridge.decomp.hydro import convert_itaipu_frequency_min_generation
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
+from tests.conftest import make_decomp_case
 
 _ITAIPU_CODE = 66
 
@@ -43,6 +45,10 @@ def _ri_frame(rows: list[dict]) -> pd.DataFrame:
 
 def _dadger(ri: pd.DataFrame | None):
     return SimpleNamespace(ri=lambda df=True: ri)
+
+
+def _case(ri: pd.DataFrame | None):
+    return make_decomp_case(Path("unused"), dadger=_dadger(ri), calendar=_calendar())
 
 
 def _itaipu_id() -> int:
@@ -73,9 +79,7 @@ class TestConvertItaipuFrequencyMinGeneration:
                 },
             ]
         )
-        result = convert_itaipu_frequency_min_generation(
-            _dadger(ri), _id_map(), _calendar()
-        )
+        result = convert_itaipu_frequency_min_generation(_case(ri), _id_map())
         hid = _itaipu_id()
         # group 0 = 50 Hz: stage 0 explicit, stage 1 forward-filled, stage 2 explicit
         assert result[(hid, 0, 0)] == [4267.2, 4073.2, 3491.7]
@@ -87,12 +91,7 @@ class TestConvertItaipuFrequencyMinGeneration:
         assert result[(hid, 1, 2)] == [1800.0, 1800.0, 1800.0]
 
     def test_no_ri_register_returns_empty(self) -> None:
-        assert (
-            convert_itaipu_frequency_min_generation(
-                _dadger(None), _id_map(), _calendar()
-            )
-            == {}
-        )
+        assert convert_itaipu_frequency_min_generation(_case(None), _id_map()) == {}
 
     def test_itaipu_not_operated_returns_empty(self) -> None:
         ri = _ri_frame(
@@ -110,7 +109,7 @@ class TestConvertItaipuFrequencyMinGeneration:
         )
         assert (
             convert_itaipu_frequency_min_generation(
-                _dadger(ri), _id_map(with_itaipu=False), _calendar()
+                _case(ri), _id_map(with_itaipu=False)
             )
             == {}
         )
@@ -129,7 +128,7 @@ class TestConvertItaipuFrequencyMinGeneration:
             ]
         )
         with pytest.raises(ValueError, match="2 patamares"):
-            convert_itaipu_frequency_min_generation(_dadger(ri), _id_map(), _calendar())
+            convert_itaipu_frequency_min_generation(_case(ri), _id_map())
 
     def test_missing_estagio_one_base_raises(self) -> None:
         ri = _ri_frame(
@@ -146,7 +145,7 @@ class TestConvertItaipuFrequencyMinGeneration:
             ]
         )
         with pytest.raises(ValueError, match="no row declares estágio 1"):
-            convert_itaipu_frequency_min_generation(_dadger(ri), _id_map(), _calendar())
+            convert_itaipu_frequency_min_generation(_case(ri), _id_map())
 
     def test_estagio_outside_calendar_raises(self) -> None:
         ri = _ri_frame(
@@ -172,4 +171,4 @@ class TestConvertItaipuFrequencyMinGeneration:
             ]
         )
         with pytest.raises(ValueError, match="outside the calendar"):
-            convert_itaipu_frequency_min_generation(_dadger(ri), _id_map(), _calendar())
+            convert_itaipu_frequency_min_generation(_case(ri), _id_map())

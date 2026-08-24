@@ -11,7 +11,7 @@ from cobre_bridge.ui.html import (
     section_title,
     wrap_chart,
 )
-from cobre_bridge.ui.js import TAB_SWITCH_JS
+from cobre_bridge.ui.js import PLOTLY_TITLE_SHIM_JS, TAB_SWITCH_JS
 from cobre_bridge.ui.theme import COMPARISON_COLORS
 
 CSS = comparison_css()
@@ -41,13 +41,14 @@ def build_comparison_html(
     title: str,
     tab_contents: dict[str, str],
 ) -> str:
-    """Build a complete self-contained HTML comparison report."""
+    """Build a complete HTML comparison report that loads plotly.js from a CDN."""
     return build_html(
         title=title,
         tab_defs=COMPARISON_TABS,
         tab_contents=tab_contents,
         css=CSS,
         js=JS,
+        required_js=PLOTLY_TITLE_SHIM_JS,
     )
 
 

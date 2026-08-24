@@ -429,6 +429,19 @@ def test_chart_retry_histogram_color_coding() -> None:
     assert "plotly" in html.lower()
 
 
+def test_render_wraps_retry_histogram_in_chart_card() -> None:
+    """The retry histogram must sit inside the standard chart-card wrapper,
+    matching its sibling heatmap (both wrap_chart(...)-ed at the call site)."""
+    data = _make_mock_data(retry_histogram=_make_retry_histogram())
+    html = render(data)
+
+    retry_start = html.index("Solver Retries")
+    retry_section = html[retry_start : html.index("Simulation", retry_start)]
+    # Before the fix, only the heatmap sibling was wrap_chart(...)-ed, so this
+    # section held exactly one "chart-card" div; now both charts are wrapped.
+    assert retry_section.count('<div class="chart-card">') == 2
+
+
 # ---------------------------------------------------------------------------
 # test_render_full_sections (ticket-021)
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 """Unit tests for cobre_bridge.dashboard.chart_helpers.
 
-Covers compute_percentiles, add_mean_p50_band, add_bounds_overlay,
+Covers compute_percentiles, stage_hours_weighted_mean, add_mean_p50_band,
 make_chart_card, compute_npv_costs, group_costs, and compute_cost_summary.
 """
 
@@ -9,7 +9,6 @@ from __future__ import annotations
 import dataclasses
 import math
 import re
-from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -17,18 +16,22 @@ import polars as pl
 import pytest
 
 from cobre_bridge.comparators import charts as _cmp_charts
+from cobre_bridge.comparators import report_builder
 from cobre_bridge.comparators.results import PercentileData, ResultComparison
 from cobre_bridge.dashboard.chart_helpers import (
     COST_GROUP_COLORS,
     COST_GROUPS,
-    add_bounds_overlay,
     add_mean_p50_band,
+    build_cost_table,
+    chart_cost_bar,
     compute_cost_summary,
     compute_npv_costs,
     compute_percentiles,
     group_costs,
     make_chart_card,
+    stage_hours_weighted_mean,
 )
+from tests.golden_utils import assert_html_golden
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -56,18 +59,6 @@ def percentile_df() -> pd.DataFrame:
             "p10": [float(i) * 0.8 for i in range(10)],
             "p50": [float(i) * 0.95 for i in range(10)],
             "p90": [float(i) * 1.2 for i in range(10)],
-        }
-    )
-
-
-@pytest.fixture()
-def bounds_df() -> pd.DataFrame:
-    """Return a bounds DataFrame with min_storage and max_storage columns."""
-    return pd.DataFrame(
-        {
-            "stage_id": list(range(1, 6)),
-            "min_storage": [10.0, 12.0, 11.0, 13.0, 14.0],
-            "max_storage": [90.0, 88.0, 92.0, 85.0, 87.0],
         }
     )
 
@@ -154,6 +145,95 @@ def test_compute_percentiles_custom_percentiles(
 
 
 # ---------------------------------------------------------------------------
+# stage_hours_weighted_mean
+# ---------------------------------------------------------------------------
+
+
+def test_stage_hours_weighted_mean_weights_by_stage_hours() -> None:
+    """A 648-hour stage outweighs a 168-hour stage, unlike a bare .mean().
+
+    stage 1: value=100, hours=168; stage 2: value=200, hours=648.
+    Weighted: (100*168 + 200*648) / (168 + 648) ~= 179.4, not the
+    unweighted mean of 150.0.
+    """
+    lf = pl.DataFrame(
+        {"stage_id": [1, 2], "line_id": [1, 1], "value": [100.0, 200.0]}
+    ).lazy()
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], {1: 168.0, 2: 648.0})
+
+    assert result.height == 1
+    weighted = result["value"][0]
+    assert weighted == pytest.approx(179.41176, rel=1e-4)
+    assert weighted != pytest.approx(150.0)
+
+
+def test_stage_hours_weighted_mean_uniform_duration_matches_bare_mean() -> None:
+    """Equal stage hours reduce the weighted mean to the plain mean (no-op case)."""
+    lf = pl.DataFrame(
+        {"stage_id": [1, 2], "line_id": [1, 1], "value": [100.0, 200.0]}
+    ).lazy()
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], {1: 720.0, 2: 720.0})
+
+    assert result["value"][0] == pytest.approx(150.0)
+
+
+def test_stage_hours_weighted_mean_stage_hours_as_dataframe() -> None:
+    """A stage-hours DataFrame (e.g. summed from a block-hours frame) works
+    the same as the ``{stage_id: hours}`` dict form."""
+    lf = pl.DataFrame(
+        {"stage_id": [1, 2], "line_id": [1, 1], "value": [100.0, 200.0]}
+    ).lazy()
+    stage_hours_df = pl.DataFrame({"stage_id": [1, 2], "_hours": [168.0, 648.0]})
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], stage_hours_df)
+
+    assert result["value"][0] == pytest.approx(179.41176, rel=1e-4)
+
+
+def test_stage_hours_weighted_mean_multiple_groups() -> None:
+    """Each group in group_cols is weighted independently."""
+    lf = pl.DataFrame(
+        {
+            "stage_id": [1, 2, 1, 2],
+            "line_id": [1, 1, 2, 2],
+            "value": [100.0, 200.0, 10.0, 20.0],
+        }
+    ).lazy()
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], {1: 168.0, 2: 648.0})
+
+    by_line = dict(zip(result["line_id"].to_list(), result["value"].to_list()))
+    assert by_line[1] == pytest.approx(179.41176, rel=1e-4)
+    assert by_line[2] == pytest.approx(17.941176, rel=1e-4)
+
+
+def test_stage_hours_weighted_mean_empty_frame_returns_empty() -> None:
+    """An empty input frame is a no-op, not an error."""
+    lf = pl.DataFrame(
+        schema={"stage_id": pl.Int64, "line_id": pl.Int64, "value": pl.Float64}
+    ).lazy()
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], {1: 168.0, 2: 648.0})
+
+    assert result.height == 0
+    assert list(result.columns) == ["line_id", "value"]
+
+
+def test_stage_hours_weighted_mean_zero_total_hours_returns_empty() -> None:
+    """Sigma(stage_hours) == 0 is a no-op rather than a division by zero."""
+    lf = pl.DataFrame(
+        {"stage_id": [1, 2], "line_id": [1, 1], "value": [100.0, 200.0]}
+    ).lazy()
+
+    result = stage_hours_weighted_mean(lf, "value", ["line_id"], {1: 0.0, 2: 0.0})
+
+    assert result.height == 0
+    assert list(result.columns) == ["line_id", "value"]
+
+
+# ---------------------------------------------------------------------------
 # add_mean_p50_band
 # ---------------------------------------------------------------------------
 
@@ -193,6 +273,14 @@ def test_add_mean_p50_band_returns_figure(percentile_df: pd.DataFrame) -> None:
     assert returned is fig
 
 
+def test_add_mean_p50_band_is_the_promoted_plotly_helpers_function() -> None:
+    """chart_helpers re-exports the helper promoted to ui.plotly_helpers rather
+    than defining its own copy — the two names must be the same object."""
+    from cobre_bridge.ui.plotly_helpers import add_mean_p50_band as _promoted
+
+    assert add_mean_p50_band is _promoted
+
+
 def test_add_mean_p50_band_empty_df() -> None:
     """Empty DataFrame causes no traces to be added."""
     empty_df = pd.DataFrame(columns=["stage_id", "mean", "p10", "p50", "p90"])
@@ -219,61 +307,6 @@ def test_add_mean_p50_band_show_p50_false(percentile_df: pd.DataFrame) -> None:
     )
     # mean + p10 lower + p90 upper = 3
     assert len(fig.data) == 3
-
-
-# ---------------------------------------------------------------------------
-# add_bounds_overlay
-# ---------------------------------------------------------------------------
-
-
-def test_add_bounds_overlay_both(bounds_df: pd.DataFrame) -> None:
-    """Two traces (min + max) are added when both columns are specified."""
-    fig = go.Figure()
-    result = add_bounds_overlay(
-        fig,
-        bounds_df,
-        "stage_id",
-        min_col="min_storage",
-        max_col="max_storage",
-    )
-
-    assert len(result.data) == 2
-    for trace in result.data:
-        assert trace.line.dash == "dash"
-        assert trace.line.color == "#6B7280"
-
-
-def test_add_bounds_overlay_min_only(bounds_df: pd.DataFrame) -> None:
-    """Only one trace is added when only min_col is specified."""
-    fig = go.Figure()
-    result = add_bounds_overlay(fig, bounds_df, "stage_id", min_col="min_storage")
-
-    assert len(result.data) == 1
-    assert "min_storage" in result.data[0].name
-
-
-def test_add_bounds_overlay_max_only(bounds_df: pd.DataFrame) -> None:
-    """Only one trace is added when only max_col is specified."""
-    fig = go.Figure()
-    result = add_bounds_overlay(fig, bounds_df, "stage_id", max_col="max_storage")
-
-    assert len(result.data) == 1
-    assert "max_storage" in result.data[0].name
-
-
-def test_add_bounds_overlay_none(bounds_df: pd.DataFrame) -> None:
-    """No-op when both min_col and max_col are None."""
-    fig = go.Figure()
-    result = add_bounds_overlay(fig, bounds_df, "stage_id")
-
-    assert len(result.data) == 0
-
-
-def test_add_bounds_overlay_returns_figure(bounds_df: pd.DataFrame) -> None:
-    """The function returns the same figure object (chaining support)."""
-    fig = go.Figure()
-    returned = add_bounds_overlay(fig, bounds_df, "stage_id", min_col="min_storage")
-    assert returned is fig
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +673,120 @@ def test_cost_group_colors_keys() -> None:
 
 
 # ---------------------------------------------------------------------------
+# build_cost_table
+# ---------------------------------------------------------------------------
+
+
+def test_build_cost_table_contains_table_and_thermal() -> None:
+    """build_cost_table must return HTML containing <table and group names."""
+    df = _make_costs_df()
+    summary = compute_cost_summary(df, 0.12)
+    html = build_cost_table(summary)
+
+    assert "<table" in html
+    assert "Thermal" in html
+
+
+def test_build_cost_table_contains_data_table_class() -> None:
+    """build_cost_table must return HTML with class 'data-table'."""
+    df = _make_costs_df()
+    summary = compute_cost_summary(df, 0.12)
+    html = build_cost_table(summary)
+    assert 'class="data-table"' in html
+
+
+def test_build_cost_table_has_tbody_with_rows() -> None:
+    """build_cost_table must include a <tbody> with at least one <tr>."""
+    df = _make_costs_df()
+    summary = compute_cost_summary(df, 0.12)
+    html = build_cost_table(summary)
+    assert "<tbody>" in html
+    assert "<tr>" in html
+
+
+def test_build_cost_table_empty_df_returns_placeholder() -> None:
+    """build_cost_table on an empty DataFrame must return the <p> fallback."""
+    html = build_cost_table(pd.DataFrame())
+    assert "<table" not in html
+    assert "No cost data" in html
+
+
+# ---------------------------------------------------------------------------
+# chart_cost_bar
+# ---------------------------------------------------------------------------
+
+
+def test_chart_cost_bar_returns_figure() -> None:
+    """chart_cost_bar must return a plotly Figure."""
+    df = _make_costs_df()
+    summary = compute_cost_summary(df, 0.12)
+    fig = chart_cost_bar(summary)
+    assert isinstance(fig, go.Figure)
+
+
+def test_chart_cost_bar_has_vertical_bar_traces() -> None:
+    """chart_cost_bar must produce at least one vertical Bar trace."""
+    df = _make_costs_df()
+    summary = compute_cost_summary(df, 0.12)
+    fig = chart_cost_bar(summary)
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    assert len(bar_traces) >= 1
+    # Bars are vertical: orientation is None (default) or "v", never "h"
+    for trace in bar_traces:
+        assert trace.orientation != "h"
+
+
+def test_chart_cost_bar_error_bars_p5_p95() -> None:
+    """chart_cost_bar must set error_y with the p5-p95 range on each bar trace.
+
+    Given p5=800, mean=1000, p95=1200, the trace must have
+    error_y.array=[200] and error_y.arrayminus=[200].
+    """
+    summary = pd.DataFrame(
+        {
+            "group": ["Thermal"],
+            "mean": [1000.0],
+            "std": [100.0],
+            "p5": [800.0],
+            "p10": [850.0],
+            "p90": [1150.0],
+            "p95": [1200.0],
+            "pct": [100.0],
+        }
+    )
+    fig = chart_cost_bar(summary)
+
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    assert len(bar_traces) == 1
+    trace = bar_traces[0]
+    assert trace.error_y is not None
+    assert trace.error_y.visible is True
+    assert trace.error_y.array == (200.0,)
+    assert trace.error_y.arrayminus == (200.0,)
+
+
+def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
+    """chart_cost_bar must omit error_y when p5 or p95 is NaN."""
+    summary = pd.DataFrame(
+        {
+            "group": ["Thermal"],
+            "mean": [1000.0],
+            "std": [0.0],
+            "p5": [math.nan],
+            "p10": [math.nan],
+            "p90": [math.nan],
+            "p95": [math.nan],
+            "pct": [100.0],
+        }
+    )
+    fig = chart_cost_bar(summary)
+
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    assert len(bar_traces) == 1
+    assert bar_traces[0].error_y is None or bar_traces[0].error_y.visible is not True
+
+
+# ---------------------------------------------------------------------------
 # ticket-009: comparators.charts golden-string parity
 #
 # These tests guard that re-pointing the per-stage / percentile-band
@@ -653,22 +800,9 @@ def test_cost_group_colors_keys() -> None:
 # part of the output is the random ``chart-<hex>`` div id emitted by
 # ``plotly_div`` (a fresh uuid per render, unrelated to this ticket); it is
 # normalised away by ``_strip_chart_id`` before comparison so the assertion
-# tests the numeric/structural payload only.
-#
-# To REGENERATE the goldens (only when an intentional, reviewed output change is
-# made): check out the legacy ``charts.py`` (``git show HEAD:...`` or stash the
-# re-point), then for each chart below write
-# ``charts.<fn>(...).`` to ``tests/golden/<fn>.html`` and restore your edits.
-# Equivalently, since the re-point is behaviour-preserving, rendering with the
-# current code and writing the result reproduces byte-identical goldens.
+# tests the numeric/structural payload only. Regenerate via
+# ``scripts/regen-goldens.sh``.
 # ---------------------------------------------------------------------------
-
-_GOLDEN_DIR = Path(__file__).parent / "golden"
-
-
-def _strip_chart_id(html: str) -> str:
-    """Normalise the random ``chart-<hex>`` div id (uuid per render)."""
-    return re.sub(r"chart-[0-9a-f]+", "chart-XXXX", html)
 
 
 def _rc(
@@ -757,8 +891,7 @@ def test_thermal_generation_chart_html_matches_golden(
     thermal_pct: pl.DataFrame,
 ) -> None:
     html = _cmp_charts.thermal_generation_chart(parity_results, thermal_pct)
-    golden = (_GOLDEN_DIR / "thermal_generation_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "thermal_generation_chart.html")
 
 
 def test_hydro_aggregate_chart_html_matches_golden(
@@ -768,8 +901,7 @@ def test_hydro_aggregate_chart_html_matches_golden(
     html = _cmp_charts.hydro_aggregate_chart(
         parity_results, "storage_final_hm3", "Hydro Storage", hydro_pct
     )
-    golden = (_GOLDEN_DIR / "hydro_aggregate_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "hydro_aggregate_chart.html")
 
 
 def test_system_comparison_chart_html_matches_golden(
@@ -779,8 +911,7 @@ def test_system_comparison_chart_html_matches_golden(
     html = _cmp_charts.system_comparison_chart(
         parity_results, "marginal_cost", "Bus Marginal Cost", bus_pct
     )
-    golden = (_GOLDEN_DIR / "system_comparison_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "system_comparison_chart.html")
 
 
 # ---------------------------------------------------------------------------
@@ -922,8 +1053,7 @@ def test_hydro_per_bus_chart_html_matches_golden(
         per_bus_hydro_meta,
         per_bus_bus_meta,
     )
-    golden = (_GOLDEN_DIR / "hydro_per_bus_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "hydro_per_bus_chart.html")
 
 
 def test_hydro_slack_per_bus_chart_html_matches_golden(
@@ -943,10 +1073,7 @@ def test_hydro_slack_per_bus_chart_html_matches_golden(
         per_bus_bus_meta,
         {0, 1, 2},
     )
-    golden = (_GOLDEN_DIR / "hydro_slack_per_bus_chart.html").read_text(
-        encoding="utf-8"
-    )
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "hydro_slack_per_bus_chart.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1046,8 +1173,8 @@ def line_summary_pct() -> pl.DataFrame:
 
 
 @pytest.fixture()
-def line_summary_bounds() -> pd.DataFrame:
-    return pd.DataFrame(
+def line_summary_bounds() -> pl.DataFrame:
+    return pl.DataFrame(
         {
             "line_id": [0, 0, 1, 1, 2, 2],
             "stage_id": [1, 2, 1, 2, 1, 2],
@@ -1069,7 +1196,7 @@ def line_summary_meta() -> list[dict]:
 def test_line_summary_chart_html_matches_golden(
     line_summary_results: list[ResultComparison],
     line_summary_pct: pl.DataFrame,
-    line_summary_bounds: pd.DataFrame,
+    line_summary_bounds: pl.DataFrame,
     line_summary_meta: list[dict],
 ) -> None:
     html = _cmp_charts.line_summary_chart(
@@ -1078,8 +1205,11 @@ def test_line_summary_chart_html_matches_golden(
         line_summary_bounds,
         line_summary_meta,
     )
-    golden = (_GOLDEN_DIR / "line_summary_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "line_summary_chart.html")
+    # Anti-silent-blank guard (see ticket-051): the overlay's two capacity
+    # traces must actually be present, not just byte-match an empty chart.
+    assert "Upper bound" in html
+    assert "Lower bound" in html
 
 
 def test_build_hydro_detail_tab_html_matches_golden(
@@ -1087,22 +1217,20 @@ def test_build_hydro_detail_tab_html_matches_golden(
     per_bus_hydro_pct: pl.DataFrame,
     detail_cobre_hydro: pl.DataFrame,
 ) -> None:
-    html = _cmp_charts.build_hydro_detail_tab(
+    html = report_builder.build_hydro_detail_tab(
         per_bus_results,
         per_bus_hydro_pct,
         detail_cobre_hydro,
     )
-    golden = (_GOLDEN_DIR / "build_hydro_detail_tab.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "build_hydro_detail_tab.html")
 
 
 def test_build_thermal_detail_tab_html_matches_golden(
     per_bus_results: list[ResultComparison],
     thermal_pct: pl.DataFrame,
 ) -> None:
-    html = _cmp_charts.build_thermal_detail_tab(per_bus_results, thermal_pct)
-    golden = (_GOLDEN_DIR / "build_thermal_detail_tab.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    html = report_builder.build_thermal_detail_tab(per_bus_results, thermal_pct)
+    assert_html_golden(html, "build_thermal_detail_tab.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1171,8 +1299,7 @@ def test_cobre_aggregate_chart_html_matches_golden(
         nw_offset=1,
         matched_ids=None,
     )
-    golden = (_GOLDEN_DIR / "cobre_aggregate_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "cobre_aggregate_chart.html")
 
 
 @pytest.fixture()
@@ -1206,8 +1333,7 @@ def test_system_per_bus_chart_html_matches_golden(
     html = _cmp_charts.system_per_bus_chart(
         per_bus_system_results, "deficit_mw", "Bus Deficit", per_bus_system_pct
     )
-    golden = (_GOLDEN_DIR / "system_per_bus_chart.html").read_text(encoding="utf-8")
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "system_per_bus_chart.html")
 
 
 @pytest.fixture()
@@ -1239,10 +1365,7 @@ def test_system_spillage_energy_chart_html_matches_golden(
     cobre_spill_energy: pl.DataFrame,
 ) -> None:
     html = _cmp_charts.system_spillage_energy_chart(spill_results, cobre_spill_energy)
-    golden = (_GOLDEN_DIR / "system_spillage_energy_chart.html").read_text(
-        encoding="utf-8"
-    )
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "system_spillage_energy_chart.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1255,7 +1378,8 @@ def test_system_spillage_energy_chart_html_matches_golden(
 #
 # The golden ``tests/golden/build_comparison_report_full.html`` was captured
 # from the LEGACY ``build_comparison_report(results, pctiles)`` call on the
-# fixtures below; only the random ``chart-<hex>`` div id is normalised.
+# fixtures below; the random ``chart-<hex>`` div id and the plotly.js CDN
+# version are normalised by ``_strip_chart_id`` before comparison.
 # ---------------------------------------------------------------------------
 
 
@@ -1362,10 +1486,7 @@ def test_build_comparison_report_dataset_golden() -> None:
     dataset = build_results_dataset(results, pct, 0.05)
     html = build_comparison_report(dataset)
 
-    golden = (_GOLDEN_DIR / "build_comparison_report_full.html").read_text(
-        encoding="utf-8"
-    )
-    assert _strip_chart_id(html) == _strip_chart_id(golden)
+    assert_html_golden(html, "build_comparison_report_full.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1414,8 +1535,7 @@ def test_report_tab_matches_golden(tab_id: str, golden_name: str) -> None:
     html = build_comparison_report(dataset)
     content = _extract_tab_content(html, tab_id)
 
-    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
-    assert _strip_chart_id(content) == _strip_chart_id(golden)
+    assert_html_golden(content, golden_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1450,8 +1570,7 @@ def test_report_hydro_tab_matches_golden(tab_id: str, golden_name: str) -> None:
     html = build_comparison_report(dataset)
     content = _extract_tab_content(html, tab_id)
 
-    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
-    assert _strip_chart_id(content) == _strip_chart_id(golden)
+    assert_html_golden(content, golden_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1490,8 +1609,7 @@ def test_report_thermal_productivity_tab_matches_golden(
     html = build_comparison_report(dataset)
     content = _extract_tab_content(html, tab_id)
 
-    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
-    assert _strip_chart_id(content) == _strip_chart_id(golden)
+    assert_html_golden(content, golden_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1597,8 +1715,7 @@ def test_report_constraints_performance_tab_matches_golden(
     html = build_comparison_report(dataset)
     content = _extract_tab_content(html, tab_id)
 
-    golden = (_GOLDEN_DIR / golden_name).read_text(encoding="utf-8")
-    assert _strip_chart_id(content) == _strip_chart_id(golden)
+    assert_html_golden(content, golden_name)
 
 
 def test_report_productivity_tab_empty_detail_renders_fallback() -> None:
@@ -1629,62 +1746,6 @@ def test_build_comparison_report_empty_dataset_has_all_tabs() -> None:
 
     for tab_id, _ in COMPARISON_TABS:
         assert f'id="{tab_id}"' in html
-
-
-# ---------------------------------------------------------------------------
-# ticket-013: typed metadata accessors — safe-default paths
-# ---------------------------------------------------------------------------
-
-
-def test_meta_frame_missing_key_returns_empty_polars() -> None:
-    """A missing key yields an empty ``pl.DataFrame`` (never raises)."""
-    from cobre_bridge.comparators.report_builder import _meta_frame
-
-    result = _meta_frame({}, "line")
-    assert isinstance(result, pl.DataFrame)
-    assert result.is_empty()
-
-
-def test_meta_frame_ill_typed_returns_empty_polars() -> None:
-    """An ill-typed value yields the empty ``pl.DataFrame`` default."""
-    from cobre_bridge.comparators.report_builder import _meta_frame
-
-    result = _meta_frame({"line": 123}, "line")
-    assert isinstance(result, pl.DataFrame)
-    assert result.is_empty()
-
-
-def test_meta_pd_frame_missing_key_returns_empty_pandas() -> None:
-    """A missing key yields an empty ``pd.DataFrame`` (never raises)."""
-    from cobre_bridge.comparators.report_builder import _meta_pd_frame
-
-    result = _meta_pd_frame({}, "line_bounds")
-    assert isinstance(result, pd.DataFrame)
-    assert result.empty
-
-
-def test_meta_int_missing_key_returns_zero() -> None:
-    """A missing key yields the int default ``0`` (never raises)."""
-    from cobre_bridge.comparators.report_builder import _meta_int
-
-    assert _meta_int({}, "nw_offset") == 0
-    assert _meta_int({"nw_offset": "x"}, "nw_offset") == 0
-
-
-def test_meta_dict_missing_key_returns_empty_dict() -> None:
-    """A missing key yields the empty-dict default (never raises)."""
-    from cobre_bridge.comparators.report_builder import _meta_dict
-
-    assert _meta_dict({}, "cobre_bus_meta") == {}
-    assert _meta_dict({"cobre_bus_meta": 5}, "cobre_bus_meta") == {}
-
-
-def test_meta_list_missing_key_returns_empty_list() -> None:
-    """A missing key yields the empty-list default (never raises)."""
-    from cobre_bridge.comparators.report_builder import _meta_list
-
-    assert _meta_list({}, "line_meta") == []
-    assert _meta_list({"line_meta": 5}, "line_meta") == []
 
 
 # ---------------------------------------------------------------------------

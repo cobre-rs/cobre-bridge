@@ -11,10 +11,10 @@ the external white-noise inflow model contributes no inflow-lag state, so cobre
 resolves a zero depth and reserving lag slots would be dead state (and would
 raise cobre's lag-blind-stage advisory for nothing). The inflow-lag depth is a
 property of the *boundary policy*: the boundary-FCF importer
-(``fcf/__init__.py``) reserves exactly the depth the loaded cuts reference — and
-only when a boundary policy is actually imported. cobre is slated to infer that
-depth from the checkpoint itself, retiring even the importer's patch (see
-``~/git/cobre/plans/state-space-inflow-lag-depth-inference-spec.md``).
+(``fcf/importer.py``) reserves exactly the depth the loaded cuts reference — and
+only when a boundary policy is actually imported. cobre's own inflow-lag-depth
+inference (sized from PAR(p) plus the boundary policy) is slated to derive that
+depth from the checkpoint itself, retiring even the importer's patch.
 
 ``penalties.json`` reuses the shared ρ-scaled hydro penalty construction
 with the deck's deficit cost and the converted productivities — the same
@@ -27,28 +27,23 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.converters.network import (
-    _PCORTEOL,
-    _PENALTIES_SCHEMA_URL,
-    _PEXC,
-    _PINT,
-    _hydro_penalty_costs,
+    PCORTEOL,
+    PEXC,
+    PINT,
+    hydro_penalty_costs,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from idecomp.decomp import Dadger
+    from cobre_bridge.decomp.case import DecompCase
 
 _LOG = logging.getLogger(__name__)
 
-_CONFIG_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/config.schema.json"
-)
 
-
-def convert_config(dadger: Dadger) -> dict:
+def convert_config(case: DecompCase) -> dict:
     """Build ``config.json``: Gap + NI stopping rules, external scenario
     sources, simulation on.
 
@@ -86,6 +81,7 @@ def convert_config(dadger: Dadger) -> dict:
     boundary-FCF importer reserves the cut-derived depth when a boundary is
     actually imported (see the module docstring).
     """
+    dadger = case.dadger
     ni = int(dadger.ni.iteracoes or 500)
     gp = float(dadger.gp.data[0])
     _LOG.info(
@@ -101,7 +97,7 @@ def convert_config(dadger: Dadger) -> dict:
     ]
 
     return {
-        "$schema": _CONFIG_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("config.json"),
         "training": {
             "selection": {"method": "enumerated"},
             "stopping_rules": stopping_rules,
@@ -140,19 +136,19 @@ def convert_penalties(
     values = list(productivities)
     rho_avg = sum(values) / len(values) if values else 1.0
     rho_max = max(values) if values else rho_avg
-    hydro_costs = _hydro_penalty_costs(
+    hydro_costs = hydro_penalty_costs(
         rho_avg=rho_avg,
         rho_max_acum=rho_max,
         penalid_costs={},
         max_deficit_cost=deficit_cost,
     )
     return {
-        "$schema": _PENALTIES_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("penalties.json"),
         "bus": {
             "deficit_segments": [{"depth_mw": None, "cost": deficit_cost}],
-            "excess_cost": _PEXC,
+            "excess_cost": PEXC,
         },
         "hydro": hydro_costs,
-        "line": {"exchange_cost": _PINT},
-        "non_controllable_source": {"curtailment_cost": _PCORTEOL},
+        "line": {"exchange_cost": PINT},
+        "non_controllable_source": {"curtailment_cost": PCORTEOL},
     }

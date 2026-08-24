@@ -23,10 +23,9 @@ every thermal as non-anticipated.
 Cobre side
 ----------
 For each anticipated thermal the LP needs a single MW value per delivery stage
-(``InitialConditions.past_anticipated_commitments`` — see plans/anticipated-thermals
-epic-02 ticket-008/009).  The MW is held *uniformly across blocks* of the delivery stage
-by the fishing row, so the right aggregation from the source model's per-block values is
-the
+(``InitialConditions.past_anticipated_commitments``).  The MW is held
+*uniformly across blocks* of the delivery stage by the fishing row, so the
+right aggregation from the source model's per-block values is the
 block-duration-weighted mean:
 
     MW_eq = Σ_b f_b · MW_b
@@ -163,7 +162,11 @@ def read_anticipated_dispatch(
     docstring).  Plants whose maximum lag exceeds the study horizon are
     truncated to the horizon length and a warning is emitted — Cobre's
     semantic validator otherwise rejects ``entry_stage_id +
-    lead_stages > n_stages``.
+    lead_stages > n_stages``. This in-study-only ceiling matches the source
+    model's own data availability; the sibling conversion track's
+    post-horizon anticipated-delivery surface
+    (:mod:`cobre_bridge.decomp.anticipated`) has no analog here — a
+    registered asymmetry, not an unported feature.
     """
     dger = case.dger
     if not is_anticipated_dispatch_enabled(dger):

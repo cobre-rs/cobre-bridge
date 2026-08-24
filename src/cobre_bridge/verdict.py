@@ -30,15 +30,19 @@ renamed or removed, or when an existing key's meaning changes — a breaking
 change for consumers. Adding a NEW optional key under ``summary`` is
 backward-compatible and does NOT bump the version.
 
-This is a pure leaf: it imports stdlib only (the cross-module ``Diagnostic`` /
-``CompareVerdict`` types are referenced under ``TYPE_CHECKING``), reads its
-inputs, allocates fresh dicts/lists, mutates nothing, and does no I/O. The
-``cli.py`` layer serializes the returned dict to stdout.
+This is a pure leaf: besides :class:`~cobre_bridge.diagnostics.Severity` (the
+runtime dependency of ``_convert_status``), it imports stdlib only — the
+cross-module ``Diagnostic`` / ``ConversionReport`` / ``CompareVerdict`` types
+are referenced under ``TYPE_CHECKING``. It reads its inputs, allocates fresh
+dicts/lists, mutates nothing, and does no I/O. The ``cli.py`` layer serializes
+the returned dict to stdout.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from cobre_bridge.diagnostics import Severity
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -46,6 +50,7 @@ if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
     from cobre_bridge.comparators.verdict import CompareVerdict
     from cobre_bridge.diagnostics import Diagnostic
+    from cobre_bridge.pipeline import ConversionReport
 
 # Bump only on a breaking change: a key rename/removal or a meaning change.
 # Adding a NEW optional key under ``summary`` is backward-compatible — do NOT bump.
@@ -200,3 +205,36 @@ def dashboard_summary(output: str, size_kb: float) -> dict[str, object]:
     ``{"output", "size_kb"}``.
     """
     return {"output": output, "size_kb": size_kb}
+
+
+def _convert_verdict_summary(report: ConversionReport | None) -> dict[str, object]:
+    """The convert ``summary`` block — entity counts, zeroed when *report* is None.
+
+    A thin wrapper over :func:`convert_summary` that supplies the five counts
+    from a :class:`ConversionReport` (or all zeros on the failure path, where
+    ``report`` is ``None``). Keeping the count plumbing here lets the
+    real-run, failure, and dry-run call sites share one source of truth while
+    the key order itself stays owned by :func:`convert_summary`.
+    """
+    if report is None:
+        return convert_summary(0, 0, 0, 0, 0)
+    return convert_summary(
+        report.hydro_count,
+        report.thermal_count,
+        report.bus_count,
+        report.line_count,
+        report.stage_count,
+    )
+
+
+def _convert_status(diagnostics: Sequence[Diagnostic], *, success: str) -> str:
+    """Derive the convert verdict ``status`` from diagnostic severity ONLY.
+
+    Returns ``"error"`` when any diagnostic has ``ERROR`` severity, otherwise the
+    caller's *success* token (``"ok"`` for a real run, ``"dry-run"`` for a dry
+    run). Validation outcome never enters here — it lands in ``summary.validation``
+    and the exit code, keeping ``status`` a pure diagnostics signal.
+    """
+    if any(d.severity is Severity.ERROR for d in diagnostics):
+        return "error"
+    return success

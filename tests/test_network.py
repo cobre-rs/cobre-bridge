@@ -658,6 +658,58 @@ def test_build_bus_balance_direction() -> None:
     assert "Source" in html or "Target" in html
 
 
+def test_build_bus_balance_weights_by_stage_hours() -> None:
+    """Net flow is stage-hours weighted across stages, not a bare mean.
+
+    One line, one scenario, two stages of different duration (168h vs 648h)
+    with net_flow_mw 100 and 200 respectively. The weighted flow is
+    (100*168 + 200*648) / (168 + 648) ~= 179.4 MW — stage-hours weighted,
+    not a bare cross-stage mean (which would give the wrong 150.0).
+    """
+    rows = [
+        {
+            "scenario_id": 0,
+            "stage_id": 0,
+            "block_id": 0,
+            "line_id": 0,
+            "net_flow_mw": 100.0,
+            "direct_flow_mw": 100.0,
+            "reverse_flow_mw": 0.0,
+        },
+        {
+            "scenario_id": 0,
+            "stage_id": 1,
+            "block_id": 0,
+            "line_id": 0,
+            "net_flow_mw": 200.0,
+            "direct_flow_mw": 200.0,
+            "reverse_flow_mw": 0.0,
+        },
+    ]
+    exchanges_lf = pl.DataFrame(rows).lazy()
+    bh_df = pl.DataFrame(
+        {"stage_id": [0, 1], "block_id": [0, 0], "_bh": [168.0, 648.0]}
+    )
+    line_meta = [
+        {
+            "id": 0,
+            "name": "L0",
+            "source_bus_id": 0,
+            "target_bus_id": 1,
+            "direct_capacity_mw": 300.0,
+            "reverse_capacity_mw": 150.0,
+        }
+    ]
+    bus_names = {0: "Source", 1: "Target"}
+
+    html = build_bus_balance(exchanges_lf, line_meta, bus_names, bh_df)
+
+    assert "+179.4 MW" in html
+    assert "-179.4 MW" in html
+    assert "+150.0 MW" not in html
+    assert "-150.0 MW" not in html
+
+
 def test_build_bus_balance_has_error_x_with_multiple_scenarios() -> None:
     """build_bus_balance must produce a trace with error_x set when there are
     multiple scenarios with different net balances.

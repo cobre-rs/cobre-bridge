@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.constraint_registers import (
         ConstraintCensus,
         ConstraintRecord,
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
 #: ``constraint_registers._BOUNDS_AXIS`` QDEF/QTUR/QDES/QVER entries. Keep the
 #: two mappings consistent for a *hydro* flow axis; a future hydro flow
 #: ``tipo`` gaining a bound axis updates both. ``QBOM`` is the one asymmetry:
-#: it joined ``_BOUNDS_AXIS`` in M2 (ticket-020) but is a *pumping*-entity
+#: it lives in ``_BOUNDS_AXIS`` but is a *pumping*-entity
 #: axis, not a hydro one, so it is dispatched to
 #: :func:`_qbom_pumping_contributions` instead of living in this mapping.
 _HQ_AXIS_BY_VARIABLE: dict[str, str] = {
@@ -450,10 +451,11 @@ def _hv_storage_contributions(
 
 
 def single_term_bound_contributions(
-    census: ConstraintCensus,
+    case: DecompCase,
     id_map: DecompIdMap,
+    *,
+    census: ConstraintCensus,
     pumping_station_ids: Mapping[int, int],
-    calendar: Sequence[OperativeStage],
     effective: EffectiveCadastro,
     hydro_capacities: Mapping[int, HydroCapacities],
 ) -> list[BoundContribution]:
@@ -497,6 +499,7 @@ def single_term_bound_contributions(
         ``"HQ"``/``"HV"``, or an ``"RE"`` record whose single term's variable
         is neither ``"generation"`` nor ``"thermal_generation"``.
     """
+    calendar = case.calendar
     contributions: list[BoundContribution] = []
     for record in census.to_bounds:
         if record.family == "RE":

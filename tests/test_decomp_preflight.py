@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
+import inspect
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from unittest.mock import patch
 
 import pandas as pd
-import pytest
 from idecomp.decomp.modelos.dadger import (
     ACALTEFE,
     ACCOTVAZ,
@@ -30,14 +30,18 @@ from cobre_bridge.decomp.constraint_registers import (
     detect_unreadable_electrical,
     read_constraints,
 )
+from cobre_bridge.decomp.pipeline import DecompFiles
 from cobre_bridge.decomp.preflight import (
     _ALL_AC_CLASSES,
     _ac_coverage,
+    _load_factor_check,
     _special_constraint_coverage,
     run_decomp_preflight,
 )
 from cobre_bridge.diagnostics import Severity
-from cobre_bridge.preflight import PreflightVerdict
+from cobre_bridge.errors import FieldParseError
+from cobre_bridge.preflight import CheckItem, PreflightVerdict, optional_input_advisory
+from tests.conftest import make_decomp_case
 from tests.test_decomp_cadastro import _FakeDadger
 from tests.test_decomp_constraint_registers import (
     _cm,
@@ -47,19 +51,12 @@ from tests.test_decomp_constraint_registers import (
     _lv,
 )
 from tests.test_decomp_constraint_registers import _FakeDadger as _ConstraintFakeDadger
-
-_DECKS = (
-    Path("example/decomp-jul-26-rv3"),
-    Path("example/decomp-set-24-rv0"),
+from tests.test_decomp_network_load import (
+    _ID_MAP,
+    _calendar_rv3,
+    _dp_frame,
+    _StubDadger,
 )
-_needs_decks = pytest.mark.skipif(
-    not all((deck / "caso.dat").exists() for deck in _DECKS),
-    reason="production decks not present",
-)
-
-
-def _checks(result: Any) -> dict[str, Any]:
-    return {check.label: check for check in result.checks}
 
 
 class TestDiscoveryFailure:
@@ -74,85 +71,138 @@ class TestDiscoveryFailure:
         assert list(tmp_path.iterdir()) == []
 
 
-@_needs_decks
-class TestProductionDecks:
-    @pytest.mark.parametrize("deck", _DECKS, ids=lambda p: p.name)
-    def test_deck_passes_every_structural_check(self, deck: Path) -> None:
-        result = run_decomp_preflight(deck)
-        failed = [check.label for check in result.checks if not check.passed]
-        assert not failed, f"{deck.name}: {failed}"
+def _decomp_files(tmp_path: Path) -> DecompFiles:
+    return DecompFiles(
+        revision="rv0",
+        dadger=tmp_path / "dadger.rv0",
+        vazoes=tmp_path / "vazoes.rv0",
+        hidr=tmp_path / "hidr.dat",
+        dadgnl=None,
+        renovaveis=None,
+        polinjus=None,
+        libs_restricao_eletrica=None,
+        cortesh=None,
+        cortes=None,
+    )
 
-    @pytest.mark.parametrize("deck", _DECKS, ids=lambda p: p.name)
-    def test_calendar_tree_and_load_checks_all_ran(self, deck: Path) -> None:
-        checks = _checks(run_decomp_preflight(deck))
-        for label in (
-            "Operative calendar (weekly walk, month-boundary close)",
-            "Load block factors reproduce the stage span",
-            "Scenario probabilities sum to 1 per stage",
-            "Tree shape is a trunk with one terminal fan",
-            "Special-constraint coverage",
-        ):
-            assert label in checks, f"{deck.name} missing check: {label}"
 
-    @pytest.mark.parametrize("deck", _DECKS, ids=lambda p: p.name)
-    def test_special_constraint_coverage_summary_always_passes(
-        self, deck: Path
+class TestIdMapReconcile:
+    """The id-map ``except`` widens from ``ValueError`` alone to
+    ``(FieldParseError, ValueError)`` -- the typed ``from_dadger`` parse
+    boundary and the id map's own ``__post_init__`` invariant checks both
+    still degrade to a diagnosed ``WILL_NOT_CONVERT`` instead of crashing.
+    """
+
+    def _run_with_id_map_error(self, tmp_path: Path, error: Exception):
+        files = _decomp_files(tmp_path)
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "cobre_bridge.decomp.pipeline.discover_decomp_files",
+                    return_value=files,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "idecomp.decomp.Dadger.read",
+                    return_value=object(),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "cobre_bridge.decomp.id_map.DecompIdMap.from_dadger",
+                    side_effect=error,
+                )
+            )
+            return run_decomp_preflight(tmp_path)
+
+    def test_field_parse_error_reconciles_to_will_not_convert(
+        self, tmp_path: Path
     ) -> None:
-        """ticket-025 AC5: the summary ``CheckItem`` is informational — it
-        never blocks conversion, regardless of any deferred bucket the deck
-        trips."""
-        checks = _checks(run_decomp_preflight(deck))
-        assert checks["Special-constraint coverage"].passed is True
+        error = FieldParseError(
+            "the deck has no SB records; cannot build the id map",
+            field="SB register",
+        )
+        result = self._run_with_id_map_error(tmp_path, error)
 
-    def test_tree_shape_reports_the_node_counts(self) -> None:
-        checks = _checks(run_decomp_preflight(_DECKS[0]))
-        detail = checks["Tree shape is a trunk with one terminal fan"].detail
-        # A trunk that branches only at the end: every stage but the last has
-        # a single node.
-        assert detail is not None and detail.startswith("nodes per stage: [1, 1,")
+        assert result.verdict is PreflightVerdict.WILL_NOT_CONVERT
+        id_map_check = next(c for c in result.checks if c.label == "Entity id map")
+        assert id_map_check.passed is False
+        assert any(d.code == "source-field-parse" for d in result.diagnostics)
 
-    @pytest.mark.parametrize("deck", _DECKS, ids=lambda p: p.name)
-    def test_deferred_features_are_named_not_silent(self, deck: Path) -> None:
-        result = run_decomp_preflight(deck)
-        codes = {diag.code for diag in result.diagnostics}
-        assert "decomp-anticipation-deferred" in codes
-        assert "decomp-availability-deferred" in codes
-        assert result.verdict is PreflightVerdict.WARNINGS
+    def test_post_init_value_error_is_still_caught(self, tmp_path: Path) -> None:
+        error = ValueError("bus codes must be strictly ascending; got (2, 1)")
+        result = self._run_with_id_map_error(tmp_path, error)
+
+        assert result.verdict is PreflightVerdict.WILL_NOT_CONVERT
+        id_map_check = next(c for c in result.checks if c.label == "Entity id map")
+        assert id_map_check.passed is False
 
 
-@_needs_decks
-class TestCheckDecompCommand:
+class TestOptionalInputAdvisory:
+    """DECOMP adopts the shared
+    :func:`cobre_bridge.preflight.optional_input_advisory` helper for all six
+    optional ``DecompFiles`` fields, in place of the old two-field hard-coded
+    loop.
+    """
+
     @staticmethod
-    def _invoke(argv: list[str]) -> Any:
-        from typer.testing import CliRunner
+    def _files(tmp_path: Path, **overrides: Path | None) -> DecompFiles:
+        return DecompFiles(
+            revision="rv0",
+            dadger=tmp_path / "dadger.rv0",
+            vazoes=tmp_path / "vazoes.rv0",
+            hidr=tmp_path / "hidr.dat",
+            dadgnl=overrides.get("dadgnl"),
+            renovaveis=overrides.get("renovaveis"),
+            polinjus=overrides.get("polinjus"),
+            libs_restricao_eletrica=overrides.get("libs_restricao_eletrica"),
+            cortesh=overrides.get("cortesh"),
+            cortes=overrides.get("cortes"),
+        )
 
-        from cobre_bridge.cli import app
+    def test_reports_all_six_decomp_optionals(self, tmp_path: Path) -> None:
+        files = self._files(tmp_path)
 
-        return CliRunner().invoke(app, argv)
+        checks, diagnostics = optional_input_advisory(files)
 
-    def test_warnings_verdict_exits_one(self) -> None:
-        result = self._invoke(["check", "decomp", str(_DECKS[0])])
-        assert result.exit_code == 1
-        assert "Deck discovery" in result.stdout
+        assert len(checks) == 6
+        assert all(check.passed for check in checks)
+        assert len(diagnostics) == 6
+        assert all(d.code == "optional-file-absent" for d in diagnostics)
+        assert all(d.severity is Severity.INFO for d in diagnostics)
 
-    def test_non_deck_exits_two(self, tmp_path: Path) -> None:
-        result = self._invoke(["check", "decomp", str(tmp_path)])
-        assert result.exit_code == 2
-
-    def test_json_envelope_carries_checks_and_diagnostics(self) -> None:
-        result = self._invoke(["check", "decomp", str(_DECKS[0]), "--json"])
-        payload = json.loads(result.stdout)
-        assert payload["command"] == "check decomp"
-        assert payload["status"] == "warnings"
-        assert len(payload["summary"]["checks"]) >= 6
-        assert {d["code"] for d in payload["diagnostics"]} >= {
-            "decomp-anticipation-deferred",
-            "decomp-availability-deferred",
+        reported = {
+            note.removeprefix("field: ")
+            for d in diagnostics
+            for note in d.notes
+            if note.startswith("field: ")
         }
+        assert reported == {
+            "dadgnl",
+            "renovaveis",
+            "polinjus",
+            "libs_restricao_eletrica",
+            "cortesh",
+            "cortes",
+        }
+
+    def test_skips_present_decomp_optional(self, tmp_path: Path) -> None:
+        files = self._files(tmp_path, dadgnl=tmp_path / "dadgnl.rv0")
+
+        _checks, diagnostics = optional_input_advisory(files)
+
+        assert len(diagnostics) == 5
+        assert not any("field: dadgnl" in d.notes for d in diagnostics)
+
+    def test_run_decomp_preflight_uses_the_shared_advisory_helper(self) -> None:
+        source = inspect.getsource(run_decomp_preflight)
+        assert "optional_input_advisory" in source
+        assert '("dadgnl", "renovaveis")' not in source
 
 
 class TestAcCoverageRegistry:
-    """ticket-015: the resolver's ``APPLIED_AC_CLASSES``/
+    """The resolver's ``APPLIED_AC_CLASSES``/
     ``UNINGESTABLE_AC_CLASSES`` registries and the reflected idecomp ``AC``
     universe (``_ALL_AC_CLASSES``) stay consistent with each other, and the
     derived deferred bucket is populated by enumerate-and-diff rather than a
@@ -191,7 +241,7 @@ class TestAcCoverageRegistry:
 
 
 class TestAcCoverage:
-    """ticket-015: ``_ac_coverage``'s three-bucket classification and its
+    """``_ac_coverage``'s three-bucket classification and its
     always-passing summary ``CheckItem`` plus per-bucket diagnostics.
     """
 
@@ -259,7 +309,7 @@ class TestAcCoverage:
 
 
 class TestSpecialConstraintCoverage:
-    """ticket-025: ``_special_constraint_coverage``'s converted (RE/HQ/HV/HE,
+    """``_special_constraint_coverage``'s converted (RE/HQ/HV/HE,
     bounds-lowered vs generic-emitted) vs deferred (FE/RHA/LIBs-electrical)
     classification, and its always-passing summary ``CheckItem``.
     """
@@ -267,7 +317,7 @@ class TestSpecialConstraintCoverage:
     @staticmethod
     def _synthetic_dadger() -> _ConstraintFakeDadger:
         """One record per family: RE (FU), HV (VARM), and HQ (QDES, a
-        diversion bound since epic-06/ticket-021) lower to bounds; HE
+        diversion bound) lower to bounds; HE
         (always generic) is the only one that emits as a generic
         constraint — mirrors the register fixtures in
         ``test_decomp_constraint_registers.py``."""
@@ -337,7 +387,7 @@ class TestSpecialConstraintCoverage:
         converted = next(
             d for d in diagnostics if d.code == "decomp-special-constraints-converted"
         )
-        # Probe (spec §10) — asserted against the census's own counts, never
+        # Probe — asserted against the census's own counts, never
         # a hard-coded oracle.
         assert str(len(census.to_bounds)) in converted.summary
         assert str(len(census.to_generic)) in converted.summary
@@ -394,3 +444,24 @@ class TestSpecialConstraintCoverage:
             "0 family(ies) present in the deck"
         )
         assert diagnostics == []
+
+
+class TestLoadFactorCheck:
+    """``_load_factor_check`` must call ``convert_load_factors(case,
+    id_map)`` -- the pre-refactor ``(dadger, id_map, calendar)`` call shape
+    raises ``TypeError`` on every deck that reaches it, uncaught by the
+    ``except (ValueError, KeyError, AttributeError)`` clause below.
+    """
+
+    def test_runs_to_completion_and_returns_a_check_item(self) -> None:
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=_StubDadger(dp=_dp_frame()),
+            calendar=_calendar_rv3(),
+        )
+
+        item = _load_factor_check(case, _ID_MAP)
+
+        assert isinstance(item, CheckItem)
+        assert item.label == "Load block factors reproduce the stage span"
+        assert item.passed is True

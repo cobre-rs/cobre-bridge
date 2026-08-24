@@ -9,6 +9,7 @@ or a ``--cobre-bin`` to resolve.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,19 +17,49 @@ from types import SimpleNamespace
 import pytest
 
 from cobre_bridge.decomp.fcf.bootstrap import (
-    TerminalManifest,
     bootstrap_terminal_manifest,
     ensure_writer_binding,
 )
 
-# Real, gitignored deck (see example/README.md) — CI does not have it, so the
-# one test that genuinely needs a live in-process ``cobre.run.run`` is
-# skipif-guarded on the deck's presence.
-_RV3_DECK = Path("example/decomp-jul-26-rv3")
-
 _MINIMAL_CONFIG = (
     '{"training": {"stopping_rules": [{"type": "iteration_limit", "limit": 500}]}}'
 )
+
+#: A node-native ``stages.json`` with a 2-leaf terminal fan — the same shape
+#: ``decomp/temporal.py::build_node_graph`` emits for a 2-scenario deck.
+_FANNED_STAGES: dict[str, object] = {
+    "policy_graph": {
+        "type": "finite_horizon",
+        "annual_discount_rate": 0.0,
+        "nodes": [
+            {"id": 0, "stage_id": 0, "scenario_id": 0, "label": "trunk-0"},
+            {"id": 1, "stage_id": 1, "scenario_id": 0, "label": "fan-0"},
+            {"id": 2, "stage_id": 1, "scenario_id": 1, "label": "fan-1"},
+        ],
+        "transitions": [
+            {"source_id": 0, "target_id": 1, "probability": 0.5},
+            {"source_id": 0, "target_id": 2, "probability": 0.5},
+        ],
+    },
+    "stages": [
+        {"id": 0, "start_date": "2026-01-01", "end_date": "2026-01-08"},
+        {"id": 1, "start_date": "2026-01-08", "end_date": "2026-01-15"},
+    ],
+}
+
+
+def _write_case(case_dir: Path, *, stages: dict[str, object] | None = None) -> None:
+    """Write a minimal case: ``config.json`` plus a fanned ``stages.json``.
+
+    Every bootstrap test needs a real ``stages.json`` now that
+    ``bootstrap_terminal_manifest`` materialises a flattened variant of it
+    before ever reaching the (stubbed) ``cobre.run.run`` call.
+    """
+    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
+    (case_dir / "stages.json").write_text(
+        json.dumps(stages if stages is not None else _FANNED_STAGES),
+        encoding="utf-8",
+    )
 
 
 def _stub_cobre(policy: dict, *, run: object | None = None) -> SimpleNamespace:
@@ -68,38 +99,21 @@ def test_ensure_writer_binding_passes_when_present(
     ensure_writer_binding()  # must not raise
 
 
-@pytest.mark.skipif(not _RV3_DECK.exists(), reason="decomp-jul-26-rv3 deck not present")
-def test_bootstrap_reads_terminal_manifest(tmp_path: Path) -> None:
-    from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-    case_dir = tmp_path / "converted"
-    convert_decomp_case(_RV3_DECK, case_dir, force=True)
-
-    manifest = bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
-
-    assert isinstance(manifest, TerminalManifest)
-    assert isinstance(manifest.state_dimension, int)
-    assert manifest.state_dimension > 0
-    assert isinstance(manifest.entity_manifest, tuple)
-    assert len(manifest.entity_manifest) > 0
-    for slot in manifest.entity_manifest:
-        assert isinstance(slot, dict)
-        assert "entity_type" in slot
-        assert "entity_id" in slot
-        assert "subindex" in slot
-
-
 def test_bootstrap_does_not_mutate_input_case(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The in-process run applies its 1-iteration cap through
-    ``config_overrides`` (in memory) and writes only to ``work_dir``, so the
-    input case's ``config.json`` is left byte-for-byte untouched — no scratch
-    copy, no file edit."""
+    ``config_overrides`` (in memory) and writes only to ``work_dir``; the
+    flattened variant is materialised under ``work_dir`` too
+    (:func:`~cobre_bridge.decomp.fcf.bootstrap._flatten_terminal_fan`), so
+    the input case's ``config.json`` and ``stages.json`` are left
+    byte-for-byte untouched — no scratch copy under ``case_dir``, no file
+    edit there."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
-    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
-    original_bytes = (case_dir / "config.json").read_bytes()
+    _write_case(case_dir)
+    original_config = (case_dir / "config.json").read_bytes()
+    original_stages = (case_dir / "stages.json").read_bytes()
 
     fake_policy = {
         "stage_cuts": [
@@ -107,29 +121,34 @@ def test_bootstrap_does_not_mutate_input_case(
                 "stage_id": 0,
                 "state_dimension": 1,
                 "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+                "graph_stage_id": 0,
             },
         ],
     }
     monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
     bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
 
-    assert (case_dir / "config.json").read_bytes() == original_bytes
+    assert (case_dir / "config.json").read_bytes() == original_config
+    assert (case_dir / "stages.json").read_bytes() == original_stages
 
 
 def test_bootstrap_passes_single_iteration_run_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The bootstrap drives cobre in-process for a single iteration: it calls
-    ``cobre.run.run`` on ``case_dir`` with ``skip_simulation`` on, an
-    ``iteration_limit`` 1 ``config_overrides``, and an ``on_iteration`` stop
-    callback — never a subprocess binary."""
+    ``cobre.run.run`` on the flattened variant (never ``case_dir`` itself)
+    with ``skip_simulation`` on, an ``iteration_limit`` 1 ``config_overrides``,
+    and an ``on_iteration`` stop callback — never a subprocess binary."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
-    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
+    _write_case(case_dir)
 
+    args: list[object] = []
     calls: list[dict[str, object]] = []
 
     def _record_run(*_args: object, **kwargs: object) -> None:
+        args.extend(_args)
         calls.append(kwargs)
 
     fake_policy = {
@@ -138,6 +157,8 @@ def test_bootstrap_passes_single_iteration_run_contract(
                 "stage_id": 0,
                 "state_dimension": 1,
                 "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+                "graph_stage_id": 0,
             },
         ],
     }
@@ -145,6 +166,7 @@ def test_bootstrap_passes_single_iteration_run_contract(
     bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
 
     assert len(calls) == 1
+    assert args == [str(tmp_path / "work" / "bootstrap_variant")]
     kwargs = calls[0]
     assert kwargs["skip_simulation"] is True
     assert kwargs["config_overrides"]["training.stopping_rules"] == [
@@ -154,13 +176,63 @@ def test_bootstrap_passes_single_iteration_run_contract(
     assert kwargs["on_iteration"](object()) is True  # stops at the first boundary
 
 
+def test_bootstrap_flattens_terminal_fan_and_preserves_stage_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 1 — given a ``stages.json`` policy graph with a 2-leaf terminal
+    fan, the bootstrap variant's ``policy_graph.nodes``/``transitions`` are
+    empty lists while every stage's own content is unchanged; the only
+    addition is the ``num_openings: 1`` companion field cobre's chain
+    dialect requires (see ``_flatten_terminal_fan``'s docstring). The real
+    case's own ``stages.json`` is left untouched."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_case(case_dir)
+
+    run_case_paths: list[str] = []
+
+    def _record_run(case_path: str, **_kwargs: object) -> None:
+        run_case_paths.append(case_path)
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+                "graph_stage_id": 0,
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy, run=_record_run))
+
+    bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+    assert len(run_case_paths) == 1
+    variant_dir = Path(run_case_paths[0])
+    assert variant_dir != case_dir
+
+    variant_doc = json.loads((variant_dir / "stages.json").read_text(encoding="utf-8"))
+    assert variant_doc["policy_graph"]["nodes"] == []
+    assert variant_doc["policy_graph"]["transitions"] == []
+    assert [
+        {key: value for key, value in stage.items() if key != "num_openings"}
+        for stage in variant_doc["stages"]
+    ] == _FANNED_STAGES["stages"]
+    assert all(stage["num_openings"] == 1 for stage in variant_doc["stages"])
+
+    real_doc = json.loads((case_dir / "stages.json").read_text(encoding="utf-8"))
+    assert real_doc == _FANNED_STAGES
+
+
 def test_bootstrap_raises_on_cobre_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A failure inside the run propagates as ``cobre.run.run``'s exception."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
-    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
+    _write_case(case_dir)
 
     def _boom(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("boom: bad case")
@@ -179,7 +251,7 @@ def test_bootstrap_raises_on_empty_stage_cuts(
     ``entity_manifest``; an empty ``stage_cuts`` list means no pool at all)."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
-    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
+    _write_case(case_dir)
 
     monkeypatch.setitem(sys.modules, "cobre", _stub_cobre({"stage_cuts": []}))
 
@@ -192,7 +264,7 @@ def test_bootstrap_raises_on_empty_terminal_entity_manifest(
 ) -> None:
     case_dir = tmp_path / "case"
     case_dir.mkdir()
-    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
+    _write_case(case_dir)
 
     fake_policy = {
         "stage_cuts": [
@@ -202,6 +274,132 @@ def test_bootstrap_raises_on_empty_terminal_entity_manifest(
     monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
 
     with pytest.raises(RuntimeError, match="empty terminal entity_manifest"):
+        bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+
+def test_bootstrap_returns_real_single_node_id_after_flattening(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 2 — a flattened bootstrap whose ``load_policy`` seam reports a
+    real single node (``node_id=7``, a non-sentinel, non-zero id — a value
+    that would stay hidden by an accidental falsy-``0`` check) threads
+    through with no ``RuntimeError``."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_case(case_dir)
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 7,
+                "graph_stage_id": 1,
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    manifest = bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+    assert manifest.node_id == 7
+    assert manifest.graph_stage_id == 1
+
+
+def test_bootstrap_returns_node_and_graph_stage_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_case(case_dir)
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+                "graph_stage_id": 4,
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    manifest = bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+    assert manifest.node_id == 0
+    assert manifest.graph_stage_id == 4
+
+
+def test_bootstrap_raises_on_missing_node_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_case(case_dir)
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "graph_stage_id": 4,
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    with pytest.raises(RuntimeError, match="node_id"):
+        bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+
+def test_bootstrap_raises_on_missing_graph_stage_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_case(case_dir)
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    with pytest.raises(RuntimeError, match="graph_stage_id"):
+        bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+
+def test_bootstrap_raises_on_node_id_shared_pool_sentinel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_case(case_dir)
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": -1,
+                "graph_stage_id": 4,
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    with pytest.raises(RuntimeError, match="shared-pool sentinel"):
         bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
 
 
@@ -215,7 +413,7 @@ def test_bootstrap_raises_when_cobre_absent(
     the dev venv and in a cobre-free venv."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
-    (case_dir / "config.json").write_text(_MINIMAL_CONFIG, encoding="utf-8")
+    _write_case(case_dir)
 
     monkeypatch.setitem(sys.modules, "cobre", None)
 

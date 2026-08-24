@@ -202,6 +202,59 @@ class TestRenderChecklist:
         assert "Optional input absent" in text  # delegated diagnostics panel
         assert "modif" in text
 
+    def test_render_checklist_diagnostics_console_routes_separately(self) -> None:
+        """``diagnostics_console`` sends diagnostics to a console DIFFERENT from
+        the headline/checklist console (the Option C stdout/stderr split)."""
+        headline_console, headline_buf = _console()
+        diag_console, diag_buf = _console()
+        warning = Diagnostic(
+            code="optional-file-absent",
+            severity=Severity.WARNING,
+            category="Preflight",
+            title="Optional input absent",
+            summary="Optional input 'modif' was not found.",
+        )
+        result = PreflightResult(
+            verdict=PreflightVerdict.WARNINGS,
+            diagnostics=[warning],
+            checks=[CheckItem(label="Required files present", passed=True)],
+        )
+        render_checklist(
+            result, console=headline_console, diagnostics_console=diag_console
+        )
+        headline_text = headline_buf.getvalue()
+        diag_text = diag_buf.getvalue()
+
+        assert "⚠ Ready with warnings" in headline_text
+        assert "Required files present" in headline_text
+        assert "Optional input absent" not in headline_text  # not on this console
+
+        assert "Optional input absent" in diag_text
+        assert "⚠ Ready with warnings" not in diag_text  # headline stayed put
+
+    def test_render_checklist_omitting_diagnostics_console_matches_console(
+        self,
+    ) -> None:
+        """Omitting ``diagnostics_console`` keeps diagnostics on *console* —
+        byte-identical to the pre-Option-C single-console call shape."""
+        console, buf = _console()
+        warning = Diagnostic(
+            code="optional-file-absent",
+            severity=Severity.WARNING,
+            category="Preflight",
+            title="Optional input absent",
+            summary="Optional input 'modif' was not found.",
+        )
+        result = PreflightResult(
+            verdict=PreflightVerdict.WARNINGS,
+            diagnostics=[warning],
+            checks=[CheckItem(label="Required files present", passed=True)],
+        )
+        render_checklist(result, console=console)
+        text = buf.getvalue()
+        assert "⚠ Ready with warnings" in text
+        assert "Optional input absent" in text  # same console, no split
+
 
 class TestMakeTableRowStyles:
     """``make_table``'s optional per-row style is style-only and tolerant."""

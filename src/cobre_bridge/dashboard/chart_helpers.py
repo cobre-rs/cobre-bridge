@@ -2,9 +2,8 @@
 
 Provides reusable functions for building Plotly traces that follow the v2
 dashboard convention: every line chart shows a mean solid line, a p50/median
-dashed line, and a p10-p90 shaded band.  Bounds overlays and HTML card
-wrapping are also provided here so that all tab modules share a single,
-consistent implementation.
+dashed line, and a p10-p90 shaded band.  HTML card wrapping is also provided
+here so that all tab modules share a single, consistent implementation.
 
 Also provides NPV cost computation and cost category grouping helpers used
 by the Overview and Costs tabs.
@@ -23,9 +22,11 @@ from cobre_bridge.ui.plotly_helpers import (
     MARGIN_DEFAULTS as _MARGIN,
 )
 from cobre_bridge.ui.plotly_helpers import (
+    add_mean_p50_band as add_mean_p50_band,
+)
+from cobre_bridge.ui.plotly_helpers import (
     fig_to_html,
 )
-from cobre_bridge.ui.theme import BOUND_LINE_COLOR, hex_to_rgba
 
 try:
     import pandas as pd
@@ -143,191 +144,64 @@ def compute_percentiles(
     return result.reset_index()
 
 
-def add_mean_p50_band(
-    fig: go.Figure,
-    df: pd.DataFrame,
-    x_col: str,
-    name: str,
-    color: str,
-    row: int | None = None,
-    col: int | None = None,
-    show_band: bool = True,
-    show_p50: bool = True,
-) -> go.Figure:
-    """Add mean, p50, and p10-p90 band traces to *fig*.
+def stage_hours_weighted_mean(
+    lf: pl.LazyFrame | pl.DataFrame,
+    value_col: str,
+    group_cols: list[str],
+    stage_hours: dict[int, float] | pl.DataFrame,
+) -> pl.DataFrame:
+    """Collapse a per-stage rate across the horizon into one value per group.
 
-    The function adds up to three :class:`plotly.graph_objects.Scatter` traces:
-
-    * **Mean** — solid line, width 2, full opacity.
-    * **P50** — dashed line, width 1.5, 70% opacity (omitted when
-      *show_p50* is ``False``).
-    * **P10-P90 band** — two traces required by Plotly's ``fill="tonexty"``
-      convention: the lower bound (p10) is plotted first as an invisible line,
-      then the upper bound (p90) is plotted with ``fill="tonexty"`` at 15%
-      opacity (omitted when *show_band* is ``False``).
-
-    The function is a no-op when *df* is empty.
+    Weight a per-stage rate by stage hours; a bare ``.mean()`` gives a
+    648-hour stage the same weight as a 168-hour stage.
 
     Args:
-        fig: The :class:`plotly.graph_objects.Figure` to mutate.
-        df: Pre-computed percentile DataFrame as returned by
-            :func:`compute_percentiles`.  Must contain ``x_col``, ``"mean"``,
-            ``"p10"``, and ``"p90"`` columns (and ``"p50"`` when
-            *show_p50* is ``True``).
-        x_col: Name of the column used as the x-axis values.
-        name: Display name for the trace group (used in the legend).
-        color: Hex or CSS colour string for the traces.
-        row: Subplot row (1-based) for :meth:`~plotly.graph_objects.Figure.add_trace`.
-        col: Subplot column (1-based).
-        show_band: When ``False``, the p10-p90 filled area is omitted.
-        show_p50: When ``False``, the p50 dashed line is omitted.
+        lf: (Lazy)Frame carrying ``stage_id``, *value_col*, and every column
+            in *group_cols*.
+        value_col: Name of the per-stage rate column to collapse across
+            stages (e.g. MW, m3/s) — never an already-summed energy column.
+        group_cols: Columns identifying the groups the horizon is reduced to
+            (e.g. ``["scenario_id", "line_id"]``); must not include
+            ``stage_id``.
+        stage_hours: Either ``{stage_id: hours}`` or a DataFrame with
+            ``stage_id`` and ``_hours`` columns (e.g. summed from a
+            block-hours frame).
 
     Returns:
-        The same *fig* object (enables method chaining).
+        A :class:`polars.DataFrame` with ``[*group_cols, value_col]``, one
+        row per group, holding ``Σ(value·stage_hours) / Σ(stage_hours)``.
+        Empty (with the expected schema) when *lf* has no rows or the total
+        stage hours are zero.
     """
-    if df.empty:
-        return fig
+    if pl is None:  # pragma: no cover
+        raise ImportError("polars is required for stage_hours_weighted_mean")
 
-    subplot_kwargs: dict = {}
-    if row is not None:
-        subplot_kwargs["row"] = row
-    if col is not None:
-        subplot_kwargs["col"] = col
-
-    x = df[x_col]
-
-    # Mean (solid line)
-    fig.add_trace(
-        go.Scatter(
-            x=x,
-            y=df["mean"],
-            name=name,
-            legendgroup=name,
-            mode="lines",
-            line=dict(color=color, width=2),
-        ),
-        **subplot_kwargs,
+    hours_df = (
+        pl.DataFrame(
+            {
+                "stage_id": list(stage_hours.keys()),
+                "_hours": list(stage_hours.values()),
+            }
+        )
+        if isinstance(stage_hours, dict)
+        else stage_hours
     )
+    expected_cols = [*group_cols, value_col]
 
-    # P50 (dashed line)
-    if show_p50:
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=df["p50"],
-                name=f"{name} P50",
-                legendgroup=name,
-                showlegend=False,
-                mode="lines",
-                line=dict(color=color, width=1.5, dash="dash"),
-                opacity=0.7,
-            ),
-            **subplot_kwargs,
+    if hours_df.height == 0 or hours_df["_hours"].sum() == 0:
+        return pl.DataFrame(schema={c: pl.Float64 for c in expected_cols})
+
+    lazy = lf.lazy() if isinstance(lf, pl.DataFrame) else lf
+    return (
+        lazy.join(hours_df.lazy(), on="stage_id")
+        .group_by(group_cols)
+        .agg(
+            (
+                (pl.col(value_col) * pl.col("_hours")).sum() / pl.col("_hours").sum()
+            ).alias(value_col)
         )
-
-    # P10-P90 band
-    if show_band:
-        # Lower bound (invisible, reference for fill)
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=df["p10"],
-                name=f"{name} P10",
-                legendgroup=name,
-                showlegend=False,
-                mode="lines",
-                line=dict(width=0),
-                hoverinfo="skip",
-            ),
-            **subplot_kwargs,
-        )
-        # Upper bound (fills to p10)
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=df["p90"],
-                name=f"{name} Band",
-                legendgroup=name,
-                showlegend=False,
-                mode="lines",
-                line=dict(width=0),
-                fill="tonexty",
-                fillcolor=hex_to_rgba(color, 0.15),
-                hoverinfo="skip",
-            ),
-            **subplot_kwargs,
-        )
-
-    return fig
-
-
-def add_bounds_overlay(
-    fig: go.Figure,
-    bounds_df: pd.DataFrame,
-    x_col: str,
-    min_col: str | None = None,
-    max_col: str | None = None,
-    row: int | None = None,
-    col: int | None = None,
-) -> go.Figure:
-    """Overlay dashed grey reference lines for min/max bounds on *fig*.
-
-    Either *min_col* or *max_col* (or both) may be specified.  When both are
-    ``None`` the function is a no-op.
-
-    Args:
-        fig: The :class:`plotly.graph_objects.Figure` to mutate.
-        bounds_df: DataFrame with one row per x value containing the bound
-            columns.  Must include ``x_col`` and whichever of *min_col* /
-            *max_col* are not ``None``.
-        x_col: Name of the x-axis column in *bounds_df*.
-        min_col: Column name for the lower bound; omitted when ``None``.
-        max_col: Column name for the upper bound; omitted when ``None``.
-        row: Subplot row (1-based).
-        col: Subplot column (1-based).
-
-    Returns:
-        The same *fig* object (enables method chaining).
-    """
-    if min_col is None and max_col is None:
-        return fig
-
-    subplot_kwargs: dict = {}
-    if row is not None:
-        subplot_kwargs["row"] = row
-    if col is not None:
-        subplot_kwargs["col"] = col
-
-    x = bounds_df[x_col]
-    bound_line = dict(color=BOUND_LINE_COLOR, width=1.5, dash="dash")
-
-    if min_col is not None:
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=bounds_df[min_col],
-                name=f"Min ({min_col})",
-                mode="lines",
-                line=bound_line,
-                showlegend=True,
-            ),
-            **subplot_kwargs,
-        )
-
-    if max_col is not None:
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=bounds_df[max_col],
-                name=f"Max ({max_col})",
-                mode="lines",
-                line=bound_line,
-                showlegend=True,
-            ),
-            **subplot_kwargs,
-        )
-
-    return fig
+        .collect(engine="streaming")
+    )
 
 
 def make_chart_card(
@@ -540,3 +414,113 @@ def compute_cost_summary(
 
     agg = agg.sort_values("mean", ascending=False).reset_index(drop=True)
     return agg[summary_cols]
+
+
+def chart_cost_bar(summary_df: pd.DataFrame) -> go.Figure:
+    """Build a vertical bar chart of NPV cost by group with p5–p95 error bars.
+
+    One bar per cost group, sorted descending by mean value.  Each bar has
+    asymmetric error bars showing the p5–p95 range across scenarios.  Groups
+    with zero mean are excluded.
+
+    Args:
+        summary_df: DataFrame with columns
+            ``["group", "mean", "p5", "p95", ...]`` as returned by
+            :func:`~cobre_bridge.dashboard.chart_helpers.compute_cost_summary`.
+
+    Returns:
+        A :class:`plotly.graph_objects.Figure`.
+    """
+    import math
+
+    nz = summary_df[summary_df["mean"] > 0].copy()
+    if nz.empty:
+        nz = summary_df.head(1)
+
+    groups: list[str] = []
+    means: list[float] = []
+    colors: list[str] = []
+    err_plus: list[float] = []
+    err_minus: list[float] = []
+    has_errors = False
+
+    for _, row in nz.iterrows():
+        group = str(row["group"])
+        mean_val = float(row["mean"])
+        groups.append(group)
+        means.append(mean_val)
+        colors.append(COST_GROUP_COLORS.get(group, "#6B7280"))
+
+        ep, em = 0.0, 0.0
+        if "p5" in row.index and "p95" in row.index:
+            p5 = float(row["p5"])
+            p95 = float(row["p95"])
+            if not (math.isnan(p5) or math.isnan(p95)):
+                ep = p95 - mean_val
+                em = mean_val - p5
+                has_errors = True
+        err_plus.append(ep)
+        err_minus.append(em)
+
+    error_y: dict | None = None
+    if has_errors:
+        error_y = dict(
+            type="data",
+            array=err_plus,
+            arrayminus=err_minus,
+            visible=True,
+        )
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=groups,
+            y=means,
+            marker_color=colors,
+            error_y=error_y,
+            showlegend=False,
+        )
+    )
+    fig.update_layout(
+        yaxis_title="NPV Cost",
+        xaxis_tickangle=-35,
+        margin=_MARGIN,
+    )
+    return fig
+
+
+def build_cost_table(summary_df: pd.DataFrame) -> str:
+    """Return a ``<table class="data-table">`` HTML string from a cost summary.
+
+    Args:
+        summary_df: DataFrame with columns
+            ``["group", "mean", "std", "p10", "p90", "pct"]`` as returned
+            by :func:`~cobre_bridge.dashboard.chart_helpers.compute_cost_summary`.
+
+    Returns:
+        An HTML string containing a complete ``<table>`` element, or a
+        fallback ``<p>`` when *summary_df* is empty.
+    """
+    if summary_df.empty:
+        return "<p>No cost data available.</p>"
+
+    headers = ("Group", "Mean", "Std", "P10", "P90", "% of Total")
+    header_cells = "".join(f"<th>{h}</th>" for h in headers)
+    rows = [
+        f"<tr>"
+        f"<td>{row['group']}</td>"
+        f"<td>{row['mean']:,.0f}</td>"
+        f"<td>{row['std']:,.0f}</td>"
+        f"<td>{row['p10']:,.0f}</td>"
+        f"<td>{row['p90']:,.0f}</td>"
+        f"<td>{row['pct']:.1f}%</td>"
+        f"</tr>"
+        for _, row in summary_df.iterrows()
+    ]
+
+    return (
+        '<table class="data-table" style="width:100%;border-collapse:collapse;">'
+        f"<thead><tr>{header_cells}</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+    )

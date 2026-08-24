@@ -17,7 +17,9 @@ Requires Python >= 3.12. `cobre-python` is bundled as a core dependency, so
 | Command                                                | What it does                                             |
 | ------------------------------------------------------ | -------------------------------------------------------- |
 | `cobre-bridge convert newave <SRC> <DST>`              | Convert a NEWAVE case to Cobre input format.             |
+| `cobre-bridge convert decomp <SRC> <DST>`              | Convert a DECOMP case to Cobre input format.             |
 | `cobre-bridge check newave <SRC>`                      | Preflight-validate NEWAVE inputs (no conversion).        |
+| `cobre-bridge check decomp <SRC>`                      | Preflight-validate DECOMP inputs (no conversion).        |
 | `cobre-bridge compare newave <NEWAVE_DIR> <COBRE_DIR>` | Compare simulation results against Cobre output.         |
 | `cobre-bridge compare decomp <DECOMP_DIR> <COBRE_DIR>` | Compare a DECOMP run against its converted Cobre output. |
 | `cobre-bridge dashboard <CASE_DIR>`                    | Build an interactive HTML dashboard from Cobre results.  |
@@ -60,7 +62,8 @@ cobre-bridge --show-completion      # print the script
 ```bash
 pip install -e ".[dev]"
 pytest
-ruff check src/
+ruff check .
+ruff format --check .
 ```
 
 ## License

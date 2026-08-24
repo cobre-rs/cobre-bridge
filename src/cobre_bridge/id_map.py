@@ -1,8 +1,8 @@
 """NewaveIdMap: deterministic 1-based-to-0-based entity ID remapping.
 
 Accepts sorted lists of the source model entity IDs and provides 0-based lookups that
-are consistent across all entity files.  Tickets 010 and 011 import this class to share
-the same mapping produced during entity conversion.
+are consistent across all entity files.  Both conversion tracks import this class
+to share the same mapping produced during entity conversion.
 """
 
 from __future__ import annotations
@@ -117,8 +117,7 @@ def build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
     Reads ``confhd.dat`` (hydros, existing non-fictitious only), ``conft.dat``
     (thermals), ``sistema.dat`` + ``ree.dat`` (subsystems). This is the single public
     entry point shared by the conversion pipeline and the comparators, so both derive
-    the source model→Cobre mapping the same way (it used to live as a private
-    ``pipeline._build_id_map`` that the comparators reached into).
+    the source model→Cobre mapping the same way.
 
     This path-only entry point intentionally does **not** thread ``exph``, so it
     forwards ``exph=None`` to :func:`build_id_map_from_readers`: the comparators and

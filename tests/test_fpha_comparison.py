@@ -2,8 +2,7 @@
 
 Covers the two source-model readers (``read_fpha_planes`` / ``read_fpha_grid``),
 the Cobre reader (``read_cobre_fpha_planes``), the envelope evaluator
-(``_evaluate_fpha_envelope``), and the comparison builder
-(``build_fpha_comparison``).
+(``fpha.dense_grid``), and the comparison builder (``build_fpha_comparison``).
 """
 
 from __future__ import annotations
@@ -17,11 +16,9 @@ import polars as pl
 import pytest
 
 from cobre_bridge.comparators.alignment import HydroEntity
-from cobre_bridge.comparators.analyze import (
-    _evaluate_fpha_envelope,
-    build_fpha_comparison,
-)
+from cobre_bridge.comparators.analyze import build_fpha_comparison
 from cobre_bridge.comparators.cobre_readers import read_cobre_fpha_planes
+from cobre_bridge.comparators.fpha import dense_grid
 from cobre_bridge.comparators.newave_readers import read_fpha_grid, read_fpha_planes
 
 # --------------------------------------------------------------------------- #
@@ -149,15 +146,13 @@ def test_evaluate_fpha_envelope_takes_min_over_planes() -> None:
     q = np.array([5.0, 20.0])
     zeros = np.zeros_like(q)
 
-    out = _evaluate_fpha_envelope(
-        gamma_0, gamma_v, gamma_q, gamma_s, mult, zeros, q, zeros
-    )
+    out = dense_grid(gamma_0, gamma_v, gamma_q, gamma_s, mult, zeros, q, zeros)
     assert out.tolist() == [5.0, 10.0]
 
 
 def test_evaluate_fpha_envelope_applies_volume_offset() -> None:
     # GH = 0.1 * useful_volume, useful = v - offset. At v=110, offset=10 -> 10.0.
-    out = _evaluate_fpha_envelope(
+    out = dense_grid(
         np.array([0.0]),
         np.array([0.1]),
         np.array([0.0]),
@@ -321,7 +316,7 @@ def test_build_fpha_comparison_run_of_river_collapses_volume_axis() -> None:
             }
         ]
     )
-    hydros = [HydroEntity(newave_code=10, cobre_id=0, name="ROR", has_reservoir=False)]
+    hydros = [HydroEntity(newave_code=10, cobre_id=0, name="ROR")]
 
     metrics, surface, spill = build_fpha_comparison(nw, grid, cb, hydros)
 
@@ -388,7 +383,7 @@ def test_build_fpha_comparison_reconciles_useful_vs_absolute_volume() -> None:
             }
         ]
     )
-    hydros = [HydroEntity(newave_code=20, cobre_id=3, name="RES", has_reservoir=True)]
+    hydros = [HydroEntity(newave_code=20, cobre_id=3, name="RES")]
 
     metrics, surface, _ = build_fpha_comparison(nw, grid, cb, hydros)
 
@@ -451,7 +446,7 @@ def test_build_fpha_comparison_skips_plant_absent_on_one_side() -> None:
             }
         ]
     )
-    hydros = [HydroEntity(newave_code=10, cobre_id=0, name="ROR", has_reservoir=False)]
+    hydros = [HydroEntity(newave_code=10, cobre_id=0, name="ROR")]
 
     metrics, surface, spill = build_fpha_comparison(nw, grid, cb, hydros)
     assert metrics.is_empty()

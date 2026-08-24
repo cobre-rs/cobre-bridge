@@ -96,34 +96,52 @@ def _compute_total_gwh(lf: pl.LazyFrame, mwh_col: str) -> float:
         return 0.0
 
 
-def _compute_total_avg(
+def _block_weighted_avg_rate(
     lf: pl.LazyFrame,
     col: str,
+    bh_df: pl.DataFrame,
 ) -> float:
-    """Return mean total of *col* across scenarios.
+    """Return the block-hours-weighted horizon mean of a system-total rate.
 
-    Groups by scenario, sums *col*, then averages across scenarios.  Used
-    for non-MWh metrics (e.g. spillage in m3/s averaged over all scenarios
-    and entities).  Returns ``0.0`` on any failure.
+    Sums *col* across entities per (scenario, stage, block), joins block
+    hours, reduces to one Σ(col·hours)/Σ(hours) scalar per scenario over the
+    whole horizon, then averages across scenarios — mirrors the
+    ``available_mw`` weighting in ``_render_ncs_curtailment``.  Returns
+    ``0.0`` on any failure.
 
     Args:
-        lf: Simulation LazyFrame containing ``scenario_id`` and *col*.
-        col: Column name to aggregate.
+        lf: Simulation LazyFrame containing ``scenario_id``, ``stage_id``,
+            ``block_id``, and *col*.
+        col: Rate column name to aggregate (e.g. m3/s), never an MWh
+            accumulation.
+        bh_df: Block-hours frame with ``stage_id``, ``block_id``, ``_bh``
+            (``data.bh_df`` — the single shared block-hours source).
 
     Returns:
-        Mean total as a float, or ``0.0`` on any failure.
+        Mean block-hours-weighted rate as a float, or ``0.0`` on any failure.
     """
     try:
+        # col is a rate (m3/s) — weight by block hours (Σ(rate·hours)/Σ(hours)),
+        # never a bare row sum (inflates the value by the row count).
         result = (
-            lf.group_by("scenario_id")
+            lf.group_by(["scenario_id", "stage_id", "block_id"])
             .agg(pl.col(col).sum())
-            .select(pl.col(col).mean())
+            .join(bh_df.lazy(), on=["stage_id", "block_id"])
+            .group_by("scenario_id")
+            .agg(
+                (pl.col(col) * pl.col("_bh")).sum().alias("_w"),
+                pl.col("_bh").sum().alias("_h"),
+            )
+            .with_columns((pl.col("_w") / pl.col("_h")).alias("_avg"))
+            .select(pl.col("_avg").mean())
             .collect(engine="streaming")
         )
         if result.height == 0:
             return 0.0
-        value = result[col][0]
+        value = result["_avg"][0]
         return float(value) if value is not None else 0.0
+    # degrade to 0.0 rather than raise — an absent/malformed rate column must
+    # not crash the metrics row.
     except (ValueError, TypeError, KeyError, pl.exceptions.ColumnNotFoundError):
         return 0.0
 
@@ -159,7 +177,7 @@ def _build_metrics_row(data: DashboardData) -> str:
         deficit_gwh = 0.0
 
     # Spillage: expressed as average m3/s (not GWh — no productivity data here)
-    spillage_avg = _compute_total_avg(data.hydros_lf, "spillage_m3s")
+    spillage_avg = _block_weighted_avg_rate(data.hydros_lf, "spillage_m3s", data.bh_df)
 
     # Curtailment: expressed in GWh
     curtailment_gwh = _compute_total_gwh(data.ncs_lf, "curtailment_mwh")
@@ -1253,9 +1271,6 @@ def _render_ncs_curtailment(data: DashboardData) -> str:
         )
     except (pl.exceptions.ColumnNotFoundError, KeyError):
         ncs_avail_raw = pl.DataFrame()
-
-    # ncs_curtail_raw removed — right chart now delegates to
-    # _chart_curtailment_by_source() which aggregates by source, not stage.
 
     # ------------------------------------------------------------------
     # Build left chart: generation stacked area + available capacity overlay

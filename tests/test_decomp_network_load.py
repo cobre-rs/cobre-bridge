@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
@@ -13,9 +12,7 @@ from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.load import convert_load_factors, convert_load_stats
 from cobre_bridge.decomp.network import convert_buses, convert_lines
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
-
-_RV0_DECK = Path("example/decomp-set-24-rv0/dadger.rv0")
-_RV3_DECK = Path("example/decomp-jul-26-rv3/dadger.rv3")
+from tests.conftest import make_decomp_case
 
 _ID_MAP = DecompIdMap(
     bus_codes=(1, 2, 3, 4, 11),
@@ -26,6 +23,21 @@ _ID_MAP = DecompIdMap(
 def _calendar_rv3():
     hours = [[15.0, 64.0, 89.0]] * 2 + [[63.0, 280.0, 401.0]]
     return build_operative_calendar(date(2026, 7, 18), hours)
+
+
+def _single_stage_calendar(start_date: date) -> list[OperativeStage]:
+    """A minimal one-stage calendar carrying only *start_date* — for tests
+    that assert on ``operational_start_date`` without needing a real
+    DECOMP-shaped (weekly + aggregated-month) calendar."""
+    return [
+        OperativeStage(
+            index=0,
+            start_date=start_date,
+            end_date=start_date,
+            season_id=start_date.month - 1,
+            block_hours=(1.0,),
+        )
+    ]
 
 
 class _StubDadger:
@@ -116,19 +128,16 @@ class TestDecompIdMap:
         with pytest.raises(ValueError, match="reserved"):
             DecompIdMap(bus_codes=(1, 2), bus_names=("SE", "IV"))
 
-    @pytest.mark.skipif(not _RV0_DECK.exists(), reason="rv0 deck not present")
-    def test_from_dadger_rv0(self) -> None:
-        from idecomp.decomp import Dadger
-
-        id_map = DecompIdMap.from_dadger(Dadger.read(str(_RV0_DECK)))
-        assert id_map.bus_codes == (1, 2, 3, 4, 11)
-        assert id_map.bus_names == ("SE", "S", "NE", "N", "FC")
-
 
 class TestConvertBuses:
     def test_buses_with_and_without_deficit(self) -> None:
         dadger = _StubDadger(cd=_cd_frame())
-        doc = convert_buses(dadger, _ID_MAP, date(2024, 8, 31))
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=dadger,
+            calendar=_single_stage_calendar(date(2024, 8, 31)),
+        )
+        doc = convert_buses(case, _ID_MAP)
         buses = doc["buses"]
         assert [b["id"] for b in buses] == [0, 1, 2, 3, 4, 5]
         assert buses[0]["deficit_segments"] == [{"depth_mw": None, "cost": 7810.62}]
@@ -139,27 +148,43 @@ class TestConvertBuses:
 
     def test_rejects_non_full_depth(self) -> None:
         dadger = _StubDadger(cd=_cd_frame(limit=95.0))
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=dadger,
+            calendar=_single_stage_calendar(date(2024, 8, 31)),
+        )
         with pytest.raises(ValueError, match="depth"):
-            convert_buses(dadger, _ID_MAP, date(2024, 8, 31))
+            convert_buses(case, _ID_MAP)
 
     def test_rejects_block_varying_cost(self) -> None:
         cd = _cd_frame()
         cd.loc[0, "custo_2"] = 9000.0
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=_StubDadger(cd=cd),
+            calendar=_single_stage_calendar(date(2024, 8, 31)),
+        )
         with pytest.raises(ValueError, match="uniform"):
-            convert_buses(_StubDadger(cd=cd), _ID_MAP, date(2024, 8, 31))
+            convert_buses(case, _ID_MAP)
 
     def test_rejects_multi_segment_curves(self) -> None:
         cd = pd.concat([_cd_frame(), _cd_frame(cost=9000.0)], ignore_index=True)
         cd.loc[cd.index[-4:], "codigo_curva"] = 2
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=_StubDadger(cd=cd),
+            calendar=_single_stage_calendar(date(2024, 8, 31)),
+        )
         with pytest.raises(ValueError, match="multi-segment"):
-            convert_buses(_StubDadger(cd=cd), _ID_MAP, date(2024, 8, 31))
+            convert_buses(case, _ID_MAP)
 
 
 class TestConvertLoad:
     def test_stats_cover_every_bus_and_stage(self) -> None:
-        table = convert_load_stats(
-            _StubDadger(dp=_dp_frame()), _ID_MAP, _calendar_rv3()
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=_dp_frame()), calendar=_calendar_rv3()
         )
+        table = convert_load_stats(case, _ID_MAP)
         df = table.to_pandas()
         assert len(df) == 6 * 3
         assert set(df["std_mw"]) == {0.0}
@@ -171,7 +196,10 @@ class TestConvertLoad:
 
     def test_factors_invariant_and_zero_mean_omission(self) -> None:
         calendar = _calendar_rv3()
-        doc = convert_load_factors(_StubDadger(dp=_dp_frame()), _ID_MAP, calendar)
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=_dp_frame()), calendar=calendar
+        )
+        doc = convert_load_factors(case, _ID_MAP)
         entries = doc["load_factors"]
         assert {e["bus_id"] for e in entries} == {0, 1}
         for entry in entries:
@@ -185,207 +213,87 @@ class TestConvertLoad:
     def test_rejects_block_count_mismatch(self) -> None:
         dp = _dp_frame()
         dp.loc[0, "numero_patamares"] = 2
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=dp), calendar=_calendar_rv3()
+        )
         with pytest.raises(ValueError, match="blocks"):
-            convert_load_stats(_StubDadger(dp=dp), _ID_MAP, _calendar_rv3())
+            convert_load_stats(case, _ID_MAP)
 
     def test_rejects_stage_outside_calendar(self) -> None:
         dp = _dp_frame(calendar_stages=4)
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=dp), calendar=_calendar_rv3()
+        )
         with pytest.raises(ValueError, match="outside the calendar"):
-            convert_load_stats(_StubDadger(dp=dp), _ID_MAP, _calendar_rv3())
+            convert_load_stats(case, _ID_MAP)
 
-
-class TestRealDecks:
-    @pytest.mark.skipif(not _RV0_DECK.exists(), reason="rv0 deck not present")
-    def test_rv0_end_to_end(self) -> None:
-        from idecomp.decomp import Dadger
-
-        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-
-        dadger = Dadger.read(str(_RV0_DECK))
-        id_map = DecompIdMap.from_dadger(dadger)
-        calendar = operative_calendar_from_dadger(dadger)
-
-        buses = convert_buses(dadger, id_map, calendar[0].start_date)["buses"]
-        assert buses[0]["deficit_segments"][0]["cost"] == 7810.62
-
-        stats = convert_load_stats(dadger, id_map, calendar).to_pandas()
-        assert len(stats) == id_map.n_buses * len(calendar)
-        assert (stats[stats["bus_id"] == 0]["mean_mw"] > 0).all()
-
-        factors = convert_load_factors(dadger, id_map, calendar)["load_factors"]
-        assert {e["bus_id"] for e in factors} == {0, 1, 2, 3}
-
-    @pytest.mark.skipif(not _RV3_DECK.exists(), reason="rv3 deck not present")
-    def test_rv3_end_to_end(self) -> None:
-        from idecomp.decomp import Dadger
-
-        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-
-        dadger = Dadger.read(str(_RV3_DECK))
-        id_map = DecompIdMap.from_dadger(dadger)
-        calendar = operative_calendar_from_dadger(dadger)
-
-        buses = convert_buses(dadger, id_map, calendar[0].start_date)["buses"]
-        assert buses[0]["deficit_segments"][0]["cost"] == 8291.25
-
-        stats = convert_load_stats(dadger, id_map, calendar).to_pandas()
-        se_stage0 = stats[(stats["bus_id"] == 0) & (stats["stage_id"] == 0)]
-        expected = (47751.0 * 15 + 45562.0 * 64 + 38982.0 * 89) / 168.0
-        assert se_stage0["mean_mw"].iloc[0] == pytest.approx(expected)
-
-
-# ---------------------------------------------------------------------------
-# Ticket 008: convert_lines migration fidelity + zero-capability.
-#
-# Ticket 007's `test_block_bounds_are_absolute_mw_no_factor`
-# (test_decomp_idecomp112.py) already pins the pass-through identity on a
-# synthetic fixture. These tests pin the same identity plus a row-count
-# guard on BOTH production decks -- independently re-reading the raw ``IA``
-# dataframe rather than convert_lines'/``_ia_dense``'s own dense dict -- and
-# the synthetic zero-capability case no real deck exercises (measured: zero
-# zeros in either production deck's ``IA`` records).
-# ---------------------------------------------------------------------------
-
-
-def _declared_ia_rows(ia: pd.DataFrame) -> dict[tuple[str, str], dict[int, pd.Series]]:
-    """Independent per-pair, per-declared-stage IA rows (0-based stage index).
-
-    Mirrors the sparse-stage-inheritance contract documented on
-    ``decomp.network._ia_dense`` ("declared stages forward-filled") --
-    built fresh from the raw IA dataframe, never touching that function's
-    own dense dict.
-    """
-    declared: dict[tuple[str, str], dict[int, pd.Series]] = {}
-    for _, row in ia.iterrows():
-        pair = (
-            str(row["nome_submercado_de"]).strip(),
-            str(row["nome_submercado_para"]).strip(),
+    def test_extra_bus_loads_add_to_existing_dp_row(self) -> None:
+        """``extra_bus_loads`` on a bus ``DP`` already declares (Itaipu's SE
+        bus, for ``carga_ande``) sums element-wise onto the ``DP`` row
+        rather than replacing it -- a regression to a plain ``dict.update``
+        merge would silently erase SE's declared demand."""
+        calendar = _calendar_rv3()
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=_dp_frame()), calendar=calendar
         )
-        declared.setdefault(pair, {})[int(row["estagio"]) - 1] = row
-    return declared
+        extra = {0: [500.0, 400.0, 300.0], 1: [10.0, 10.0, 10.0], 2: [0.0, 0.0, 0.0]}
+        extra_bus_loads = {(0, stage): values for stage, values in extra.items()}
 
+        dp_only = convert_load_stats(case, _ID_MAP).to_pandas()
+        combined = convert_load_stats(
+            case, _ID_MAP, extra_bus_loads=extra_bus_loads
+        ).to_pandas()
 
-def _forward_filled_row(declared: dict[int, pd.Series], stage_index: int) -> pd.Series:
-    """The declared IA row governing *stage_index* under forward-fill
-    inheritance: the latest declared stage at or before it."""
-    candidates = [s for s in declared if s <= stage_index]
-    return declared[max(candidates)]
-
-
-class TestConvertLinesRealDeckFidelity:
-    """Ticket 008 acceptance criteria 2 + 4: block rows equal the ``IA``
-    record's own per-block limit columns exactly on both production decks,
-    and the per-block row count is asserted against the number of (line,
-    stage) pairs whose blocks genuinely differ from the base -- this
-    pipeline emits block rows per (line, stage), not per block, so a
-    non-uniform stage's *every* block gets a row, including any block that
-    individually equals the base (see ``convert_lines``'s ``uniform`` check).
-    """
-
-    def _load(
-        self, deck_path: Path
-    ) -> tuple[
-        list[dict],
-        pd.DataFrame,
-        Sequence[OperativeStage],
-        DecompIdMap,
-        dict[tuple[str, str], dict[int, pd.Series]],
-    ]:
-        if not deck_path.exists():
-            pytest.skip("real deck not present")
-        from idecomp.decomp import Dadger
-
-        from cobre_bridge.decomp.temporal import operative_calendar_from_dadger
-
-        dadger = Dadger.read(str(deck_path))
-        id_map = DecompIdMap.from_dadger(dadger)
-        calendar = operative_calendar_from_dadger(dadger)
-        lines_doc, bounds = convert_lines(
-            dadger, id_map, calendar, calendar[0].start_date
-        )
-        declared = _declared_ia_rows(dadger.ia(df=True))
-        return lines_doc["lines"], bounds.to_pandas(), calendar, id_map, declared
-
-    def _expected_blocks(
-        self,
-        lines: list[dict],
-        calendar: Sequence[OperativeStage],
-        id_map: DecompIdMap,
-        declared: dict[tuple[str, str], dict[int, pd.Series]],
-    ) -> dict[tuple[int, int], tuple[list[float], list[float]] | None]:
-        """``{(line_id, stage_index): (direct_vals, reverse_vals) | None}``.
-
-        ``None`` marks a (line, stage) whose blocks are uniform with the
-        base -- no block rows expected. Otherwise the full per-block
-        direct/reverse value lists, read straight off the forward-filled
-        IA row.
-        """
-        expected: dict[tuple[int, int], tuple[list[float], list[float]] | None] = {}
-        for line in lines:
-            pair = (
-                id_map.bus_name(line["source_bus_id"]),
-                id_map.bus_name(line["target_bus_id"]),
-            )
-            for stage in calendar:
-                row = _forward_filled_row(declared[pair], stage.index)
-                n_blocks = len(stage.block_hours)
-                direct_vals = [
-                    float(row[f"limite_de_para_{k}"]) for k in range(1, n_blocks + 1)
-                ]
-                reverse_vals = [
-                    float(row[f"limite_para_de_{k}"]) for k in range(1, n_blocks + 1)
-                ]
-                base_direct, base_reverse = max(direct_vals), max(reverse_vals)
-                uniform = all(
-                    d == base_direct and r == base_reverse
-                    for d, r in zip(direct_vals, reverse_vals, strict=True)
+        dp_se = dp_only[dp_only["bus_id"] == 0].set_index("stage_id")["mean_mw"]
+        combined_se = combined[combined["bus_id"] == 0].set_index("stage_id")["mean_mw"]
+        for stage in calendar:
+            expected_extra = (
+                sum(
+                    v * h
+                    for v, h in zip(extra[stage.index], stage.block_hours, strict=True)
                 )
-                key = (line["id"], stage.index)
-                expected[key] = None if uniform else (direct_vals, reverse_vals)
-        return expected
+                / stage.total_hours
+            )
+            assert combined_se.loc[stage.index] == pytest.approx(
+                dp_se.loc[stage.index] + expected_extra
+            )
 
-    @pytest.mark.parametrize("deck_path", [_RV0_DECK, _RV3_DECK], ids=["rv0", "rv3"])
-    def test_block_rows_are_the_ia_columns_verbatim(self, deck_path: Path) -> None:
-        lines, df, calendar, id_map, declared = self._load(deck_path)
-        expected = self._expected_blocks(lines, calendar, id_map, declared)
-
-        checked = 0
-        for (line_id, stage_index), values in expected.items():
-            if values is None:
-                continue
-            direct_vals, reverse_vals = values
-            block_rows = df[
-                (df["line_id"] == line_id)
-                & (df["stage_id"] == stage_index)
-                & df["block_id"].notna()
-            ]
-            for b in range(len(direct_vals)):
-                emitted = block_rows[block_rows["block_id"] == b]
-                assert len(emitted) == 1
-                assert emitted.iloc[0]["direct_mw"] == direct_vals[b]
-                assert emitted.iloc[0]["reverse_mw"] == reverse_vals[b]
-                checked += 1
-        assert checked > 0, (
-            "the real deck must exercise at least one differing (line, "
-            "stage) pair for this fidelity check to be meaningful"
+        # Every other bus's row is untouched by the SE-keyed addition.
+        pd.testing.assert_frame_equal(
+            combined[combined["bus_id"] != 0].reset_index(drop=True),
+            dp_only[dp_only["bus_id"] != 0].reset_index(drop=True),
         )
 
-    @pytest.mark.parametrize("deck_path", [_RV0_DECK, _RV3_DECK], ids=["rv0", "rv3"])
-    def test_block_row_count_matches_differing_stage_pairs(
-        self, deck_path: Path
-    ) -> None:
-        lines, df, calendar, id_map, declared = self._load(deck_path)
-        expected = self._expected_blocks(lines, calendar, id_map, declared)
+    def test_extra_bus_loads_insert_for_bus_absent_from_dp(self) -> None:
+        """A bus ``DP`` never declares (the ``IV`` transhipment bus) has no
+        row to collide with, so ``extra_bus_loads`` is simply inserted --
+        the backward-compatible shape for a deck with no colliding demand."""
+        calendar = _calendar_rv3()
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=_dp_frame()), calendar=calendar
+        )
+        iv_bus = _ID_MAP.transhipment_bus_id
+        extra = {0: [50.0, 40.0, 30.0], 1: [50.0, 40.0, 30.0], 2: [50.0, 40.0, 30.0]}
+        extra_bus_loads = {(iv_bus, stage): values for stage, values in extra.items()}
 
-        expected_rows = sum(
-            len(values[0]) for values in expected.values() if values is not None
+        combined = convert_load_stats(
+            case, _ID_MAP, extra_bus_loads=extra_bus_loads
+        ).to_pandas()
+        iv_rows = combined[combined["bus_id"] == iv_bus]
+        assert (iv_rows["mean_mw"] > 0).all()
+
+    def test_extra_bus_loads_reject_block_count_mismatch(self) -> None:
+        """A colliding key whose ``extra_bus_loads`` block count disagrees
+        with ``DP``'s own for that (bus, stage) fails loud instead of
+        silently zipping a truncated/padded sum."""
+        calendar = _calendar_rv3()
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(dp=_dp_frame()), calendar=calendar
         )
-        actual_rows = int(df["block_id"].notna().sum())
-        assert expected_rows > 0, (
-            "the real deck must exercise at least one differing (line, "
-            "stage) pair for this row-count guard to be meaningful"
-        )
-        assert actual_rows == expected_rows
+        extra_bus_loads = {(0, 0): [500.0, 400.0]}  # 2 values vs DP's 3
+
+        with pytest.raises(ValueError, match="block"):
+            convert_load_stats(case, _ID_MAP, extra_bus_loads=extra_bus_loads)
 
 
 def _ia_zero_block_frame() -> pd.DataFrame:
@@ -421,12 +329,12 @@ class TestConvertLinesZeroCapability:
 
     def test_zero_block_limit_converts_without_raising(self) -> None:
         calendar = _calendar_rv3()
-        lines_doc, bounds = convert_lines(
-            _StubDadger(ia=_ia_zero_block_frame()),
-            _ID_MAP,
-            calendar,
-            date(2026, 7, 18),
-        )  # must not raise
+        case = make_decomp_case(
+            Path("unused"),
+            dadger=_StubDadger(ia=_ia_zero_block_frame()),
+            calendar=calendar,
+        )
+        lines_doc, bounds = convert_lines(case, _ID_MAP)  # must not raise
         line_id = lines_doc["lines"][0]["id"]
         df = bounds.to_pandas()
 

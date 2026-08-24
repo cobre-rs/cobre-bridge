@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from cobre_bridge.decomp.config import convert_config
+from tests.conftest import make_decomp_case
 
 
 class _Ni:
@@ -30,12 +33,12 @@ class TestConvertConfigStateSpace:
         # depth, so no ``state_space`` block is emitted (reserving lag slots
         # would be dead state); the boundary-FCF importer patches the
         # cut-derived depth in only when a boundary is actually imported.
-        result = convert_config(_Dadger())  # type: ignore[arg-type]
+        result = convert_config(make_decomp_case(Path("unused"), dadger=_Dadger()))
 
         assert "state_space" not in result
 
     def test_convert_config_training_and_simulation_enumerated(self) -> None:
-        result = convert_config(_Dadger())  # type: ignore[arg-type]
+        result = convert_config(make_decomp_case(Path("unused"), dadger=_Dadger()))
 
         # Training enumerates the explicit trunk-plus-fan node graph; every
         # stochastic class is external — inflow (the tree), load, and NCS.

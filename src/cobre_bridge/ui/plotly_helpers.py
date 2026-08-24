@@ -6,9 +6,11 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import pandas as pd
 import plotly.graph_objects as go
 
 from cobre_bridge.ui.html import json_for_script
+from cobre_bridge.ui.theme import hex_to_rgba
 
 LEGEND_DEFAULTS: dict = dict(
     orientation="h",
@@ -150,18 +152,20 @@ def fig_to_html(fig: go.Figure, unified_hover: bool = True) -> str:
 
 
 def apply_standard_layout(fig: go.Figure, **layout: object) -> go.Figure:
-    """Apply the dashboard's standard ``legend``/``margin`` defaults to *fig*.
+    """Apply the dashboard's standard ``legend``/``margin``/``template`` defaults.
 
     Replaces the repeated ``fig.update_layout(..., legend=LEGEND_DEFAULTS,
-    margin=MARGIN_DEFAULTS, ...)``. ``legend`` and ``margin`` default to the
-    shared constants but can be overridden in ``**layout``; everything else
-    (``title``, ``xaxis_title``, ``barmode``, ``height``, …) is forwarded to
-    :meth:`plotly.graph_objects.Figure.update_layout`. Mutates *fig* in place and
-    also returns it, so it fits both ``make_chart_card(apply_standard_layout(...))``
-    and ``return apply_standard_layout(...)`` call sites.
+    margin=MARGIN_DEFAULTS, ...)``. ``legend``, ``margin``, and ``template``
+    default to the shared constants but can be overridden in ``**layout``;
+    everything else (``title``, ``xaxis_title``, ``barmode``, ``height``, …) is
+    forwarded to :meth:`plotly.graph_objects.Figure.update_layout`. Mutates
+    *fig* in place and also returns it, so it fits both
+    ``make_chart_card(apply_standard_layout(...))`` and
+    ``return apply_standard_layout(...)`` call sites.
     """
     layout.setdefault("legend", LEGEND_DEFAULTS)
     layout.setdefault("margin", MARGIN_DEFAULTS)
+    layout.setdefault("template", "plotly_white")
     fig.update_layout(**layout)
     return fig
 
@@ -184,6 +188,147 @@ def render_figure(
     )
 
 
+def add_mean_p50_band(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    x_col: str,
+    name: str,
+    color: str,
+    row: int | None = None,
+    col: int | None = None,
+    show_band: bool = True,
+    show_p50: bool = True,
+) -> go.Figure:
+    """Add mean, p50, and p10-p90 band traces to *fig*.
+
+    The function adds up to three :class:`plotly.graph_objects.Scatter` traces:
+
+    * **Mean** — solid line, width 2, full opacity.
+    * **P50** — dashed line, width 1.5, 70% opacity (omitted when
+      *show_p50* is ``False``).
+    * **P10-P90 band** — two traces required by Plotly's ``fill="tonexty"``
+      convention: the lower bound (p10) is plotted first as an invisible line,
+      then the upper bound (p90) is plotted with ``fill="tonexty"`` at 15%
+      opacity (omitted when *show_band* is ``False``).
+
+    The function is a no-op when *df* is empty.
+
+    Args:
+        fig: The :class:`plotly.graph_objects.Figure` to mutate.
+        df: Pre-computed percentile DataFrame as returned by
+            :func:`compute_percentiles`.  Must contain ``x_col``, ``"mean"``,
+            ``"p10"``, and ``"p90"`` columns (and ``"p50"`` when
+            *show_p50* is ``True``).
+        x_col: Name of the column used as the x-axis values.
+        name: Display name for the trace group (used in the legend).
+        color: Hex or CSS colour string for the traces.
+        row: Subplot row (1-based) for :meth:`~plotly.graph_objects.Figure.add_trace`.
+        col: Subplot column (1-based).
+        show_band: When ``False``, the p10-p90 filled area is omitted.
+        show_p50: When ``False``, the p50 dashed line is omitted.
+
+    Returns:
+        The same *fig* object (enables method chaining).
+    """
+    if df.empty:
+        return fig
+
+    subplot_kwargs: dict = {}
+    if row is not None:
+        subplot_kwargs["row"] = row
+    if col is not None:
+        subplot_kwargs["col"] = col
+
+    x = df[x_col]
+
+    # Mean (solid line)
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=df["mean"],
+            name=name,
+            legendgroup=name,
+            mode="lines",
+            line=dict(color=color, width=2),
+        ),
+        **subplot_kwargs,
+    )
+
+    # P50 (dashed line)
+    if show_p50:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=df["p50"],
+                name=f"{name} P50",
+                legendgroup=name,
+                showlegend=False,
+                mode="lines",
+                line=dict(color=color, width=1.5, dash="dash"),
+                opacity=0.7,
+            ),
+            **subplot_kwargs,
+        )
+
+    # P10-P90 band
+    if show_band:
+        # Lower bound (invisible, reference for fill)
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=df["p10"],
+                name=f"{name} P10",
+                legendgroup=name,
+                showlegend=False,
+                mode="lines",
+                line=dict(width=0),
+                hoverinfo="skip",
+            ),
+            **subplot_kwargs,
+        )
+        # Upper bound (fills to p10)
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=df["p90"],
+                name=f"{name} Band",
+                legendgroup=name,
+                showlegend=False,
+                mode="lines",
+                line=dict(width=0),
+                fill="tonexty",
+                fillcolor=hex_to_rgba(color, 0.15),
+                hoverinfo="skip",
+            ),
+            **subplot_kwargs,
+        )
+
+    return fig
+
+
+def _normalize_plotly_titles(node: object) -> object:
+    """Recursively rewrite a bare-string ``title`` to ``{"text": ...}`` in *node*.
+
+    plotly.js 3.x dropped support for the bare-string ``title`` shorthand
+    (layout title, ``xaxis``/``yaxis``/``scene.*axis``/``colorbar`` titles,
+    ...) — a ``go.Figure`` coerces this on assignment, but a raw dict handed
+    straight to the browser does not, so the string is silently dropped at
+    render. Walks every dict/list in *node* and fixes each ``title`` key
+    still holding a plain string; a dict/object title or an absent key is
+    left untouched (idempotent). Mutates *node* in place and returns it.
+    """
+    if isinstance(node, dict):
+        title = node.get("title")
+        if isinstance(title, str):
+            node["title"] = {"text": title}
+        for value in node.values():
+            _normalize_plotly_titles(value)
+    elif isinstance(node, list):
+        for item in node:
+            _normalize_plotly_titles(item)
+    return node
+
+
 def plotly_div(
     traces: list[dict],
     layout: dict,
@@ -201,6 +346,7 @@ def plotly_div(
     layout.setdefault("legend", LEGEND_DEFAULTS)
     layout.setdefault("template", "plotly_white")
     layout.setdefault("hovermode", "x unified")
+    _normalize_plotly_titles(layout)
 
     data_json = json_for_script(traces)
     layout_json = json_for_script(layout)

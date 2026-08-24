@@ -34,8 +34,13 @@ from cobre_bridge.dashboard.data import (
     resolve_hydro_bus_id,
     scan_entity,
 )
-from cobre_bridge.dashboard.tabs import TAB_MODULES, get_renderable_tabs
+from cobre_bridge.dashboard.tabs import (
+    TAB_MODULES,
+    collect_required_js,
+    get_renderable_tabs,
+)
 from cobre_bridge.errors import CobreOutputError
+from cobre_bridge.ui.html import build_html
 from tests.conftest import hydro_with_group
 
 # ---------------------------------------------------------------------------
@@ -54,16 +59,13 @@ def _write_json(path: Path, data: Any) -> None:
 
 
 def test_load_names_returns_dict_with_hydros(tmp_path: Path) -> None:
-    # Arrange
     hydros_json = {
         "hydros": [{"id": 0, "name": "Itaipu"}, {"id": 1, "name": "Tucurui"}]
     }
     _write_json(tmp_path / "system" / "hydros.json", hydros_json)
 
-    # Act
     result = load_names(tmp_path)
 
-    # Assert
     assert result[("hydros", 0)] == "Itaipu"
     assert result[("hydros", 1)] == "Tucurui"
 
@@ -86,7 +88,6 @@ def test_load_names_uses_id_as_fallback_when_name_absent(tmp_path: Path) -> None
 
 
 def test_load_names_multiple_entity_types(tmp_path: Path) -> None:
-    # Arrange
     _write_json(
         tmp_path / "system" / "hydros.json",
         {"hydros": [{"id": 0, "name": "H0"}]},
@@ -108,7 +109,6 @@ def test_load_names_multiple_entity_types(tmp_path: Path) -> None:
 
 
 def test_load_stage_labels_returns_formatted_labels(tmp_path: Path) -> None:
-    # Arrange
     stages_json = {
         "stages": [
             {"id": 0, "start_date": "2024-01-01"},
@@ -630,6 +630,132 @@ def test_get_renderable_tabs_returns_correct_tuple_structure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# collect_required_js — shared plant-explorer JS union (ticket-009 / DASH-02)
+# ---------------------------------------------------------------------------
+
+
+def test_collect_required_js_includes_stochastic_js_on_training_only_case() -> None:
+    """A training-only case (Plants does not render) must still get
+    PLANT_EXPLORER_JS from the Stochastic tab's own REQUIRED_JS declaration."""
+    mock_stochastic = MagicMock()
+    mock_stochastic.TAB_ORDER = 10
+    mock_stochastic.can_render.return_value = True
+    mock_stochastic.REQUIRED_JS = ["function initPlantExplorer() {}"]
+
+    mock_plants = MagicMock()
+    mock_plants.TAB_ORDER = 50
+    mock_plants.can_render.return_value = False
+    mock_plants.REQUIRED_JS = [
+        "function switchSubTab() {}",
+        "function initPlantExplorer() {}",
+    ]
+
+    fake_data = MagicMock()
+    fake_data.simulation_available = False
+    fake_data.stochastic_available = True
+
+    with patch(
+        "cobre_bridge.dashboard.tabs.TAB_MODULES", [mock_stochastic, mock_plants]
+    ):
+        result = collect_required_js(fake_data)
+
+    assert "function initPlantExplorer" in result
+
+
+def test_collect_required_js_dedupes_shared_block_across_tabs() -> None:
+    """When both Stochastic and Plants render, the shared block is emitted once."""
+    mock_stochastic = MagicMock()
+    mock_stochastic.TAB_ORDER = 10
+    mock_stochastic.can_render.return_value = True
+    mock_stochastic.REQUIRED_JS = ["function initPlantExplorer() {}"]
+
+    mock_plants = MagicMock()
+    mock_plants.TAB_ORDER = 50
+    mock_plants.can_render.return_value = True
+    mock_plants.REQUIRED_JS = [
+        "function switchSubTab() {}",
+        "function initPlantExplorer() {}",
+    ]
+
+    fake_data = MagicMock()
+
+    with patch(
+        "cobre_bridge.dashboard.tabs.TAB_MODULES", [mock_stochastic, mock_plants]
+    ):
+        result = collect_required_js(fake_data)
+
+    assert result.count("function initPlantExplorer") == 1
+    assert result.count("function switchSubTab") == 1
+
+
+def test_collect_required_js_tolerates_module_with_no_required_js_attr() -> None:
+    """A module that declares no REQUIRED_JS contributes nothing (getattr default)."""
+    mock_bare = MagicMock(spec=["TAB_ORDER", "can_render"])
+    mock_bare.TAB_ORDER = 5
+    mock_bare.can_render.return_value = True
+
+    fake_data = MagicMock()
+
+    with patch("cobre_bridge.dashboard.tabs.TAB_MODULES", [mock_bare]):
+        result = collect_required_js(fake_data)
+
+    assert result == ""
+
+
+def test_collect_required_js_excludes_modules_where_can_render_is_false() -> None:
+    """A non-renderable module's REQUIRED_JS is not included, even alone."""
+    mock_no = MagicMock()
+    mock_no.TAB_ORDER = 10
+    mock_no.can_render.return_value = False
+    mock_no.REQUIRED_JS = ["function shouldNotAppear() {}"]
+
+    fake_data = MagicMock()
+
+    with patch("cobre_bridge.dashboard.tabs.TAB_MODULES", [mock_no]):
+        result = collect_required_js(fake_data)
+
+    assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# build_html — required_js shell parameter (ticket-009 / DASH-02)
+# ---------------------------------------------------------------------------
+
+
+def test_build_html_required_js_emitted_once_in_head() -> None:
+    """A non-empty required_js is emitted exactly once, inside a <script> in <head>."""
+    result = build_html(
+        title="Test",
+        tab_defs=[("tab-a", "A")],
+        tab_contents={"tab-a": "<p>A</p>"},
+        css="",
+        js="",
+        required_js="/*MARK*/",
+    )
+
+    assert result.count("/*MARK*/") == 1
+    head = result.split("<head>", 1)[1].split("</head>", 1)[0]
+    assert "/*MARK*/" in head
+    assert "<script>" in head
+
+
+def test_build_html_empty_required_js_adds_no_extra_script() -> None:
+    """Empty required_js (the comparison-report path) adds no <script> to <head>."""
+    result = build_html(
+        title="Test",
+        tab_defs=[("tab-a", "A")],
+        tab_contents={"tab-a": "<p>A</p>"},
+        css="",
+        js="",
+        required_js="",
+    )
+
+    head = result.split("<head>", 1)[1].split("</head>", 1)[0]
+    # Only the plotly CDN <script> tag remains — no extra shared-JS block.
+    assert head.count("<script") == 1
+
+
+# ---------------------------------------------------------------------------
 # TabModule protocol compliance — parametrized over all registered modules
 # ---------------------------------------------------------------------------
 
@@ -1013,6 +1139,25 @@ class TestDashboardIntegration:
 
         assert case_dir.resolve().name in html
 
+    def test_build_dashboard_head_includes_plotly_title_shim(
+        self, case_dir: Path, tmp_path: Path
+    ) -> None:
+        """The dashboard <head> must carry the client-side title-normalizer shim.
+
+        plotly.js 3.x drops a bare-string ``title`` at render; the shim wraps
+        ``Plotly.newPlot``/``Plotly.react`` before any tab's chart script runs
+        (see ``PLOTLY_TITLE_SHIM_JS``), so it must land in ``<head>``, not the
+        end-of-body ``<script>``, which executes too late.
+        """
+        from cobre_bridge.dashboard import build_dashboard
+
+        output_path = tmp_path / "dashboard.html"
+        build_dashboard(case_dir, output_path)
+        html = output_path.read_text(encoding="utf-8")
+
+        head = html.split("<head>", 1)[1].split("</head>", 1)[0]
+        assert "normalizePlotlyTitles" in head
+
     def test_build_dashboard_with_per_block_line_bounds(
         self, case_dir: Path, tmp_path: Path
     ) -> None:
@@ -1248,20 +1393,6 @@ def test_load_training_metadata_present(_v2_case: Path) -> None:
     assert (
         data.training_metadata["convergence"]["termination_reason"] == "iteration_limit"
     )
-
-
-def test_load_policy_metadata_present(_v2_case: Path) -> None:
-    """policy_metadata is populated from output/policy/metadata.json."""
-    from cobre_bridge.dashboard.data import DashboardData
-
-    _write_json(
-        _v2_case / "output" / "policy" / "metadata.json",
-        {"state_dimension": 1106},
-    )
-
-    data = DashboardData.load(_v2_case)
-
-    assert data.policy_metadata["state_dimension"] == 1106
 
 
 def test_load_stages_data_preserved(_v2_case: Path) -> None:

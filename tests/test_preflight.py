@@ -40,11 +40,11 @@ class TestRunPreflight:
         assert "source-file-missing" in error_codes
         assert any(not check.passed for check in result.checks)
 
-    def test_absent_optional_yields_warnings(
+    def test_absent_optional_yields_ok_with_info_advisory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # All optionals present except cvar (left None): discovery succeeds, the
-        # single absent optional drives a WARNINGS verdict.
+        # single absent optional is advisory-only and does not block or warn.
         present = _all_optionals_present(tmp_path)
         present["cvar"] = None  # type: ignore[assignment]
         files = make_nw_files(tmp_path, **present)
@@ -52,14 +52,17 @@ class TestRunPreflight:
 
         result = run_preflight(tmp_path)
 
-        assert result.verdict is PreflightVerdict.WARNINGS
+        assert result.verdict is PreflightVerdict.OK
+        info_codes = [
+            diag.code for diag in result.diagnostics if diag.severity is Severity.INFO
+        ]
         warning_codes = [
             diag.code
             for diag in result.diagnostics
             if diag.severity is Severity.WARNING
         ]
-        assert "optional-file-absent" in warning_codes
-        # The advisory check for the absent optional is non-blocking (passes).
+        assert "optional-file-absent" in info_codes
+        assert "optional-file-absent" not in warning_codes
         assert all(check.passed for check in result.checks)
 
     def test_complete_case_yields_ok(
@@ -93,3 +96,27 @@ class TestRunPreflight:
 
         after = sorted(p.name for p in tmp_path.iterdir())
         assert after == before
+
+
+class TestOptionalInputAdvisory:
+    def test_optional_input_advisory_reports_every_absent_optional(
+        self, tmp_path: Path
+    ) -> None:
+        files = make_nw_files(tmp_path)  # every optional field left None
+
+        checks, diagnostics = preflight.optional_input_advisory(files)
+
+        assert len(checks) == len(_OPTIONAL_FIELDS)
+        assert len(diagnostics) == len(_OPTIONAL_FIELDS)
+        assert all(diag.severity is Severity.INFO for diag in diagnostics)
+        assert all(diag.code == "optional-file-absent" for diag in diagnostics)
+        assert all(
+            check.detail == "absent (optional; conversion proceeds)" for check in checks
+        )
+
+    def test_optional_input_advisory_skips_present_optionals(
+        self, tmp_path: Path
+    ) -> None:
+        files = make_nw_files(tmp_path, **_all_optionals_present(tmp_path))
+
+        assert preflight.optional_input_advisory(files) == ([], [])

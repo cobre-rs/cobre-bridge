@@ -32,20 +32,29 @@ pins a delivery cobre would reject.
 
 A commitment's delivery date is recorded per stage so the emission track can
 place it: an in-study ``gl`` commitment is folded onto the study stages as a
-left-boundary ``past_anticipated_commitment``. The right boundary
-(``future_anticipated_delivery``, priced against ``post_study_stages``) is
-*synthesised* by the emission track as one free per-study-stage forward decision
-on the mirror-shift calendar (the study stages shifted forward by the single
-global anticipation lead ``H``) — it is not read from ``gl`` here.
+left-boundary ``past_anticipated_commitment``, and a post-horizon ``gl`` week
+becomes a fixed já-comandada ``past_anticipated_commitment`` too. Any
+remaining post-study stage not covered by a já-comandada window is priced via
+``post_study_stages.json`` ``thermal_bounds`` instead — the deck does not
+declare a synthesised free lane past what ``gl`` actually commits.
 
 Committed MW per stage is the block-duration-weighted mean of ``geracao`` over
 that stage's own ``duracao`` blocks (``Σ_b duracao_b·geracao_b / Σ_b duracao_b``),
 self-normalising so the committed MWh is preserved exactly regardless of block
 count.
+
+Post-horizon anticipated delivery — the já-comandada (class-4) windows and the
+signaled (class-3) ``thermal_bounds`` this module emits — is a feature of the
+source model with no counterpart in the sibling conversion track: its
+committed-dispatch reader
+(:func:`cobre_bridge.converters.anticipated.read_anticipated_dispatch`)
+truncates any lag past the study horizon rather than surfacing one past it, so
+this asymmetry is registered, not an oversight or a missing port.
 """
 
 from __future__ import annotations
 
+import calendar as _calendar
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -120,17 +129,24 @@ class GnlCommitmentModel:
 
     ``weeks_per_month`` is the ``gs`` block's ``{month_index: weeks}`` map (the
     number of operative weeks in each month, 1-based month index ascending).
-    :func:`_study_lead_hours` sums it over the study's own months to size the
-    single global anticipation lead ``H`` (a whole number of operative weeks),
-    which shifts the study calendar forward into the mirror-shift post-study
-    calendar the terminal FCF is priced against.
+    :func:`_study_lead_hours` sums it over the study's own months to size
+    ``H``, a single global anticipation lead (a whole number of operative
+    weeks) whose only role is sizing the class-2 left-boundary tile count
+    (:func:`_lead_delivery_stage_count`) — the leading study stages folded
+    into ``past_anticipated_commitments``. ``H`` shapes neither the post-study
+    calendar, which is anchored at the study horizon end and the plants'
+    shared já-comandada cutoff independent of it (:func:`_build_post_study_calendar`),
+    nor the per-plant lead each thermal actually emits as its own
+    ``anticipated_config.lead_time_hours``
+    — see :func:`convert_gnl` for that.
 
     ``nl_lag_months`` is the ``nl`` block's per-plant dispatch-anticipation lag
     (``{codigo_usina: months}``): the number of months by which a GNL plant's
-    dispatch is decided ahead of its delivery (the LNG supply lead time). The
-    mirror-shift emission uses one global lead for the whole fleet, so this drives
-    only the uniform-lag consistency check (:func:`_warn_on_nonuniform_lag`) — a
-    deck mixing lags is surfaced, not silently averaged.
+    dispatch is decided ahead of its delivery (the LNG supply lead time).
+    ``H``'s tile-sizing role assumes every anticipated plant shares one
+    study-span lead, so this drives only the uniform-lag consistency check
+    (:func:`_warn_on_nonuniform_lag`) — a deck mixing lags is surfaced, not
+    silently averaged.
     """
 
     thermals: tuple[GnlThermal, ...]
@@ -244,7 +260,6 @@ def read_gnl_model(dadgnl: Dadgnl) -> GnlCommitmentModel | None:
 def _read_tg_registry(dadgnl: Dadgnl) -> pd.DataFrame:
     """The one-row-per-plant ``tg`` registry (stage-1 base), as a DataFrame."""
     frame = dadgnl.tg(df=True)
-    # One registry row per plant: the earliest stage carries the base cadastro.
     return frame.sort_values(["codigo_usina", "estagio"]).drop_duplicates(
         "codigo_usina", keep="first"
     )
@@ -332,6 +347,105 @@ def _read_nl_lags(dadgnl: Dadgnl) -> dict[int, int]:
     return {int(row["codigo_usina"]): int(row["lag"]) for _, row in frame.iterrows()}
 
 
+_ONE_OPERATIVE_WEEK = timedelta(hours=_HOURS_PER_OPERATIVE_WEEK)
+
+
+@dataclass(frozen=True)
+class GnlPlantClassification:
+    """One plant's já-comandada (class-4) run and where it hands off to class-3.
+
+    ``class4_windows`` is ascending and tiles ``[horizon_end, class4_end)`` at
+    coverage 1.0: a ``0 MW`` stub ``[horizon_end, first_start)`` when the first
+    já-comandada week starts after ``horizon_end``, then one window per
+    já-comandada week. ``class4_end`` — where the freshly-signaled span
+    starts — is ``horizon_end`` itself when the plant declares none.
+    """
+
+    class4_windows: tuple[tuple[date, date, float], ...]
+    class4_end: date
+
+
+@dataclass(frozen=True)
+class GnlClassification:
+    """Per-plant já-comandada (class-4) vs signaled (class-3) partition.
+
+    Keyed by ``codigo_usina`` (:attr:`GnlThermal.code`); built by
+    :func:`classify_gnl_windows` from ``gl`` alone — the source model never
+    separately labels a signaled week, so class-3 is simply whatever
+    class-4 does not cover.
+    """
+
+    plants: dict[int, GnlPlantClassification]
+
+
+def classify_gnl_windows(
+    model: GnlCommitmentModel, *, horizon_end: date
+) -> GnlClassification:
+    """Split each plant's post-horizon ``gl`` weeks into já-comandada vs signaled.
+
+    Já-comandada (class-4) is ``commitment.stages`` with ``start_date >=
+    horizon_end``, ordered ascending. A non-terminal window's width is the
+    exact date gap to the next já-comandada week; the terminal window is one
+    operative week (``start + _HOURS_PER_OPERATIVE_WEEK``) — never ``c.hours``,
+    which the source model leaves at ``0`` past the horizon (``duracao`` is
+    only tracked for weeks inside its own operative calendar). Pure: no
+    ``cobre`` import, no I/O, no MW clamping (the emission site's job).
+
+    Raises
+    ------
+    ValueError
+        If a plant's já-comandada weeks are not spaced exactly one operative
+        week apart — the run has a hole or overlap this function refuses to
+        silently repair.
+    """
+    return GnlClassification(
+        plants={
+            code: _classify_plant(code, commitment.stages, horizon_end)
+            for code, commitment in model.commitments.items()
+        }
+    )
+
+
+def _classify_plant(
+    code: int, stages: Sequence[GnlStageCommitment], horizon_end: date
+) -> GnlPlantClassification:
+    """One plant's já-comandada run — see :func:`classify_gnl_windows`."""
+    post_horizon = sorted(
+        (s for s in stages if s.start_date >= horizon_end),
+        key=lambda s: s.start_date,
+    )
+    if not post_horizon:
+        return GnlPlantClassification(class4_windows=(), class4_end=horizon_end)
+
+    windows: list[tuple[date, date, float]] = []
+    cursor = horizon_end
+    if post_horizon[0].start_date > cursor:
+        windows.append((cursor, post_horizon[0].start_date, 0.0))
+        cursor = post_horizon[0].start_date
+
+    last = len(post_horizon) - 1
+    for i, stage in enumerate(post_horizon):
+        if stage.start_date != cursor:
+            raise ValueError(
+                f"ambiguous já-comandada classification for GNL plant {code}: "
+                f"week {stage.start_date.isoformat()} does not continue from "
+                f"{cursor.isoformat()}"
+            )
+        nominal_end = stage.start_date + _ONE_OPERATIVE_WEEK
+        end = post_horizon[i + 1].start_date if i < last else nominal_end
+        if end != nominal_end:
+            raise ValueError(
+                f"ambiguous já-comandada classification for GNL plant {code}: "
+                f"week {stage.start_date.isoformat()} is followed by "
+                f"{end.isoformat()}, not the one-operative-week boundary "
+                f"{nominal_end.isoformat()}"
+            )
+        windows.append((stage.start_date, end, stage.committed_mw))
+        cursor = end
+
+    return GnlPlantClassification(class4_windows=tuple(windows), class4_end=cursor)
+
+
 # ---------------------------------------------------------------------------
 # Emission: GNL model -> cobre anticipated-dispatch inputs (both boundaries)
 # ---------------------------------------------------------------------------
@@ -342,17 +456,17 @@ class GnlEmission:
     """The cobre inputs an anticipated GNL fleet contributes to a converted case.
 
     ``thermals`` are created ``system/thermals.json`` entries (GNL plants are
-    absent from ``CT``); ``past_anticipated_commitments`` and
-    ``future_anticipated_deliveries`` extend ``initial_conditions.json`` (the
-    left and right temporal boundary); ``post_study_stages`` is the standalone
-    ``post_study_stages.json`` payload, ``None`` when the model declares no GS
-    calendar (``weeks_per_month`` empty) and non-``None`` (its ``thermal_bounds``
-    possibly empty) whenever a GS calendar exists.
+    absent from ``CT``); ``past_anticipated_commitments`` extends
+    ``initial_conditions.json`` with every temporal piece already fixed by
+    ``gl`` (the in-study left boundary plus the post-horizon já-comandada run);
+    ``post_study_stages`` is the standalone ``post_study_stages.json`` payload,
+    ``None`` when the model declares no GS calendar (``weeks_per_month`` empty)
+    and non-``None`` (its ``thermal_bounds`` possibly empty) whenever a GS
+    calendar exists.
     """
 
     thermals: list[dict]
     past_anticipated_commitments: list[dict]
-    future_anticipated_deliveries: list[dict]
     post_study_stages: dict | None
 
 
@@ -365,59 +479,19 @@ def _study_lead_hours(
     ``H = (Σ GS weeks over the study's months) × 168 h``. The study's month count
     is the number of distinct ``(year, month)`` among the study stage **start**
     dates; the first that many ``weeks_per_month`` values (ascending by month key)
-    are the study months' operative-week counts. Using the operative-week count (a
-    multiple of 168 h), not the trimmed study span, keeps the mirror calendar on
-    the Saturday operative-week grid — a decision made in a Saturday-starting
-    study week delivers in a Saturday-starting post-study week.
+    are the study months' operative-week counts. ``H`` sizes every plant's
+    ``anticipated_config.lead_time_hours`` and the in-study left-boundary tile
+    count (:func:`_lead_delivery_stage_count`); it does not shape the post-study
+    calendar itself, which is grid-anchored independently of it
+    (:func:`_build_post_study_calendar`).
 
-    Returns ``0.0`` when ``weeks_per_month`` is empty (no GS calendar to shift).
+    Returns ``0.0`` when ``weeks_per_month`` is empty (no GS calendar).
     """
     if not weeks_per_month:
         return 0.0
     study_month_count = len({(s.year, s.month) for s, _ in stage_spans})
     ordered_weeks = [weeks_per_month[k] for k in sorted(weeks_per_month)]
     return float(sum(ordered_weeks[:study_month_count]) * _HOURS_PER_OPERATIVE_WEEK)
-
-
-def _cobre_safe_lead_hours(ideal_lead_hours: float, horizon_hours: float) -> float:
-    """Cap the mirror lead strictly below the study horizon (a cobre workaround).
-
-    TRACKED COBRE-GAP WORKAROUND (C13): cobre's LP builder panics with a
-    divide-by-zero (``crates/cobre-sddp/src/lp/builder/entries.rs``, ``stage_idx
-    % k_max``) when an anticipated ``LeadTime`` plant's lead reaches the full
-    study horizon. cobre derives the in-study ring depth ``k_max`` from the lead
-    alone: with a lead ``>=`` the horizon, every in-study delivery-stage decider
-    is pre-study, so ``k_max`` collapses to ``0`` — yet the commitment-maturity
-    ("fishing") rows still fire and index ``stage_idx % k_max``.
-
-    The faithful mirror lead (:func:`_study_lead_hours`) is a whole number of
-    study operative weeks, which on a horizon whose last stage does not end on
-    the operative-week grid rounds *up* to ``>=`` the horizon — tripping the
-    panic. Capping to the largest operative-week multiple STRICTLY below the
-    horizon keeps ``k_max >= 1`` (one in-study decider survives). The mirror's
-    decider mapping is lead-invariant (``window_end − H`` collapses to the study
-    cumulative boundary for any ``H``), so every post-study delivery still lands
-    on its own study stage; the only cost is the post-study calendar shifts one
-    operative week less (study stage 0's delivery becomes the horizon-end stub
-    window rather than a full week).
-
-    Remove this cap (return ``ideal_lead_hours`` unchanged) once cobre handles
-    ``k_max == 0`` by collapsing the in-study fishing rows. Tracked with its
-    removal condition in ``~/git/cobre/plans/conversion-found-improvements.md``.
-    """
-    if ideal_lead_hours < horizon_hours:
-        return ideal_lead_hours
-    safe_weeks = int((horizon_hours - _NONZERO_TOLERANCE) // _HOURS_PER_OPERATIVE_WEEK)
-    capped = float(safe_weeks * _HOURS_PER_OPERATIVE_WEEK)
-    # Neutral, INFO-level note (out of the user's warning panel); the reason for
-    # the cap is the dev-facing TRACKED COBRE-GAP WORKAROUND (C13) docstring above.
-    _LOG.info(
-        "GNL anticipation lead set to %.0f h (%d operative weeks); the post-study "
-        "delivery calendar is shifted forward by that span",
-        capped,
-        safe_weeks,
-    )
-    return capped
 
 
 def _warn_on_nonuniform_lag(nl_lag_months: Mapping[int, int]) -> None:
@@ -431,11 +505,33 @@ def _warn_on_nonuniform_lag(nl_lag_months: Mapping[int, int]) -> None:
     distinct = set(nl_lag_months.values())
     if len(distinct) > 1:
         _LOG.warning(
-            "GNL plants declare differing anticipation lags %s; the single global "
-            "lead assumes a uniform lag — the mirror-shift calendar approximates "
-            "every plant at the study-span shift",
+            "GNL plants declare differing anticipation lags %s; only the "
+            "class-2 left-boundary tiling depth is sized from one study-span "
+            "lead — each plant's anticipated_config.lead_time_hours is "
+            "derived independently from its own já-comandada cutoff",
             sorted(distinct),
         )
+
+
+def _reject_straddling_windows(
+    past: Sequence[Mapping[str, object]], horizon_end: date
+) -> None:
+    """Raise if any ``past_anticipated_commitments`` row straddles ``horizon_end``.
+
+    Class-2 windows end at or before ``horizon_end``; class-4 windows
+    (:func:`classify_gnl_windows`) start at or after it. A row with
+    ``start_date < horizon_end < end_date`` means the two classes overlapped
+    the horizon instead of tiling either side of it.
+    """
+    for row in past:
+        start = date.fromisoformat(row["start_date"])
+        end = date.fromisoformat(row["end_date"])
+        if start < horizon_end < end:
+            raise ValueError(
+                f"past_anticipated_commitment for thermal {row['thermal_id']} "
+                f"straddles the horizon: [{row['start_date']}, "
+                f"{row['end_date']}) crosses horizon_end={horizon_end.isoformat()}"
+            )
 
 
 def _clamp_committed(value: float, thermal: GnlThermal, context: str) -> float:
@@ -517,52 +613,104 @@ def _record_bound(
     )
 
 
-def _calendar_stage_span(stage: Mapping) -> tuple[date, date]:
-    """A calendar stage's ``[start, end)`` as parsed dates."""
-    start = date.fromisoformat(stage["start_date"])
-    return start, start + timedelta(hours=float(stage["duration_hours"]))
+def _month_end_duration_hours(start: date) -> float:
+    """Hours from ``start`` to the last day of its own calendar month.
+
+    Uses the month's own last day-of-month number as the exclusive boundary
+    directly (``2026-06-06`` -> ``2026-06-30``, 24 d/576 h) — not the
+    following month's first day, which would add a spurious extra day
+    (600 h) and miss cobre's own post-study e2e fixture by one day.
+    """
+    _, last_day = _calendar.monthrange(start.year, start.month)
+    return float(last_day - start.day) * 24.0
 
 
 def _build_post_study_calendar(
-    stage_spans: Sequence[tuple[date, date]], lead_hours: float
+    stage_spans: Sequence[tuple[date, date]],
+    class4_end: date,
 ) -> list[dict]:
-    """The mirror-shift post-study calendar: the study stages shifted forward by ``H``.
+    """The post-study calendar: a class-4 fill, then the study mirrored from
+    ``class4_end``.
 
-    Post-study stage ``m`` **ends** at ``study_stage_end[m] + lead_hours`` and
-    **starts** at the previous post-study stage's end, with stage 0 starting at
-    the study horizon end (``stage_spans[-1][1]``). So stage 0 spans
-    ``[horizon_end, study_stage_end[0] + H)`` — absorbing the stub between the
-    horizon end and the first shifted study-week end — while every later weekly
-    stage is exactly ``168.0`` h and inherits the study calendar's Saturday
-    alignment (``H`` is a whole number of weeks); the trailing stage mirrors the
-    study monthly stage's own duration. One post-study stage per study stage.
+    Two phases, both tiled on the operative-week (Saturday) grid:
 
-    cobre resolves each delivery window's in-study decider end-anchored as the
-    stage containing ``window_end_hours − H``; by construction a window that tiles
-    post-study stage ``m`` has ``window_end_hours = study_cumulative[m + 1] + H``,
-    so its decider collapses to study stage ``m`` — in range for every stage,
-    nothing dropped.
+    * **class-4 fill** over ``[horizon_end, class4_end)`` — a grid-alignment
+      stub ``[horizon_end, next_saturday)`` (``0`` h when ``horizon_end`` is
+      already a Saturday), then ``168`` h operative weeks tiling up to
+      ``class4_end``. Empty when ``class4_end == horizon_end`` (no
+      já-comandada run to fill).
+    * **class-3 study-mirror** starting at ``class4_end`` — one stage per
+      study stage, same type: a ``168`` h study week mirrors to a ``168`` h
+      operative week, and the study's own trailing monthly stage mirrors to
+      a stage spanning to the end of *its own* (mirrored) calendar month
+      (:func:`_month_end_duration_hours`), never the study stage's own
+      recorded duration. Anchoring this mirror at ``horizon_end`` instead of
+      ``class4_end`` collapses every já-comandada week onto the mirror's own
+      dates, so cobre would see one class-3 (study-decided) stage instead of
+      one per study stage.
 
-    ``lead_hours`` is a multiple of 168 h (from :func:`_study_lead_hours`), so the
-    forward shift is a whole number of days. Returns ``[]`` when ``lead_hours <=
-    0`` (no GS calendar). Pure: no I/O, no ``cobre`` import.
+    Returns ``[]`` when ``stage_spans`` is empty. Pure: no I/O, no ``cobre``
+    import.
     """
-    if lead_hours <= 0.0:
+    if not stage_spans:
         return []
-    shift = timedelta(days=round(lead_hours / 24.0))
     horizon_end = stage_spans[-1][1]
+
     stages: list[dict] = []
     cursor = horizon_end
-    for _, s_end in stage_spans:
-        end = s_end + shift
+    # Saturday = weekday() 5; 0 when horizon_end is already on the grid.
+    stub_hours = ((5 - horizon_end.weekday()) % 7) * 24.0
+    if stub_hours > 0.0 and cursor < class4_end:
+        stages.append({"start_date": cursor.isoformat(), "duration_hours": stub_hours})
+        cursor += timedelta(hours=stub_hours)
+    while cursor < class4_end:
         stages.append(
             {
                 "start_date": cursor.isoformat(),
-                "duration_hours": (end - cursor).days * 24.0,
+                "duration_hours": float(_HOURS_PER_OPERATIVE_WEEK),
             }
         )
-        cursor = end
+        cursor += _ONE_OPERATIVE_WEEK
+
+    for s_start, s_end in stage_spans:
+        span_hours = (s_end - s_start).days * 24.0
+        duration = (
+            float(_HOURS_PER_OPERATIVE_WEEK)
+            if span_hours == _HOURS_PER_OPERATIVE_WEEK
+            else _month_end_duration_hours(cursor)
+        )
+        stages.append({"start_date": cursor.isoformat(), "duration_hours": duration})
+        cursor += timedelta(hours=duration)
+
     return stages
+
+
+def _shared_class4_end(
+    classification: GnlClassification,
+    thermals: Sequence[GnlThermal],
+    horizon_end: date,
+) -> date:
+    """The one já-comandada cutoff every anticipated thermal must share.
+
+    ``post_study_stages`` is emitted once, globally (:class:`GnlEmission`), so
+    its calendar needs a single ``class4_end``; a deck whose plants disagree
+    would leave the class-3/class-4 split ambiguous for at least one of them,
+    so this raises instead of picking one plant's boundary silently. Falls
+    back to ``horizon_end`` when there are no thermals to check.
+
+    Raises
+    ------
+    ValueError
+        If the plants' ``class4_end`` values disagree.
+    """
+    ends = {classification.plants[t.code].class4_end for t in thermals}
+    if len(ends) > 1:
+        raise ValueError(
+            "GNL plants declare differing já-comandada cutoffs "
+            f"{sorted(ends)}; post_study_stages is emitted once, globally, "
+            "and needs one shared class4_end"
+        )
+    return next(iter(ends), horizon_end)
 
 
 def convert_gnl(
@@ -575,41 +723,49 @@ def convert_gnl(
     """Convert a :class:`GnlCommitmentModel` into cobre's anticipated-GNL inputs.
 
     Each GNL plant is *created* (absent from ``CT``) with a dense id assigned
-    after the existing thermals (``first_thermal_id`` onward, ascending by code)
-    and marked anticipated via ``anticipated_config = {"lead_time_hours": H}``,
-    where ``H`` is the **single global** anticipation lead, shared by every GNL
-    plant: the ideal is a whole number of study operative weeks
-    (:func:`_study_lead_hours`), but the emitted value is that ideal **capped
-    strictly below the study horizon by :func:`_cobre_safe_lead_hours` (TRACKED
-    COBRE-GAP WORKAROUND C13)** — so on ``mar-26-rv2`` the emitted ``H`` is
-    ``1008 h`` (6 weeks), not the ideal ``1176 h`` (7 weeks) that panics cobre's
-    LP builder. The post-study calendar is the study stages
-    shifted forward by ``H`` (:func:`_build_post_study_calendar`), so cobre's
-    end-anchored decider (``window_end − H``) maps each post-study delivery back
-    onto its own study stage (0→0, 1→1, …); nothing is dropped, and ``H ≥`` every
-    study stage's duration, so no sub-stage (K=0) lead arises. Every anticipated
-    thermal then gets:
+    after the existing thermals (``first_thermal_id`` onward, ascending by
+    code) and marked anticipated via ``anticipated_config = {"lead_time_hours":
+    lead}``. ``lead`` is **per plant** — ``(class4_end − horizon_start).days *
+    24.0`` — long enough that cobre's own study-reachable boundary lands
+    exactly at that plant's já-comandada cutoff ``class4_end``
+    (:func:`classify_gnl_windows`): every class-4 window then stays inside the
+    study's reach, and only the class-3 (signaled) stages at or after
+    ``class4_end`` are left needing ``thermal_bounds`` pricing. This is
+    unrelated to the single global ``H`` (:func:`_study_lead_hours`, a whole
+    number of study operative weeks) that still sizes the class-2 left
+    boundary's tile count below, and to the post-study calendar
+    (:func:`_build_post_study_calendar`), which is anchored at the study
+    horizon end and the plants' shared ``class4_end`` independent of any lead
+    — every anticipated thermal must agree on ``class4_end``, or this raises
+    (:func:`_shared_class4_end`), since the calendar is emitted once,
+    globally. Every anticipated thermal then gets:
 
-    * ``past_anticipated_commitments`` tiling the leading
+    * ``past_anticipated_commitments`` carrying both temporal pieces already
+      fixed by ``gl``: the class-2 in-study left boundary, tiling the leading
       ``_lead_delivery_stage_count(H)`` study stages (every study stage when
       ``H > horizon``) with the hours-weighted committed MW folded from the
       (weekly) ``gl`` deliveries onto each study stage (explicit ``0`` where
-      none), each clamped into ``[min_mw, max_mw]`` — the mandatory left boundary;
-    * ``future_anticipated_deliveries``, **free-only** (``min_mw ==
-      thermal.min_mw`` / ``max_mw == thermal.max_mw`` — the decision cobre
-      optimises within): one per study stage, placed index-direct onto its mirror
-      post-study stage (study stage ``m`` → post-study stage ``m``) so each window
-      tiles exactly one whole calendar stage (coverage 1.0). The source model's
-      already-decided ``gl`` post-horizon commitments are *not* re-emitted as
-      pinned deliveries — their fixed generation is an accepted modelling loss;
-      the terminal FCF still prices every plant via its free per-stage lanes.
+      none); and the class-4 já-comandada run (:func:`classify_gnl_windows`),
+      tiling ``[horizon_end, class4_end)`` at coverage 1.0 (an explicit
+      ``0 MW`` stub included) with each window's own committed MW. Every
+      window, either class, is clamped into ``[min_mw, max_mw]``
+      (:func:`_clamp_committed`); no window may straddle the horizon
+      (:func:`_reject_straddling_windows` raises otherwise) — class-2 always
+      ends at or before it, class-4 always starts at or after it.
 
-    Every referenced ``(thermal_id, post_study_stage_index)`` gets one
-    ``thermal_bounds`` row carrying the plant's ``cvu`` (fuel-inclusive) as
-    ``cost_per_mwh`` and its ``[min_mw, max_mw]`` capability, which contains the
-    free delivery bound by construction. ``post_study_stages`` is ``None`` when
-    the model declares no ``GS`` calendar (``model.weeks_per_month`` empty) — the
-    deck's own signal that there is no post-study month to price.
+    Every plant also gets a ``thermal_bounds`` row for each **class-3
+    (signaled)** post-study calendar stage — one whose ``start_date >=
+    class4_end`` — carrying its ``cvu`` (fuel-inclusive) as ``cost_per_mwh``
+    and its ``[min_mw, max_mw]`` capability, the carrier a signaled stage
+    needs to be priced at all. A class-4 (já-comandada) stage gets none: its
+    delivery is already fixed by the ``past_anticipated_commitments`` window
+    above, and a ``thermal_bounds`` row there would let cobre re-optimize a
+    cell the source model has already committed. ``post_study_stages`` is
+    ``None`` when the model declares no ``GS`` calendar
+    (``model.weeks_per_month`` empty) — the deck's own signal that there is no
+    post-study month to price; otherwise it is emitted with its
+    ``thermal_bounds`` possibly empty, when every post-study stage is
+    class-4.
 
     ``stages`` is the converted ``stages.json`` stage list (each a mapping with
     ``start_date``, ``end_date``, and ``blocks[].hours``).
@@ -627,14 +783,25 @@ def convert_gnl(
     for h in stage_hours:
         cumulative_hours.append(cumulative_hours[-1] + h)
 
-    # Single global anticipation lead H = (operative weeks in the study) x 168,
-    # from GS; the post-study calendar is the study stages shifted forward by H.
-    # The lead is capped strictly below the horizon to dodge a cobre k_max=0
-    # LP-builder panic (TRACKED COBRE-GAP WORKAROUND C13, _cobre_safe_lead_hours).
-    ideal_lead = _study_lead_hours(stage_spans, model.weeks_per_month)
-    lead_hours = _cobre_safe_lead_hours(ideal_lead, cumulative_hours[-1])
+    lead_hours = _study_lead_hours(stage_spans, model.weeks_per_month)
     _warn_on_nonuniform_lag(model.nl_lag_months)
-    calendar = _build_post_study_calendar(stage_spans, lead_hours)
+
+    gnl_id = {t.code: first_thermal_id + i for i, t in enumerate(model.thermals)}
+    horizon_end = stage_spans[-1][1]
+    classification = classify_gnl_windows(model, horizon_end=horizon_end)
+
+    # The post-study calendar exists exactly when the deck declares a GS
+    # calendar (model.weeks_per_month) -- the same "is there a post-study
+    # month to price" signal _study_lead_hours uses for H; the calendar's own
+    # shape no longer depends on H, only on the plants' shared class4_end.
+    calendar = (
+        _build_post_study_calendar(
+            stage_spans,
+            _shared_class4_end(classification, model.thermals, horizon_end),
+        )
+        if model.weeks_per_month
+        else []
+    )
 
     if calendar:
         # The left boundary tiles exactly the leading stages cobre derives from H
@@ -648,11 +815,8 @@ def convert_gnl(
         tile_k = 1
         lead_hours = stage_hours[0]
 
-    gnl_id = {t.code: first_thermal_id + i for i, t in enumerate(model.thermals)}
-
     thermals: list[dict] = []
     past: list[dict] = []
-    future: list[dict] = []
     bounds: list[dict] = []
     seen_bounds: set[tuple[int, int]] = set()
 
@@ -673,6 +837,16 @@ def convert_gnl(
                 sum(h * mw for h, mw in windows) / total_h if total_h > 0 else 0.0
             )
 
+        plant_classification = classification.plants[thermal.code]
+        # Per plant, not the tile-sizing global H: long enough that cobre's own
+        # study-reachable boundary lands exactly at this plant's já-comandada
+        # cutoff, so every class-4 window stays inside the study's reach and
+        # only class-3 (signaled) stages need thermal_bounds pricing.
+        emitted_lead_hours = (
+            (plant_classification.class4_end - horizon_start).days * 24.0
+            if calendar
+            else lead_hours
+        )
         thermals.append(
             {
                 "id": tid,
@@ -681,7 +855,7 @@ def convert_gnl(
                 "bus_id": bus_id_of(thermal.submarket_code),
                 "cost_per_mwh": thermal.cost_per_mwh,
                 "generation": {"min_mw": thermal.min_mw, "max_mw": thermal.max_mw},
-                "anticipated_config": {"lead_time_hours": lead_hours},
+                "anticipated_config": {"lead_time_hours": emitted_lead_hours},
                 "entry_stage_id": None,
                 "exit_stage_id": None,
             }
@@ -697,30 +871,36 @@ def convert_gnl(
                     ),
                 }
             )
-
-        # Free forward decisions: one per study stage, placed index-direct onto
-        # the mirror post-study stage that shares its index (study m -> post m).
-        for m in range(len(calendar)):
-            start, end = _calendar_stage_span(calendar[m])
-            future.append(
+        for start, end, committed_mw in plant_classification.class4_windows:
+            past.append(
                 {
                     "thermal_id": tid,
-                    "delivery_start": start.isoformat(),
-                    "delivery_end": end.isoformat(),
-                    "min_mw": thermal.min_mw,
-                    "max_mw": thermal.max_mw,
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat(),
+                    "value_mw": _clamp_committed(
+                        committed_mw,
+                        thermal,
+                        f"post-horizon class-4 window {start.isoformat()}",
+                    ),
                 }
             )
-            _record_bound(bounds, seen_bounds, tid, m, thermal)
 
+        # A class-4 stage's delivery is already fixed by the class-4 window
+        # above; giving it a thermal_bounds row too would let cobre
+        # re-optimize an already-committed cell. Only class-3 (signaled)
+        # stages get the carrier.
+        class4_end = plant_classification.class4_end
+        for m, stage in enumerate(calendar):
+            if date.fromisoformat(stage["start_date"]) >= class4_end:
+                _record_bound(bounds, seen_bounds, tid, m, thermal)
+
+    _reject_straddling_windows(past, horizon_end)
     past.sort(key=lambda w: (w["thermal_id"], w["start_date"]))
-    future.sort(key=lambda d: (d["thermal_id"], d["delivery_start"]))
     bounds.sort(key=lambda b: (b["thermal_id"], b["post_study_stage_index"]))
     post_study = {"stages": calendar, "thermal_bounds": bounds} if calendar else None
 
     return GnlEmission(
         thermals=thermals,
         past_anticipated_commitments=past,
-        future_anticipated_deliveries=future,
         post_study_stages=post_study,
     )

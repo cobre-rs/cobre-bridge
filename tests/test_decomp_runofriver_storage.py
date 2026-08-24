@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -36,6 +37,7 @@ from cobre_bridge.decomp.hydro import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
+from tests.conftest import make_decomp_case
 
 
 def _plant_row(
@@ -167,15 +169,19 @@ def test_d_plant_storage_collapses_to_vol_ref() -> None:
     )
     effective = _effective(hidr, n_stages=2)
 
-    doc = convert_hydros(
-        _StubDadger(_uh_frame([1])), hidr, _ID_MAP_SINGLE, date(2026, 7, 4), effective
+    case = make_decomp_case(
+        Path("unused"),
+        dadger=_StubDadger(_uh_frame([1])),
+        hidr=hidr,
+        calendar=_calendar(2),
     )
+    doc = convert_hydros(case, _ID_MAP_SINGLE, effective=effective)
     assert doc["hydros"][0]["reservoir"] == {
         "min_storage_hm3": 300.0,
         "max_storage_hm3": 300.0,
     }
 
-    contributions = convert_storage_bounds(effective, _ID_MAP_SINGLE, _calendar(2))
+    contributions = convert_storage_bounds(case, _ID_MAP_SINGLE, effective=effective)
     assert contributions == []
 
 
@@ -227,9 +233,10 @@ def test_d_plant_initial_storage_is_vol_ref() -> None:
     effective = _effective(hidr, n_stages=1)
 
     for pct in (0.0, 42.0, 100.0):
-        storage = convert_initial_storage(
-            _StubDadger(_uh_frame([1], {1: pct})), hidr, _ID_MAP_SINGLE, effective
+        case = make_decomp_case(
+            Path("unused"), dadger=_StubDadger(_uh_frame([1], {1: pct})), hidr=hidr
         )
+        storage = convert_initial_storage(case, _ID_MAP_SINGLE, effective=effective)
         assert storage[0]["value_hm3"] == pytest.approx(300.0)
 
 
@@ -292,10 +299,14 @@ def test_collapse_diagnostic_counts_d_plants(caplog: pytest.LogCaptureFixture) -
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1, 2, 3))
     effective = _effective(hidr, n_stages=1)
 
+    case = make_decomp_case(
+        Path("unused"),
+        dadger=_StubDadger(_uh_frame([1, 2, 3])),
+        hidr=hidr,
+        calendar=_calendar(1),
+    )
     with caplog.at_level(logging.INFO, logger="cobre_bridge.decomp.hydro"):
-        convert_hydros(
-            _StubDadger(_uh_frame([1, 2, 3])), hidr, id_map, date(2026, 7, 4), effective
-        )
+        convert_hydros(case, id_map, effective=effective)
 
     assert "collapsed 2 run-of-river" in caplog.text
 

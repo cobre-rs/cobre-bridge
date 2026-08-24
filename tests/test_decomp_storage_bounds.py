@@ -21,6 +21,7 @@ into the ``hydro_bounds`` parquet rows.
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -32,8 +33,10 @@ from cobre_bridge.decomp.bounds import (
     convert_volume_espera_bounds,
 )
 from cobre_bridge.decomp.cadastro import EffectiveCadastro, storage_envelope
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
+from tests.conftest import make_decomp_case
 
 
 def _hidr_frame() -> pd.DataFrame:
@@ -72,6 +75,10 @@ def calendar() -> list[OperativeStage]:
     ]
 
 
+def _case(dadger: object, calendar: list[OperativeStage]) -> DecompCase:
+    return make_decomp_case(Path("unused"), dadger=dadger, calendar=calendar)
+
+
 def test_storage_envelope_returns_min_minimo_max_maximo(
     effective: EffectiveCadastro,
 ) -> None:
@@ -86,7 +93,9 @@ def test_convert_storage_bounds_emits_one_contribution_per_stage_that_differs(
     """Stages 0-1 (ceiling 100.0) differ from the envelope (20.0, 250.0);
     stage 2 equals the envelope exactly and emits no contribution.
     """
-    contributions = convert_storage_bounds(effective, id_map, calendar)
+    contributions = convert_storage_bounds(
+        _case(None, calendar), id_map, effective=effective
+    )
 
     assert [c.stage_id for c in contributions] == [0, 1]
     for contribution in contributions:
@@ -103,7 +112,9 @@ def test_convert_storage_bounds_no_stage_varying_volumes_emits_no_contributions(
     calendar: list[OperativeStage],
 ) -> None:
     no_override = EffectiveCadastro(base=_hidr_frame(), n_stages=3, stage_varying={})
-    contributions = convert_storage_bounds(no_override, id_map, calendar)
+    contributions = convert_storage_bounds(
+        _case(None, calendar), id_map, effective=no_override
+    )
     assert contributions == []
 
 
@@ -126,7 +137,9 @@ def test_ve_emits_percent_of_useful_upper_only(
     dadger = _dadger_with_ve(
         [{"codigo_usina": 1, "volume_1": 50.0, "volume_2": 100.0, "volume_3": None}]
     )
-    contribs = convert_volume_espera_bounds(dadger, id_map, calendar, effective)
+    contribs = convert_volume_espera_bounds(
+        _case(dadger, calendar), id_map, effective=effective
+    )
     # stage 0: 50% tightens (135 < 250) -> emitted; stage 1: 100% is a no-op
     # (ceiling == env_max); stage 2: blank -> skipped.
     assert len(contribs) == 1
@@ -149,14 +162,21 @@ def test_ve_full_percent_is_noop(
     dadger = _dadger_with_ve(
         [{"codigo_usina": 1, "volume_1": 100.0, "volume_2": 100.0, "volume_3": 100.0}]
     )
-    assert convert_volume_espera_bounds(dadger, id_map, calendar, effective) == []
+    assert (
+        convert_volume_espera_bounds(
+            _case(dadger, calendar), id_map, effective=effective
+        )
+        == []
+    )
 
 
 def test_ve_absent_register_returns_empty(
     effective: EffectiveCadastro, id_map: DecompIdMap, calendar: list[OperativeStage]
 ) -> None:
     assert (
-        convert_volume_espera_bounds(_dadger_with_ve(None), id_map, calendar, effective)
+        convert_volume_espera_bounds(
+            _case(_dadger_with_ve(None), calendar), id_map, effective=effective
+        )
         == []
     )
 
@@ -166,7 +186,12 @@ def test_ve_unoperated_plant_skipped(
 ) -> None:
     # plant 999 is not in id_map.hydro_codes -> contributes nothing.
     dadger = _dadger_with_ve([{"codigo_usina": 999, "volume_1": 30.0}])
-    assert convert_volume_espera_bounds(dadger, id_map, calendar, effective) == []
+    assert (
+        convert_volume_espera_bounds(
+            _case(dadger, calendar), id_map, effective=effective
+        )
+        == []
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +212,7 @@ def test_ti_emits_per_stage_withdrawal(
     dadger = _dadger_with_ti(
         [{"codigo_usina": 1, "taxa_1": 5.0, "taxa_2": 7.0, "taxa_3": 9.0}]
     )
-    table = convert_irrigation_withdrawal(dadger, id_map, calendar)
+    table = convert_irrigation_withdrawal(_case(dadger, calendar), id_map)
     assert table is not None
     got = {
         (h, s): v
@@ -208,7 +233,7 @@ def test_ti_zero_and_blank_skipped(
     dadger = _dadger_with_ti(
         [{"codigo_usina": 1, "taxa_1": 0.0, "taxa_2": None, "taxa_3": 4.0}]
     )
-    table = convert_irrigation_withdrawal(dadger, id_map, calendar)
+    table = convert_irrigation_withdrawal(_case(dadger, calendar), id_map)
     assert table is not None
     assert table.column("stage_id").to_pylist() == [2]
     assert table.column("water_withdrawal_m3s").to_pylist() == [4.0]
@@ -219,7 +244,7 @@ def test_ti_carry_forward_last_rate_for_extra_stages(
 ) -> None:
     # Only two taxa columns for a 3-stage calendar -> stage 2 repeats taxa_2.
     dadger = _dadger_with_ti([{"codigo_usina": 1, "taxa_1": 5.0, "taxa_2": 7.0}])
-    table = convert_irrigation_withdrawal(dadger, id_map, calendar)
+    table = convert_irrigation_withdrawal(_case(dadger, calendar), id_map)
     assert table is not None
     assert table.column("water_withdrawal_m3s").to_pylist() == [5.0, 7.0, 7.0]
 
@@ -228,7 +253,8 @@ def test_ti_absent_returns_none(
     id_map: DecompIdMap, calendar: list[OperativeStage]
 ) -> None:
     assert (
-        convert_irrigation_withdrawal(_dadger_with_ti(None), id_map, calendar) is None
+        convert_irrigation_withdrawal(_case(_dadger_with_ti(None), calendar), id_map)
+        is None
     )
 
 
@@ -237,60 +263,7 @@ def test_ti_unoperated_plant_returns_none(
 ) -> None:
     # plant 999 is not operated -> no rows -> None.
     dadger = _dadger_with_ti([{"codigo_usina": 999, "taxa_1": 5.0}])
-    assert convert_irrigation_withdrawal(dadger, id_map, calendar) is None
-
-
-def test_merge_water_withdrawal_lands_on_null_block_row() -> None:
-    import pyarrow as pa
-
-    from cobre_bridge.decomp.pipeline import _merge_water_withdrawal
-
-    # Existing bounds: a null-block stage-0 row (min_outflow) + a per-block row.
-    hydro_bounds = pa.table(
-        {
-            "hydro_id": pa.array([1, 1, 1], pa.int32()),
-            "stage_id": pa.array([0, 0, 1], pa.int32()),
-            "block_id": pa.array([None, 0, None], pa.int32()),
-            "min_outflow_m3s": pa.array([80.0, None, 80.0], pa.float64()),
-        }
-    )
-    withdrawal = pa.table(
-        {
-            "hydro_id": pa.array([1, 1], pa.int32()),
-            "stage_id": pa.array([0, 1], pa.int32()),
-            "water_withdrawal_m3s": pa.array([5.0, 6.0], pa.float64()),
-        }
-    )
-    merged = _merge_water_withdrawal(hydro_bounds, withdrawal)
-    rows = {
-        (h, s, b): w
-        for h, s, b, w in zip(
-            merged.column("hydro_id").to_pylist(),
-            merged.column("stage_id").to_pylist(),
-            merged.column("block_id").to_pylist(),
-            merged.column("water_withdrawal_m3s").to_pylist(),
-            strict=True,
-        )
-    }
-    # Withdrawal lands on the null-block rows only; the per-block row is untouched.
-    assert rows[(1, 0, None)] == 5.0
-    assert rows[(1, 1, None)] == 6.0
-    assert rows[(1, 0, 0)] is None
-
-
-def test_merge_water_withdrawal_none_is_noop() -> None:
-    import pyarrow as pa
-
-    from cobre_bridge.decomp.pipeline import _merge_water_withdrawal
-
-    hydro_bounds = pa.table(
-        {
-            "hydro_id": pa.array([1], pa.int32()),
-            "stage_id": pa.array([0], pa.int32()),
-            "block_id": pa.array([None], pa.int32()),
-        }
-    )
-    assert _merge_water_withdrawal(hydro_bounds, None) is hydro_bounds
+    assert convert_irrigation_withdrawal(_case(dadger, calendar), id_map) is None
 
 
 # EZ (percentual máximo do volume útil para acoplamento) is deliberately NOT

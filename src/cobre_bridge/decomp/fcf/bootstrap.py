@@ -8,8 +8,8 @@ silently the moment cobre's own layout changes), this module runs cobre
 itself for exactly one training iteration on the converted case, with
 checkpointing on, and reads the emitted checkpoint's terminal
 ``entity_manifest`` + ``state_dimension`` back via
-:func:`cobre.results.load_policy`. The mapper (epic 2's ticket-005) and the
-writer (ticket-008) then author cuts against that manifest verbatim, so any
+:func:`cobre.results.load_policy`. The mapper and the
+writer then author cuts against that manifest verbatim, so any
 future cobre layout change breaks loudly — a manifest mismatch on load — not
 silently.
 
@@ -18,13 +18,18 @@ cobre-python wheel the writer and reader already require), not a subprocess
 ``cobre`` binary: one dependency, no binary/wheel version skew, and no
 ``--cobre-bin`` path to resolve. ``cobre.run.run``'s ``config_overrides``
 deep-merges an override into ``config.json`` **in memory** (it never mutates
-the case), so no scratch copy is needed, and its ``on_iteration`` callback
-stops the run cooperatively after the first iteration boundary — the terminal
-state-vector layout is structural, present from iteration one.
+the case); the only on-disk copy is a disposable flattened variant of the
+case under ``work_dir`` (:func:`_flatten_terminal_fan`, which collapses the
+terminal fan so the boundary pool has a single owning node), never a mutation
+of ``case_dir``. Its ``on_iteration`` callback stops the run cooperatively
+after the first iteration boundary — the terminal state-vector layout is
+structural, present from iteration one.
 """
 
 from __future__ import annotations
 
+import json
+import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -35,9 +40,9 @@ if TYPE_CHECKING:
 def ensure_writer_binding() -> None:
     """Raise if the installed ``cobre`` wheel lacks ``write_policy_checkpoint``.
 
-    The importer's writer (ticket-008) needs
+    The importer's writer needs
     ``cobre.write_policy_checkpoint`` to author a boundary-cut checkpoint;
-    this is the epic's environment gate, callable standalone before any
+    this is the environment gate, callable standalone before any
     bootstrap/mapper/writer work runs.
 
     Raises
@@ -77,34 +82,86 @@ class TerminalManifest:
     least ``entity_type``, ``entity_id``, ``subindex``); ``state_dimension``
     is the terminal stage's own slot count, cross-checked against the
     checkpoint metadata's ``state_dimension`` in
-    :func:`bootstrap_terminal_manifest`.
+    :func:`bootstrap_terminal_manifest`. ``node_id`` and ``graph_stage_id``
+    are read back from that same terminal pool — the authoritative real
+    single-node/graph-stage identity the self-describing checkpoint payload
+    carries.
     """
 
     entity_manifest: tuple[dict[str, object], ...]
     state_dimension: int
+    node_id: int
+    graph_stage_id: int
+
+
+def _flatten_terminal_fan(case_dir: Path, variant_dir: Path) -> None:
+    """Materialise a copy of ``case_dir`` under ``variant_dir`` whose
+    ``stages.json`` ``policy_graph`` carries empty ``nodes``/``transitions``.
+
+    cobre's chain builder turns an empty ``nodes``/``transitions`` pair into
+    one node per stage, so the terminal stage gets a single owning node
+    instead of the real case's terminal-fan leaves — see
+    :func:`bootstrap_terminal_manifest`'s docstring for why a single-node
+    terminal is what the bootstrap run needs. Every other file (``config``,
+    ``system``, ``scenarios``, ``constraints``, ``post_study_stages.json``,
+    ``initial_conditions.json``) is copied verbatim, so the terminal state
+    layout read back from this variant is the real case's own. ``case_dir``
+    itself is only ever read, never written.
+
+    Every stage additionally gets ``num_openings: 1``: cobre's schema
+    requires an explicit per-stage opening count once ``nodes[]`` is empty
+    (the "chain dialect"; a real case's node-native ``stages.json`` never
+    sets it, since the fan width there comes from ``nodes``/``transitions``
+    instead), and ``1`` is exactly the width that turns the chain into the
+    single-node-per-stage graph this variant needs — confirmed empirically
+    against the installed cobre wheel: the flattened terminal's
+    ``entity_manifest``/``state_dimension``/``graph_stage_id`` come back
+    identical to the real fanned case's own, differing only in ``node_id``
+    (the real fanned case's ``-1`` shared-pool sentinel becomes a real id).
+    """
+    shutil.copytree(case_dir, variant_dir, dirs_exist_ok=True)
+    stages_path = variant_dir / "stages.json"
+    with stages_path.open(encoding="utf-8") as handle:
+        stages_doc = json.load(handle)
+    stages_doc["policy_graph"]["nodes"] = []
+    stages_doc["policy_graph"]["transitions"] = []
+    for stage in stages_doc["stages"]:
+        stage["num_openings"] = 1
+    with stages_path.open("w", encoding="utf-8") as handle:
+        json.dump(stages_doc, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
 
 
 def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalManifest:
-    """Run cobre for 1 iteration on ``case_dir`` and read its terminal manifest.
+    """Run cobre for 1 iteration on a single-terminal-leaf variant of
+    ``case_dir`` and read its terminal manifest.
 
-    Trains ``case_dir`` in-process via :func:`cobre.run.run`, writing the
-    checkpoint under ``work_dir`` (``case_dir`` is never mutated: the
-    single-iteration cap is applied through ``config_overrides``'
-    in-memory deep-merge, and the ``on_iteration`` callback requests a
-    cooperative stop at the first iteration boundary). Simulation is skipped.
+    ``case_dir``'s own ``stages.json`` emits a trunk-plus-terminal-fan policy
+    graph (one leaf node per scenario at the terminal stage); cobre stamps a
+    pool's ``node_id`` from its *sole* owning graph node, so a ≥2-leaf
+    terminal fan gives the terminal pool no single owner — the ``-1``
+    shared-pool sentinel this function raises on below. cobre's boundary
+    loader accepts a single-node *source* checkpoint injected into a fanned
+    *target*, so rather than train against ``case_dir`` itself, this trains
+    against a :func:`_flatten_terminal_fan` variant under ``work_dir`` whose
+    policy graph is a plain per-stage chain — giving the terminal pool a
+    real single owner — while every other file, and so the terminal state
+    layout read back, is ``case_dir``'s own. ``case_dir`` is never mutated.
+
+    The checkpoint is written under ``work_dir`` (the single-iteration cap is
+    applied through ``config_overrides``' in-memory deep-merge, and the
+    ``on_iteration`` callback requests a cooperative stop at the first
+    iteration boundary). Simulation is skipped.
 
     The bootstrap reserves no inflow-lag depth explicitly: cobre sizes the
     ``HydroInflowLag`` state block from the case's own PAR(p) model order
     (``resolve_state_layout``), the same autoregressive structure the DECOMP
     boundary cuts' ``pi_qafl`` terms derive from, so the terminal manifest
-    already carries the slots the mapper places those terms onto. (The former
-    ``state_space.inflow_lag_depth`` config override was redundant with that
-    PAR-order sizing and is rejected outright by cobre >= 0.14, which removed
-    the ``state_space`` config field.)
+    already carries the slots the mapper places those terms onto.
     It then reads the emitted checkpoint back via
     :func:`cobre.results.load_policy` and returns the terminal stage's (the
-    entry whose ``stage_id`` is max) ``entity_manifest`` and
-    ``state_dimension``.
+    entry whose ``stage_id`` is max) ``entity_manifest``, ``state_dimension``,
+    ``node_id``, and ``graph_stage_id``.
 
     Depends only on ``cobre.run.run`` and ``cobre.results.load_policy`` —
     neither needs the ``write_policy_checkpoint`` binding, so this function
@@ -116,18 +173,26 @@ def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalMa
     Raises
     ------
     RuntimeError
-        If the loaded checkpoint has no stage cuts or an empty terminal
-        ``entity_manifest``. A failure inside the run itself propagates as
-        ``cobre.run.run``'s own exception.
+        If the loaded checkpoint has no stage cuts, an empty terminal
+        ``entity_manifest``, a terminal pool missing ``node_id`` or
+        ``graph_stage_id``, or a terminal pool ``node_id`` that is the ``-1``
+        shared-pool sentinel — on the flattened variant this last case means
+        the flattening itself did not take (a real error, since the whole
+        point of training the variant is to never see the sentinel here). A
+        failure inside the run itself propagates as ``cobre.run.run``'s own
+        exception.
     """
     import cobre
+
+    variant_dir = work_dir / "bootstrap_variant"
+    _flatten_terminal_fan(case_dir, variant_dir)
 
     output_dir = work_dir / "output"
     config_overrides: dict[str, object] = {
         "training.stopping_rules": [{"type": "iteration_limit", "limit": 1}]
     }
     cobre.run.run(
-        str(case_dir),
+        str(variant_dir),
         output_dir=str(output_dir),
         skip_simulation=True,
         config_overrides=config_overrides,
@@ -152,7 +217,24 @@ def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalMa
             f"checkpoint at {output_dir} has an empty terminal entity_manifest"
         )
 
+    if "node_id" not in terminal:
+        raise RuntimeError(f"checkpoint at {output_dir} terminal pool has no node_id")
+    node_id = int(terminal["node_id"])
+    if node_id == -1:
+        raise RuntimeError(
+            f"checkpoint at {output_dir} terminal pool node_id is -1, the "
+            "shared-pool sentinel (no real single node)"
+        )
+
+    if "graph_stage_id" not in terminal:
+        raise RuntimeError(
+            f"checkpoint at {output_dir} terminal pool has no graph_stage_id"
+        )
+    graph_stage_id = int(terminal["graph_stage_id"])
+
     return TerminalManifest(
         entity_manifest=entity_manifest,
         state_dimension=terminal_state_dimension,
+        node_id=node_id,
+        graph_stage_id=graph_stage_id,
     )

@@ -35,16 +35,16 @@ from typing import TYPE_CHECKING, NamedTuple
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.converters.thermal import _SCHEMA_URL
+from cobre_bridge import cobre_schemas
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.temporal import hours_weighted as _hours_weighted
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import date
 
     from idecomp.decomp import Dadger
 
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -111,14 +111,13 @@ def _ct_dense(
 
 
 def convert_thermals(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
-    start_date: date,
 ) -> dict:
     """Build ``thermals.json`` from the ``CT`` records (stage-1 base values)."""
-    plants = _ct_dense(dadger, calendar)
-    op_date = start_date.isoformat()
+    calendar = case.calendar
+    plants = _ct_dense(case.dadger, calendar)
+    op_date = case.start_date.isoformat()
     first = calendar[0]
 
     thermals: list[dict] = []
@@ -140,7 +139,10 @@ def convert_thermals(
                 },
             }
         )
-    return {"$schema": _SCHEMA_URL, "thermals": thermals}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/thermals.json"),
+        "thermals": thermals,
+    }
 
 
 #: The ``cost_per_mwh`` side-table schema — cost rides alongside the
@@ -172,9 +174,8 @@ class ThermalBounds(NamedTuple):
 
 
 def convert_thermal_bounds(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
 ) -> ThermalBounds:
     """Thermal generation-bound contributions plus the ``cost_per_mwh`` side-table.
 
@@ -191,7 +192,8 @@ def convert_thermal_bounds(
     sparse base-vs-override convention (``decomp/network.py``), except the
     two never coexist here.
     """
-    plants = _ct_dense(dadger, calendar)
+    calendar = case.calendar
+    plants = _ct_dense(case.dadger, calendar)
 
     contributions: list[BoundContribution] = []
     cost_thermal_ids: list[int] = []

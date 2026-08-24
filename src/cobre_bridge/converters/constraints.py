@@ -17,13 +17,15 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.hydro import (
     _apply_permanent_overrides,
@@ -32,9 +34,11 @@ from cobre_bridge.converters.hydro import (
 from cobre_bridge.converters.network import C_M3S2HM3, MONTH_HOURS
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
 from cobre_bridge.converters.temporal import _month_hours
-from cobre_bridge.generic_constraint_format import (
-    GENERIC_BOUNDS_COLUMNS,
-    sense_to_interval,
+from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
+from cobre_bridge.generic_constraint_builder import (
+    ConstraintIdAllocator,
+    GenericConstraintBuilder,
+    GenericConstraintResult,
 )
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.plants import active_hydros
@@ -42,10 +46,63 @@ from cobre_bridge.productivity import compute_productivity, stored_energy_produc
 
 _LOG = logging.getLogger(__name__)
 
-_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/generic_constraints.schema.json"
-)
+_CATEGORY = "Special constraints"
+
+
+@dataclass
+class _VminopSkip:
+    """One REE whose curva.dat VminOP entry could not be expressed."""
+
+    ree_code: int
+    ree_name: str
+    reason: str
+
+
+@dataclass
+class _VminopPenaltyClamp:
+    """One REE whose curva.dat VminOP penalty was <= 0 and clamped to 1000.0."""
+
+    ree_code: int
+    ree_name: str
+    declared: float
+    applied: float
+
+
+@dataclass
+class _ElectricTermSkip:
+    """One electric-constraint expression term dropped while translating it."""
+
+    constraint_code: int
+    kind: Literal["hydro-unmapped", "no-line", "malformed"]
+    source: Literal["formula", "RE.DAT"]
+    hydro_code: int | None = None
+    sys_from: int | None = None
+    sys_to: int | None = None
+    raw: str | None = None
+
+
+@dataclass
+class _ElectricConstraintSkip:
+    """One electric constraint code dropped entirely (no terms, or no bounds)."""
+
+    constraint_code: int
+    reason: str
+
+
+@dataclass
+class _AgrintTermSkip:
+    """One AGRINT group term dropped for lack of a matching interchange line."""
+
+    group_id: int
+    sys_a: int
+    sys_b: int
+
+
+@dataclass
+class _AgrintGroupSkip:
+    """One AGRINT group dropped entirely (no valid terms after line lookup)."""
+
+    group_id: int
 
 
 def _vminop_energy_factor(start_year: int, start_month: int, stage: int) -> float:
@@ -70,26 +127,15 @@ class VminopResult(NamedTuple):
 
     Field order matches the legacy 4-tuple so existing index/destructure callers
     keep working; new code should use the names. ``constraints_dict`` is the full
-    ``{"$schema", "constraints": [...]}`` object; ``bounds`` has no ``block_id``
-    column (the pipeline adds a null one when merging).
+    ``{"$schema", "constraints": [...]}`` object; ``bounds`` is the full 5-column
+    F3 bounds table (``block_id`` always null — VminOP is stage-level, never
+    per-block).
     """
 
     constraints_dict: dict
     bounds: pa.Table
     referenced_hydro_ids: list[int]
     rho_acum_overrides: dict[int, list[float]]
-
-
-class GenericConstraintResult(NamedTuple):
-    """Result of the electric / AGRINT constraint converters.
-
-    ``constraints`` is the list of constraint dicts; ``bounds`` is the per-
-    ``(constraint_id, stage_id, block_id)`` bounds table. Field order matches the
-    legacy 2-tuple, so existing ``a, b = result`` callers keep working.
-    """
-
-    constraints: list[dict]
-    bounds: pa.Table
 
 
 def _build_hydro_downstream_map(
@@ -360,19 +406,37 @@ def _warn_if_non_fixa_penalization(configuracoes_penalizacao: list[Any] | None) 
     except (TypeError, ValueError, IndexError):
         return False
     if tipo == 0:
-        _LOG.info(
-            "curva.dat selects TIPO DE PENALIZACAO = 0 (FIXA): matches "
-            "cobre-bridge's VminOP modelling (a per-stage curve slack at the "
-            "fixed penalty), so no VminOP violation-penalty difference is "
-            "expected from the curve handling."
+        emit(
+            Diagnostic(
+                code="vminop-penalization-fixa",
+                severity=Severity.INFO,
+                category=_CATEGORY,
+                title="Security curve uses FIXA penalization",
+                summary=(
+                    "curva.dat selects TIPO DE PENALIZACAO = 0 (FIXA): matches "
+                    "cobre-bridge's VminOP modelling (a per-stage curve slack "
+                    "at the fixed penalty), so no VminOP violation-penalty "
+                    "difference is expected from the curve handling."
+                ),
+            ),
+            logger=_LOG,
         )
         return False
-    _LOG.warning(
-        "curva.dat selects TIPO DE PENALIZACAO = %s (non-FIXA): cobre-bridge "
-        "models the FIXA convention and does not reproduce NEWAVE's iterative / "
-        "variable curve penalization, so a VminOP violation-penalty difference "
-        "is expected.",
-        tipo,
+    emit(
+        Diagnostic(
+            code="vminop-penalization-not-fixa",
+            severity=Severity.WARNING,
+            category=_CATEGORY,
+            title="Security curve uses non-FIXA penalization",
+            summary=(
+                f"curva.dat selects TIPO DE PENALIZACAO = {tipo} (non-FIXA): "
+                "cobre-bridge models the FIXA convention and does not "
+                "reproduce NEWAVE's iterative / variable curve penalization, "
+                "so a VminOP violation-penalty difference is expected."
+            ),
+            remediation="Check curva.dat's TIPO DE PENALIZACAO field.",
+        ),
+        logger=_LOG,
     )
     return True
 
@@ -405,8 +469,8 @@ def _is_stored_energy_reservoir(cadastro: pd.DataFrame, code: int) -> bool:
     carry storage but are not part of the source model's stored energy.  This reproduces
     the plant set of pmo.dat's ``produtibilidade_acumulada_calculo_earm`` column.
 
-    Distinct from ``alignment._detect_reservoir_plants`` (useful-volume only):
-    that set is broader because it does not gate on ``tipo_regulacao``.
+    Narrower than a plain useful-volume test (``volume_maximo > volume_minimo``
+    alone): that broader criterion does not gate on ``tipo_regulacao``.
     """
     if code not in cadastro.index:
         return False
@@ -420,6 +484,7 @@ def _is_stored_energy_reservoir(cadastro: pd.DataFrame, code: int) -> bool:
 def convert_vminop_constraints(
     case: NewaveCase,
     id_map: NewaveIdMap,
+    allocator: ConstraintIdAllocator | None = None,
 ) -> VminopResult | None:
     """Convert curva.dat VminOP constraints to Cobre generic constraints.
 
@@ -441,6 +506,10 @@ def convert_vminop_constraints(
         Parsed the source model case.
     id_map:
         Entity ID mapping.
+    allocator:
+        Shared id source; defaults to a fresh :class:`ConstraintIdAllocator`
+        (ids from 0) when omitted. The pipeline threads one instance across
+        every emitter so ids stay contiguous across VminOP/electric/AGRINT.
 
     Returns
     -------
@@ -490,11 +559,9 @@ def convert_vminop_constraints(
     hidr = case.hidr
     ree_file = case.ree
 
-    cadastro = hidr.cadastro
-    cadastro = _apply_permanent_overrides(cadastro, case)
+    cadastro = _apply_permanent_overrides(hidr.cadastro, case)
     confhd_df = confhd.usinas
 
-    # Study horizon parameters
     _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
@@ -538,10 +605,8 @@ def convert_vminop_constraints(
         for code, values in per_stage_acc.items()
     }
 
-    # Map hydros to REEs
     hydro_to_ree = _build_hydro_to_ree(confhd_df, cadastro)
 
-    # Group hydros by REE
     ree_hydros: dict[int, list[int]] = defaultdict(list)
     for code, ree_code in hydro_to_ree.items():
         ree_hydros[ree_code].append(code)
@@ -562,20 +627,27 @@ def convert_vminop_constraints(
     # REEs that have constraints in curva.dat
     constraint_rees = sorted(curva_df["codigo_ree"].unique())
 
-    constraints: list[dict] = []
-    bound_constraint_ids: list[int] = []
-    bound_stage_ids: list[int] = []
-    bound_values: list[float] = []
+    allocator = allocator or ConstraintIdAllocator()
+    builder = GenericConstraintBuilder(allocator)
     all_referenced_ids: set[int] = set()
 
-    for constraint_id, ree_code in enumerate(constraint_rees):
+    # Loop-accumulate-then-emit-once: one record per skipped/clamped REE,
+    # emitted after the loop so the per-REE detail survives finalize_diagnostics'
+    # (code, summary) de-dup (see converters/thermal.py's _GtminRecord idiom).
+    vminop_skips: list[_VminopSkip] = []
+    penalty_clamps: list[_VminopPenaltyClamp] = []
+
+    for ree_code in constraint_rees:
         ree_code = int(ree_code)
         hydros_in_ree = ree_hydros.get(ree_code, [])
 
         if not hydros_in_ree:
-            _LOG.warning(
-                "REE %d has VminOP constraints but no hydro plants; skipping.",
-                ree_code,
+            vminop_skips.append(
+                _VminopSkip(
+                    ree_code=ree_code,
+                    ree_name=ree_names.get(ree_code, str(ree_code)),
+                    reason="no hydro plants",
+                )
             )
             continue
 
@@ -628,10 +700,12 @@ def convert_vminop_constraints(
             for code, (_vmin, vmax) in plant_volumes.items()
         )
         if not terms or max_energy_stage0 <= 0.0:
-            _LOG.warning(
-                "REE %d (%s): no valid terms for VminOP expression; skipping.",
-                ree_code,
-                ree_names.get(ree_code, "?"),
+            vminop_skips.append(
+                _VminopSkip(
+                    ree_code=ree_code,
+                    ree_name=ree_names.get(ree_code, "?"),
+                    reason="no valid terms for VminOP expression",
+                )
             )
             continue
 
@@ -647,29 +721,20 @@ def convert_vminop_constraints(
             return (pct / 100.0) * useful_s + dead_s
 
         expression = " + ".join(terms)
+        ree_name = ree_names.get(ree_code, str(ree_code))
         penalty = penalty_map.get(ree_code, 1000.0)
         if penalty <= 0.0:
-            _LOG.warning(
-                "VminOP penalty for REE %d is %.4f (must be > 0); using 1000.0.",
-                ree_code,
-                penalty,
+            penalty_clamps.append(
+                _VminopPenaltyClamp(
+                    ree_code=ree_code,
+                    ree_name=ree_name,
+                    declared=penalty,
+                    applied=1000.0,
+                )
             )
             penalty = 1000.0
-        ree_name = ree_names.get(ree_code, str(ree_code))
 
         all_referenced_ids.update(referenced_ids)
-
-        constraints.append(
-            {
-                "id": constraint_id,
-                "name": f"VminOP_{ree_name}",
-                "description": (
-                    f"Minimum stored energy for REE {ree_code} ({ree_name})"
-                ),
-                "expression": expression,
-                "slack": {"enabled": True, "penalty": penalty},
-            }
-        )
 
         # Build per-stage bounds from curva_df.
         # curva.dat only covers the study period. Extend into the post-study
@@ -681,8 +746,9 @@ def convert_vminop_constraints(
         study_months = _horizon.study_months
         ree_curva = curva_df[curva_df["codigo_ree"] == ree_code].sort_values("data")
 
-        # First pass: emit in-study bounds; build the per-calendar-month seasonal
+        # First pass: emit in-study slots; build the per-calendar-month seasonal
         # map and a per-stage map (the latter supplies the freeze value).
+        slots: list[tuple[int, int | None, float | None, float | None]] = []
         seasonal_pct: dict[int, float] = {}  # calendar_month -> last percentage
         pct_by_stage: dict[int, float] = {}
         for _, crow in ree_curva.iterrows():
@@ -693,10 +759,7 @@ def convert_vminop_constraints(
 
             percentage = float(crow["valor"])
             rhs = _rhs_at(stage_id, percentage)
-
-            bound_constraint_ids.append(constraint_id)
-            bound_stage_ids.append(stage_id)
-            bound_values.append(rhs)
+            slots.append((stage_id, None, rhs, None))
 
             seasonal_pct[dt.month] = percentage  # last value wins
             pct_by_stage[stage_id] = percentage
@@ -719,39 +782,72 @@ def convert_vminop_constraints(
                     pct = seasonal_pct.get(cal_month)
                 if pct is not None:
                     rhs = _rhs_at(stage_id, pct)
-                    bound_constraint_ids.append(constraint_id)
-                    bound_stage_ids.append(stage_id)
-                    bound_values.append(rhs)
+                    slots.append((stage_id, None, rhs, None))
 
-    if not constraints:
+        builder.add(
+            name=f"VminOP_{ree_name}",
+            description=f"Minimum stored energy for REE {ree_code} ({ree_name})",
+            expression=expression,
+            slack={"enabled": True, "penalty": penalty},
+            slots=slots,
+        )
+
+    if vminop_skips:
+        emit(
+            Diagnostic(
+                code="vminop-ree-not-expressible",
+                severity=Severity.WARNING,
+                category=_CATEGORY,
+                title=f"VminOP constraint not expressible ({len(vminop_skips)} REE(s))",
+                summary=(
+                    f"{len(vminop_skips)} REE(s) with a curva.dat VminOP entry "
+                    "could not be expressed as a generic constraint; skipping."
+                ),
+                table=DiagnosticTable(
+                    columns=["REE", "Name", "Reason"],
+                    rows=[[s.ree_code, s.ree_name, s.reason] for s in vminop_skips],
+                    justify=["right", "left", "left"],
+                ),
+            ),
+            logger=_LOG,
+        )
+    if penalty_clamps:
+        emit(
+            Diagnostic(
+                code="vminop-penalty-nonpositive",
+                severity=Severity.WARNING,
+                category=_CATEGORY,
+                title=f"VminOP penalty not positive ({len(penalty_clamps)} REE(s))",
+                summary=(
+                    f"{len(penalty_clamps)} REE(s) declare a curva.dat VminOP "
+                    "penalty that is not positive; using 1000.0 instead."
+                ),
+                table=DiagnosticTable(
+                    columns=["REE", "Name", "Declared", "Applied"],
+                    rows=[
+                        [c.ree_code, c.ree_name, c.declared, c.applied]
+                        for c in penalty_clamps
+                    ],
+                    justify=["right", "left", "right", "right"],
+                ),
+                remediation="Check curva.dat's penalty column for these REEs.",
+            ),
+            logger=_LOG,
+        )
+
+    result = builder.result()
+    if result is None:
         return None
 
     constraints_dict = {
-        "$schema": _SCHEMA_URL,
-        "constraints": constraints,
+        "$schema": cobre_schemas.schema_url_for("constraints/generic_constraints.json"),
+        "constraints": result.constraints,
     }
-
-    # VminOP is always a lower-bound (>=) constraint: every row's endpoint pair
-    # comes from the shared F3 mapping helper, so the upper endpoint is always
-    # null here.
-    bound_intervals = [sense_to_interval(">=", v) for v in bound_values]
-    bounds_table = pa.table(
-        {
-            "constraint_id": pa.array(bound_constraint_ids, type=pa.int32()),
-            "stage_id": pa.array(bound_stage_ids, type=pa.int32()),
-            "bound_lower": pa.array(
-                [lo for lo, _ in bound_intervals], type=pa.float64()
-            ),
-            "bound_upper": pa.array(
-                [up for _, up in bound_intervals], type=pa.float64()
-            ),
-        }
-    )
 
     _LOG.info(
         "Generated %d VminOP constraints with %d stage bounds.",
-        len(constraints),
-        len(bound_values),
+        len(result.constraints),
+        result.bounds.num_rows,
     )
 
     # Build the per_stage override for rho_acum_h{id}: map cobre hydro_id to
@@ -770,7 +866,7 @@ def convert_vminop_constraints(
 
     return VminopResult(
         constraints_dict,
-        bounds_table,
+        result.bounds,
         sorted(all_referenced_ids),
         rho_acum_overrides,
     )
@@ -894,10 +990,8 @@ def _build_line_id_map(case: NewaveCase) -> dict[tuple[int, int], int]:
     if limites_df is None or limites_df.empty:
         return {}
 
-    from datetime import datetime as _dt
-
     dger = case.dger
-    study_start_dt = _dt(dger.ano_inicio_estudo, dger.mes_inicio_estudo, 1)
+    study_start_dt = datetime(dger.ano_inicio_estudo, dger.mes_inicio_estudo, 1)
     first_month = limites_df[limites_df["data"] == study_start_dt]
     if first_month.empty:
         non_nan_df = limites_df.dropna(subset=["valor"])
@@ -922,23 +1016,44 @@ _TERM_RE = re.compile(
 )
 
 
-def _parse_formula(
-    formula: str,
-    id_map: NewaveIdMap,
-    line_id_map: dict[tuple[int, int], int],
-) -> str | None:
-    """Translate a source-model RE formula into a Cobre expression string.
+def _render_signed_expression(parsed_terms: list[tuple[float, str]]) -> str:
+    """Render (coefficient, variable) pairs into a signed sum expression string.
 
-    Unknown plant codes or interchange pairs are skipped with a warning.
-    Returns ``None`` if no valid terms remain after translation.
-
-    Expression syntax rules:
     - Positive coefficient 1.0:  ``variable(id)``
     - Positive coefficient other: ``coeff * variable(id)``
     - Negative coefficient -1.0: ``- variable(id)``
     - Negative coefficient other: ``- abs(coeff) * variable(id)``
     - First term omits leading ``+``; subsequent positive terms use ``+ ``;
       negative terms use ``- `` as binary subtraction.
+    """
+    parts: list[str] = []
+    for i, (coeff, var) in enumerate(parsed_terms):
+        abs_coeff = abs(coeff)
+        is_negative = coeff < 0.0
+        term_body = var if abs_coeff == 1.0 else f"{abs_coeff} * {var}"
+        if i == 0:
+            parts.append(f"- {term_body}" if is_negative else term_body)
+        else:
+            parts.append(f"- {term_body}" if is_negative else f"+ {term_body}")
+    return " ".join(parts)
+
+
+def _parse_formula(
+    formula: str,
+    id_map: NewaveIdMap,
+    line_id_map: dict[tuple[int, int], int],
+    *,
+    constraint_code: int,
+    # Recording seam: `None` (the direct-unit-test default) means "do not
+    # record"; convert_electric_constraints passes its own accumulator so the
+    # dropped terms it reports carry which constraint they came from.
+    skipped: list[_ElectricTermSkip] | None = None,
+) -> str | None:
+    """Translate a source-model RE formula into a Cobre expression string.
+
+    Unknown plant codes or interchange pairs are skipped. Returns ``None`` if
+    no valid terms remain after translation. See
+    :func:`_render_signed_expression` for the output formatting rules.
     """
     # Each element: (effective_coeff: float, variable_str: str)
     parsed_terms: list[tuple[float, str]] = []
@@ -958,29 +1073,44 @@ def _parse_formula(
             try:
                 cobre_id = id_map.hydro_id(plant_code)
             except KeyError:
-                _LOG.warning(
-                    "Electric constraint: unknown hydro code %d; skipping term.",
-                    plant_code,
-                )
+                if skipped is not None:
+                    skipped.append(
+                        _ElectricTermSkip(
+                            constraint_code=constraint_code,
+                            kind="hydro-unmapped",
+                            source="formula",
+                            hydro_code=plant_code,
+                        )
+                    )
                 continue
             parsed_terms.append((coeff, f"hydro_generation({cobre_id})"))
 
         elif fn == "ener_interc":
             if len(args) < 2:
-                _LOG.warning(
-                    "Electric constraint: ener_interc with fewer than 2 args: %s",
-                    args_str,
-                )
+                if skipped is not None:
+                    skipped.append(
+                        _ElectricTermSkip(
+                            constraint_code=constraint_code,
+                            kind="malformed",
+                            source="formula",
+                            raw=args_str,
+                        )
+                    )
                 continue
             from_sys, to_sys = args[0], args[1]
             src, tgt = (from_sys, to_sys) if from_sys < to_sys else (to_sys, from_sys)
             line_id = line_id_map.get((src, tgt))
             if line_id is None:
-                _LOG.warning(
-                    "Electric constraint: no line for interchange (%d,%d); skipping.",
-                    from_sys,
-                    to_sys,
-                )
+                if skipped is not None:
+                    skipped.append(
+                        _ElectricTermSkip(
+                            constraint_code=constraint_code,
+                            kind="no-line",
+                            source="formula",
+                            sys_from=from_sys,
+                            sys_to=to_sys,
+                        )
+                    )
                 continue
 
             # The source model's ``ener_interc(A, B)`` is the directional flow from A to
@@ -999,23 +1129,7 @@ def _parse_formula(
     if not parsed_terms:
         return None
 
-    parts: list[str] = []
-    for i, (coeff, var) in enumerate(parsed_terms):
-        abs_coeff = abs(coeff)
-        is_negative = coeff < 0.0
-        if abs_coeff == 1.0:
-            term_body = var
-        else:
-            term_body = f"{abs_coeff} * {var}"
-
-        if i == 0:
-            # First term: prepend minus sign if negative, nothing if positive.
-            parts.append(f"- {term_body}" if is_negative else term_body)
-        else:
-            # Subsequent terms: use binary +/- operator.
-            parts.append(f"- {term_body}" if is_negative else f"+ {term_body}")
-
-    return " ".join(parts)
+    return _render_signed_expression(parsed_terms)
 
 
 def _parse_yyyymm(period_str: str) -> tuple[int, int]:
@@ -1045,15 +1159,25 @@ def _get_individualizado_cutoff(
     beyond any real horizon) when the REE information is missing or unreadable.
     Because ``is_post_indiv = stage >= cutoff`` is then always False, the
     post-individualizado RE / seasonal-extrapolation bounds are dropped — so
-    both fallback paths warn loudly rather than degrading silently (the warning
-    is captured into :attr:`ConversionReport.warnings`).
+    both fallback paths emit a structured diagnostic on the collect() sink
+    rather than degrading silently.
     """
     try:
         ree_df = case.ree.rees
         if ree_df is None or ree_df.empty:
-            _LOG.warning(
-                "REE.DAT has no entries; the individualizado cutoff is unknown, "
-                "so post-individualizado electric (RE) bounds are not emitted."
+            emit(
+                Diagnostic(
+                    code="individualizado-cutoff-unknown",
+                    severity=Severity.WARNING,
+                    category=_CATEGORY,
+                    title="Individualizado cutoff unknown",
+                    summary=(
+                        "REE.DAT has no entries; the individualizado cutoff "
+                        "is unknown, so post-individualizado electric (RE) "
+                        "bounds are not emitted."
+                    ),
+                ),
+                logger=_LOG,
             )
             return _NO_INDIVIDUALIZADO_CUTOFF
         row = ree_df.iloc[0]
@@ -1061,10 +1185,19 @@ def _get_individualizado_cutoff(
         end_year = int(row["ano_fim_individualizado"])
         return (end_year - start_year) * 12 + (end_month - start_month)
     except Exception:  # noqa: BLE001
-        _LOG.warning(
-            "Could not read the individualizado cutoff from REE.DAT; "
-            "post-individualizado electric (RE) bounds are not emitted.",
-            exc_info=True,
+        emit(
+            Diagnostic(
+                code="individualizado-cutoff-unknown",
+                severity=Severity.WARNING,
+                category=_CATEGORY,
+                title="Individualizado cutoff unknown",
+                summary=(
+                    "Could not read the individualizado cutoff from REE.DAT; "
+                    "post-individualizado electric (RE) bounds are not "
+                    "emitted."
+                ),
+            ),
+            logger=_LOG,
         )
         return _NO_INDIVIDUALIZADO_CUTOFF
 
@@ -1099,7 +1232,16 @@ def _parse_re_dat(
     try:
         re_file = case.re_dat
     except Exception:  # noqa: BLE001
-        _LOG.warning("Could not parse RE.DAT; skipping RE constraints.")
+        emit(
+            Diagnostic(
+                code="re-dat-unreadable",
+                severity=Severity.WARNING,
+                category=_CATEGORY,
+                title="RE.DAT could not be parsed",
+                summary="RE.DAT could not be parsed; RE constraints are skipped.",
+            ),
+            logger=_LOG,
+        )
         return conjuntos, re_dat_bounds
 
     # Plant sets per constraint code.
@@ -1115,7 +1257,6 @@ def _parse_re_dat(
     if rest_df is None or rest_df.empty:
         return conjuntos, re_dat_bounds
 
-    # Group rows by constraint code.
     for code, grp in rest_df.groupby("conjunto"):
         code = int(code)
         # Collect changepoints: [(stage_id, patamar, value)]
@@ -1175,7 +1316,7 @@ def _parse_re_dat(
 def convert_electric_constraints(
     case: NewaveCase,
     id_map: NewaveIdMap,
-    start_id: int = 0,
+    allocator: ConstraintIdAllocator | None = None,
 ) -> GenericConstraintResult | None:
     """Convert electric constraints from restricao-eletrica.csv and RE.DAT.
 
@@ -1190,9 +1331,10 @@ def convert_electric_constraints(
         Parsed the source model case.
     id_map:
         Entity ID mapping.
-    start_id:
-        First constraint ID to assign (so IDs do not collide with VminOP
-        constraints).
+    allocator:
+        Shared id source; defaults to a fresh :class:`ConstraintIdAllocator`
+        (ids from 0) when omitted. The pipeline threads one instance across
+        every emitter so IDs do not collide with VminOP constraints.
 
     Returns
     -------
@@ -1220,7 +1362,6 @@ def convert_electric_constraints(
     if re_path is not None:
         expressions, horizons, bounds_rows = _parse_restricao_eletrica(re_path)
 
-    # Study horizon.
     _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
@@ -1265,7 +1406,21 @@ def convert_electric_constraints(
                 if not vals.empty:
                     eletri_penalty = float(vals.iloc[0])
         except (OSError, ValueError, KeyError) as exc:
-            _LOG.warning("Could not read ELETRI penalty from PENALID.DAT (%s).", exc)
+            emit(
+                Diagnostic(
+                    code="electric-penalty-unreadable",
+                    severity=Severity.WARNING,
+                    category=_CATEGORY,
+                    title="ELETRI penalty could not be read",
+                    summary=(
+                        "PENALID.DAT's ELETRI penalty could not be read; "
+                        "falling back to 10x the maximum deficit cost, or "
+                        "disabling the slack if that is also unavailable."
+                    ),
+                    notes=[str(exc)],
+                ),
+                logger=_LOG,
+            )
 
     if eletri_penalty is None:
         # Fall back to 10 × MAX_DEFICIT (the source model evaporation-folga convention).
@@ -1283,16 +1438,8 @@ def convert_electric_constraints(
         else {"enabled": False}
     )
 
-    constraints: list[dict] = []
-    bound_constraint_ids: list[int] = []
-    bound_stage_ids: list[int] = []
-    bound_block_ids: list[int | None] = []
-    bound_values: list[float] = []
-    # Each constraint id here is single-sided (a `<=` ceiling from `sup_id` or
-    # a `>=` floor from `inf_id`, never both), so this map lets the final
-    # bounds-table pass resolve each row's single value to the right F3
-    # endpoint via `sense_to_interval`.
-    constraint_senses: dict[int, str] = {}
+    allocator = allocator or ConstraintIdAllocator()
+    builder = GenericConstraintBuilder(allocator)
 
     # Index restricao-eletrica.csv bounds by constraint code.
     csv_bounds_by_code: dict[int, list[tuple[str, str, int, float, float]]] = (
@@ -1304,13 +1451,25 @@ def convert_electric_constraints(
     # All constraint codes from both sources.
     all_codes = sorted(set(expressions.keys()) | set(re_conjuntos.keys()))
 
+    # Loop-accumulate-then-emit-once: one record per dropped term / skipped
+    # constraint, grouped by kind and emitted once after the loop (see
+    # converters/thermal.py's _GtminRecord idiom).
+    elec_term_skips: list[_ElectricTermSkip] = []
+    elec_constraint_skips: list[_ElectricConstraintSkip] = []
+
     for cod in all_codes:
         # --- Build expression ---
         has_csv = cod in expressions
         has_re_dat = cod in re_conjuntos
 
         if has_csv:
-            cobre_expr = _parse_formula(expressions[cod], id_map, line_id_map)
+            cobre_expr = _parse_formula(
+                expressions[cod],
+                id_map,
+                line_id_map,
+                constraint_code=cod,
+                skipped=elec_term_skips,
+            )
         elif has_re_dat:
             # RE.DAT-only: expression is sum of hydro_generation for plants.
             terms: list[str] = []
@@ -1318,10 +1477,13 @@ def convert_electric_constraints(
                 try:
                     cobre_id = id_map.hydro_id(plant_code)
                 except KeyError:
-                    _LOG.warning(
-                        "RE.DAT constraint %d: unknown hydro code %d; skipping term.",
-                        cod,
-                        plant_code,
+                    elec_term_skips.append(
+                        _ElectricTermSkip(
+                            constraint_code=cod,
+                            kind="hydro-unmapped",
+                            source="RE.DAT",
+                            hydro_code=plant_code,
+                        )
                     )
                     continue
                 terms.append(f"hydro_generation({cobre_id})")
@@ -1330,8 +1492,10 @@ def convert_electric_constraints(
             continue
 
         if cobre_expr is None:
-            _LOG.warning(
-                "Electric constraint %d: no valid terms in expression; skipping.", cod
+            elec_constraint_skips.append(
+                _ElectricConstraintSkip(
+                    constraint_code=cod, reason="no valid terms in expression"
+                )
             )
             continue
 
@@ -1386,35 +1550,27 @@ def convert_electric_constraints(
         has_inf = bool(csv_inf)
 
         if not has_sup and not has_inf:
-            _LOG.warning("Electric constraint %d has no bound data; skipping.", cod)
+            elec_constraint_skips.append(
+                _ElectricConstraintSkip(constraint_code=cod, reason="no bound data")
+            )
             continue
 
         sup_id: int | None = None
         inf_id: int | None = None
 
         if has_sup:
-            sup_id = start_id + len(constraints)
-            constraint_senses[sup_id] = "<="
-            constraints.append(
-                {
-                    "id": sup_id,
-                    "name": f"RE_{cod}",
-                    "description": f"Electric constraint {cod}",
-                    "expression": cobre_expr,
-                    "slack": slack_config,
-                }
+            sup_id = builder.add_constraint(
+                name=f"RE_{cod}",
+                description=f"Electric constraint {cod}",
+                expression=cobre_expr,
+                slack=slack_config,
             )
         if has_inf:
-            inf_id = start_id + len(constraints)
-            constraint_senses[inf_id] = ">="
-            constraints.append(
-                {
-                    "id": inf_id,
-                    "name": f"RE_{cod}",
-                    "description": f"Electric constraint {cod}",
-                    "expression": cobre_expr,
-                    "slack": slack_config,
-                }
+            inf_id = builder.add_constraint(
+                name=f"RE_{cod}",
+                description=f"Electric constraint {cod}",
+                expression=cobre_expr,
+                slack=slack_config,
             )
 
         # --- Emit bounds for the full horizon ---
@@ -1434,10 +1590,13 @@ def convert_electric_constraints(
                         # No RE.DAT data: seasonal extrapolation fallback.
                         sup_val = seasonal_sup.get((cal_month, block_id))
                     if sup_val is not None:
-                        bound_constraint_ids.append(sup_id)
-                        bound_stage_ids.append(stage_id)
-                        bound_block_ids.append(block_id)
-                        bound_values.append(sup_val)
+                        builder.add_bound_row(
+                            sup_id,
+                            stage_id=stage_id,
+                            block_id=block_id,
+                            lower=None,
+                            upper=sup_val,
+                        )
 
                 # Lower bound.
                 if inf_id is not None:
@@ -1447,47 +1606,132 @@ def convert_electric_constraints(
                     elif is_post_indiv:
                         inf_val = seasonal_inf.get((cal_month, block_id))
                     if inf_val is not None:
-                        bound_constraint_ids.append(inf_id)
-                        bound_stage_ids.append(stage_id)
-                        bound_block_ids.append(block_id)
-                        bound_values.append(inf_val)
+                        builder.add_bound_row(
+                            inf_id,
+                            stage_id=stage_id,
+                            block_id=block_id,
+                            lower=inf_val,
+                            upper=None,
+                        )
 
-    if not constraints:
+    if elec_term_skips:
+        by_kind: dict[str, list[_ElectricTermSkip]] = defaultdict(list)
+        for skip in elec_term_skips:
+            by_kind[skip.kind].append(skip)
+
+        hydro_unmapped = by_kind.get("hydro-unmapped", [])
+        if hydro_unmapped:
+            emit(
+                Diagnostic(
+                    code="electric-constraint-hydro-unmapped",
+                    severity=Severity.WARNING,
+                    category=_CATEGORY,
+                    title=(
+                        "Electric constraint references an unmapped hydro "
+                        f"plant ({len(hydro_unmapped)})"
+                    ),
+                    summary=(
+                        f"{len(hydro_unmapped)} electric constraint term(s) "
+                        "reference a hydro plant code with no matching cobre "
+                        "entity; the term is dropped."
+                    ),
+                    table=DiagnosticTable(
+                        columns=["Constraint", "Hydro code", "Source"],
+                        rows=[
+                            [s.constraint_code, s.hydro_code, s.source]
+                            for s in hydro_unmapped
+                        ],
+                        justify=["right", "right", "left"],
+                    ),
+                ),
+                logger=_LOG,
+            )
+
+        no_line = by_kind.get("no-line", [])
+        if no_line:
+            emit(
+                Diagnostic(
+                    code="electric-constraint-interchange-no-line",
+                    severity=Severity.WARNING,
+                    category=_CATEGORY,
+                    title=(
+                        "Electric constraint interchange has no matching line "
+                        f"({len(no_line)})"
+                    ),
+                    summary=(
+                        f"{len(no_line)} electric constraint interchange "
+                        "term(s) reference a subsystem pair with no matching "
+                        "cobre line; the term is dropped."
+                    ),
+                    table=DiagnosticTable(
+                        columns=["Constraint", "From", "To"],
+                        rows=[
+                            [s.constraint_code, s.sys_from, s.sys_to] for s in no_line
+                        ],
+                        justify=["right", "right", "right"],
+                    ),
+                    remediation="Declare the pair as an interchange line.",
+                ),
+                logger=_LOG,
+            )
+
+        malformed = by_kind.get("malformed", [])
+        if malformed:
+            emit(
+                Diagnostic(
+                    code="electric-constraint-malformed-term",
+                    severity=Severity.WARNING,
+                    category=_CATEGORY,
+                    title=(
+                        f"Electric constraint has a malformed term ({len(malformed)})"
+                    ),
+                    summary=(
+                        f"{len(malformed)} electric constraint interchange "
+                        "term(s) declared fewer than 2 arguments; the term is "
+                        "dropped."
+                    ),
+                    table=DiagnosticTable(
+                        columns=["Constraint", "Term"],
+                        rows=[[s.constraint_code, s.raw] for s in malformed],
+                        justify=["right", "left"],
+                    ),
+                ),
+                logger=_LOG,
+            )
+
+    if elec_constraint_skips:
+        emit(
+            Diagnostic(
+                code="electric-constraint-skipped",
+                severity=Severity.WARNING,
+                category=_CATEGORY,
+                title=f"Electric constraint skipped ({len(elec_constraint_skips)})",
+                summary=(
+                    f"{len(elec_constraint_skips)} electric constraint(s) "
+                    "could not be converted; skipping."
+                ),
+                table=DiagnosticTable(
+                    columns=["Constraint", "Reason"],
+                    rows=[[s.constraint_code, s.reason] for s in elec_constraint_skips],
+                    justify=["right", "left"],
+                ),
+            ),
+            logger=_LOG,
+        )
+
+    result = builder.result()
+    if result is None:
         return None
-
-    # Each row's constraint id is single-sided (see `constraint_senses`), so
-    # every row's own value maps to exactly one F3 endpoint, the other null.
-    bound_intervals = [
-        sense_to_interval(constraint_senses[cid], v)
-        for cid, v in zip(bound_constraint_ids, bound_values, strict=True)
-    ]
-    # `.select(GENERIC_BOUNDS_COLUMNS)` pins the column order to the shared
-    # F3 constant rather than this dict literal's own order, so the two stay
-    # structurally in sync with `pipeline.py`'s merge (drift would raise at
-    # `pa.concat_tables`, not silently reorder a column).
-    bounds_table = pa.table(
-        {
-            "constraint_id": pa.array(bound_constraint_ids, type=pa.int32()),
-            "stage_id": pa.array(bound_stage_ids, type=pa.int32()),
-            "block_id": pa.array(bound_block_ids, type=pa.int32()),
-            "bound_lower": pa.array(
-                [lo for lo, _ in bound_intervals], type=pa.float64()
-            ),
-            "bound_upper": pa.array(
-                [up for _, up in bound_intervals], type=pa.float64()
-            ),
-        }
-    ).select(GENERIC_BOUNDS_COLUMNS)
 
     _LOG.info(
         "Generated %d electric constraints with %d bounds "
         "(individualizado cutoff at stage %d).",
-        len(constraints),
-        len(bound_values),
+        len(result.constraints),
+        result.bounds.num_rows,
         cutoff,
     )
 
-    return GenericConstraintResult(constraints, bounds_table)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1622,7 +1866,7 @@ def _parse_agrint(
 def convert_agrint_constraints(
     case: NewaveCase,
     id_map: NewaveIdMap,
-    start_id: int = 0,
+    allocator: ConstraintIdAllocator | None = None,
 ) -> GenericConstraintResult | None:
     """Convert AGRINT.DAT exchange group constraints to Cobre generic constraints.
 
@@ -1636,8 +1880,10 @@ def convert_agrint_constraints(
         Parsed the source model case.
     id_map:
         Entity ID mapping (used indirectly via ``_build_line_id_map``).
-    start_id:
-        First constraint ID to assign (must not collide with other constraints).
+    allocator:
+        Shared id source; defaults to a fresh :class:`ConstraintIdAllocator`
+        (ids from 0) when omitted. The pipeline threads one instance across
+        every emitter so IDs do not collide with other constraints.
 
     Returns
     -------
@@ -1660,7 +1906,6 @@ def convert_agrint_constraints(
     if not groups or not limits:
         return None
 
-    # Study horizon
     _horizon = case.horizon
     start_month = _horizon.start_month
     start_year = _horizon.start_year
@@ -1669,16 +1914,18 @@ def convert_agrint_constraints(
 
     line_id_map = _build_line_id_map(case)
 
-    constraints: list[dict] = []
-    bound_constraint_ids: list[int] = []
-    bound_stage_ids: list[int] = []
-    bound_block_ids: list[int] = []
-    bound_values: list[float] = []
+    allocator = allocator or ConstraintIdAllocator()
+    builder = GenericConstraintBuilder(allocator)
+
+    # Loop-accumulate-then-emit-once: one record per dropped term / empty
+    # group, emitted once after the loop (see converters/thermal.py's
+    # _GtminRecord idiom).
+    agrint_term_skips: list[_AgrintTermSkip] = []
+    agrint_group_skips: list[_AgrintGroupSkip] = []
 
     for group_id in sorted(groups.keys()):
         terms_raw = groups[group_id]
 
-        # Build expression: each (A, B, coeff) -> directional flow term.
         # The source model's ``Interc(A→B)`` is the *non-negative directional* flow from
         # A to B (zero whenever physical flow goes B→A).  Cobre's ``line_direct(id)`` /
         # ``line_reverse(id)`` are the matching non-negative LP variables:
@@ -1694,46 +1941,18 @@ def convert_agrint_constraints(
             src, tgt = (a, b) if a < b else (b, a)
             line_id = line_id_map.get((src, tgt))
             if line_id is None:
-                _LOG.warning(
-                    "AGRINT group %d: no line found for interchange (%d,%d); "
-                    "skipping term.",
-                    group_id,
-                    a,
-                    b,
+                agrint_term_skips.append(
+                    _AgrintTermSkip(group_id=group_id, sys_a=a, sys_b=b)
                 )
                 continue
             var = f"line_direct({line_id})" if a < b else f"line_reverse({line_id})"
             parsed_terms.append((coeff, var))
 
         if not parsed_terms:
-            _LOG.warning(
-                "AGRINT group %d: no valid terms after line lookup; skipping.",
-                group_id,
-            )
+            agrint_group_skips.append(_AgrintGroupSkip(group_id=group_id))
             continue
 
-        # Render expression string
-        parts: list[str] = []
-        for i, (eff_coeff, var) in enumerate(parsed_terms):
-            abs_coeff = abs(eff_coeff)
-            is_neg = eff_coeff < 0.0
-            term_body = var if abs_coeff == 1.0 else f"{abs_coeff} * {var}"
-            if i == 0:
-                parts.append(f"- {term_body}" if is_neg else term_body)
-            else:
-                parts.append(f"- {term_body}" if is_neg else f"+ {term_body}")
-        expression = " ".join(parts)
-
-        constraint_id = start_id + len(constraints)
-        constraints.append(
-            {
-                "id": constraint_id,
-                "name": f"AGRINT_{group_id}",
-                "description": f"Exchange group constraint {group_id}",
-                "expression": expression,
-                "slack": {"enabled": False},
-            }
-        )
+        expression = _render_signed_expression(parsed_terms)
 
         # Collect study-period limit rows for this group, keyed by (stage, block).
         # AGRINT has no seasonalize flag: The source model freezes its post-study limits
@@ -1768,12 +1987,11 @@ def convert_agrint_constraints(
                     m = 1
                     y += 1
 
-        # Emit study-period bounds.
-        for (stage_id, block_idx), lim_val in group_bounds.items():
-            bound_constraint_ids.append(constraint_id)
-            bound_stage_ids.append(stage_id)
-            bound_block_ids.append(block_idx)
-            bound_values.append(lim_val)
+        # Emit study-period slots.
+        slots: list[tuple[int, int | None, float | None, float | None]] = [
+            (stage_id, block_idx, None, lim_val)
+            for (stage_id, block_idx), lim_val in group_bounds.items()
+        ]
 
         # Freeze the last study stage value through the post-study tail.
         last_study_stage = study_months - 1
@@ -1783,36 +2001,68 @@ def convert_agrint_constraints(
                 if freeze_val is None:
                     continue
                 for stage_id in range(study_months, num_stages):
-                    bound_constraint_ids.append(constraint_id)
-                    bound_stage_ids.append(stage_id)
-                    bound_block_ids.append(block_idx)
-                    bound_values.append(freeze_val)
+                    slots.append((stage_id, block_idx, None, freeze_val))
 
-    if not constraints:
+        builder.add(
+            name=f"AGRINT_{group_id}",
+            description=f"Exchange group constraint {group_id}",
+            expression=expression,
+            slack={"enabled": False},
+            slots=slots,
+        )
+
+    if agrint_term_skips:
+        emit(
+            Diagnostic(
+                code="agrint-interchange-no-line",
+                severity=Severity.WARNING,
+                category=_CATEGORY,
+                title=(
+                    "AGRINT interchange has no matching line "
+                    f"({len(agrint_term_skips)})"
+                ),
+                summary=(
+                    f"{len(agrint_term_skips)} AGRINT group term(s) reference "
+                    "a subsystem pair with no matching cobre line; the term "
+                    "is dropped."
+                ),
+                table=DiagnosticTable(
+                    columns=["Group", "From", "To"],
+                    rows=[[s.group_id, s.sys_a, s.sys_b] for s in agrint_term_skips],
+                    justify=["right", "right", "right"],
+                ),
+                remediation="Declare the subsystem pair as an interchange line.",
+            ),
+            logger=_LOG,
+        )
+    if agrint_group_skips:
+        emit(
+            Diagnostic(
+                code="agrint-group-empty",
+                severity=Severity.WARNING,
+                category=_CATEGORY,
+                title=f"AGRINT group has no valid terms ({len(agrint_group_skips)})",
+                summary=(
+                    f"{len(agrint_group_skips)} AGRINT group(s) had no valid "
+                    "terms after line lookup; skipping."
+                ),
+                table=DiagnosticTable(
+                    columns=["Group"],
+                    rows=[[s.group_id] for s in agrint_group_skips],
+                    justify=["right"],
+                ),
+            ),
+            logger=_LOG,
+        )
+
+    result = builder.result()
+    if result is None:
         return None
-
-    # Every AGRINT constraint is a `<=` ceiling.
-    bound_intervals = [sense_to_interval("<=", v) for v in bound_values]
-    # `.select(GENERIC_BOUNDS_COLUMNS)` — see the electric-constraints writer
-    # above for why this pins the column order to the shared F3 constant.
-    bounds_table = pa.table(
-        {
-            "constraint_id": pa.array(bound_constraint_ids, type=pa.int32()),
-            "stage_id": pa.array(bound_stage_ids, type=pa.int32()),
-            "block_id": pa.array(bound_block_ids, type=pa.int32()),
-            "bound_lower": pa.array(
-                [lo for lo, _ in bound_intervals], type=pa.float64()
-            ),
-            "bound_upper": pa.array(
-                [up for _, up in bound_intervals], type=pa.float64()
-            ),
-        }
-    ).select(GENERIC_BOUNDS_COLUMNS)
 
     _LOG.info(
         "Generated %d AGRINT group constraints with %d bounds.",
-        len(constraints),
-        len(bound_values),
+        len(result.constraints),
+        result.bounds.num_rows,
     )
 
-    return GenericConstraintResult(constraints, bounds_table)
+    return result

@@ -6,10 +6,17 @@ the situation as a :class:`Diagnostic` and hands it to :func:`emit`. The pipelin
 installs a context-local sink (:func:`collect`) for the duration of a run and
 renders the collected diagnostics through :mod:`cobre_bridge.ui.console`.
 
-This decouples *what happened* (this module — plain data, no Rich, no I/O) from
-*how it is shown* (the Rich rendering layer). It replaces the previous lossy path
-where every warning was flattened to a ``logging`` string and structured detail —
-plant names, the stages involved, the values — was discarded at the call site.
+This decouples *what happened* (the :class:`Diagnostic` data model — plain data,
+no Rich, no I/O) from *how it is shown* (the Rich rendering layer). It replaces
+the previous lossy path where every warning was flattened to a ``logging``
+string and structured detail — plant names, the stages involved, the values —
+was discarded at the call site.
+
+:func:`_write_diagnostics_json` is the one exception to the "no I/O" rule: the
+``--diagnostics-json`` sidecar writer lives here (next to the model it
+serializes) and calls into :mod:`cobre_bridge.ui.console` via a lazy import
+(``ui.console`` imports this module at the top level, so a top-level import
+back would cycle).
 
 When no sink is active (a converter called directly, e.g. from a unit test),
 :func:`emit` degrades to a single ``logging`` record on the caller's logger, so
@@ -18,12 +25,22 @@ standalone use and existing log-based tests keep working unchanged.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
+    from rich.console import Console
+
+    from cobre_bridge.pipeline import ConversionReport
 
 _MODULE_LOGGER = logging.getLogger(__name__)
 
@@ -177,6 +194,57 @@ def emit(diagnostic: Diagnostic, *, logger: logging.Logger | None = None) -> Non
     )
 
 
+class WarningCollector(logging.Handler):
+    """Capture ``WARNING``+ records emitted under ``cobre_bridge`` during a run.
+
+    Converters log every degraded-input substitution (vazpast → empty, c_adic →
+    no load, EXPT/RE skipped, REE.DAT cutoff fallback, …) at ``WARNING`` level.
+    Attaching this to the package logger for the duration of a conversion lets
+    the pipeline report those degradations through :func:`finalize_diagnostics`
+    instead of letting them pass silently.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno >= logging.WARNING:
+            self.messages.append(record.getMessage())
+
+
+def finalize_diagnostics(
+    collected: list[Diagnostic], legacy_messages: list[str]
+) -> list[Diagnostic]:
+    """Combine structured diagnostics with bridged legacy ``logger.warning`` strings.
+
+    Structured diagnostics are de-duplicated by ``(code, summary)`` (a converter run
+    more than once should surface a finding only once). Each remaining captured
+    warning string — emitted by a site not yet migrated to :func:`emit` — is
+    wrapped in a generic WARNING diagnostic so it still renders through the same
+    pipeline, with first-occurrence order preserved.
+    """
+    result: list[Diagnostic] = []
+    seen: set[tuple[str, str]] = set()
+    for diag in collected:
+        key = (diag.code, diag.summary)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(diag)
+    for message in dict.fromkeys(legacy_messages):
+        result.append(
+            Diagnostic(
+                code="legacy-warning",
+                severity=Severity.WARNING,
+                category="Other warnings",
+                title="Conversion warning",
+                summary=message,
+            )
+        )
+    return result
+
+
 def format_stage_ranges(stages: Iterable[int]) -> str:
     """Collapse stage ids into a compact range string (``[4,5,6,7,19] -> "4-7, 19"``).
 
@@ -197,3 +265,48 @@ def format_stage_ranges(stages: Iterable[int]) -> str:
         start = prev = value
     groups.append((start, prev))
     return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in groups)
+
+
+def _write_diagnostics_json(
+    report: ConversionReport,
+    path: Path,
+    *,
+    diagnostics: Sequence[Diagnostic] | None = None,
+    console: Console,
+) -> None:
+    """Write the conversion counts + diagnostics to *path* as JSON.
+
+    ``diagnostics`` defaults to ``report.diagnostics`` (the plain
+    ``convert newave``/``convert decomp`` contract); a caller with additional
+    findings not yet folded into ``report`` — e.g. ``convert decomp
+    --boundary-fcf``'s importer diagnostics — passes the combined list
+    explicitly so the sidecar matches the ``--json`` verdict's merge.
+
+    A write failure is reported but does not change the exit code — the conversion
+    itself already succeeded.
+    """
+    from cobre_bridge.ui.console import print_status
+
+    resolved_diagnostics = report.diagnostics if diagnostics is None else diagnostics
+    payload = {
+        "summary": {
+            "hydros": report.hydro_count,
+            "thermals": report.thermal_count,
+            "buses": report.bus_count,
+            "lines": report.line_count,
+            "stages": report.stage_count,
+        },
+        "diagnostics": [d.to_dict() for d in resolved_diagnostics],
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except OSError as exc:
+        print_status(
+            f"Warning: failed to write diagnostics JSON: {exc}",
+            console=console,
+            style="#F5A623",
+        )
+    else:
+        print_status(f"Diagnostics written to {path}", console=console)

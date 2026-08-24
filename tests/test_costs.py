@@ -1,8 +1,7 @@
 """Unit tests for cobre_bridge.dashboard.tabs.costs.
 
 Covers module constants, can_render, _compute_npv_metric, _build_metrics_row,
-_build_cost_table, _chart_cost_bar, and the full render() path including the
-empty-costs degradation branch.
+and the full render() path including the empty-costs degradation branch.
 
 Ticket-015 additions cover: _render_cost_composition, _render_category_evolution,
 _render_spot_price, _render_violations, and the extended render() output.
@@ -17,13 +16,10 @@ import plotly.graph_objects as go
 import polars as pl
 
 import cobre_bridge.dashboard.tabs.costs as costs_mod
-from cobre_bridge.dashboard.chart_helpers import compute_cost_summary
 from cobre_bridge.dashboard.tabs.costs import (
     _build_composition_data,
     _build_composition_section,
-    _build_cost_table,
     _build_metrics_row,
-    _chart_cost_bar,
     _chart_violation_timeline,
     _compute_npv_metric,
     _render_category_evolution,
@@ -217,113 +213,6 @@ def test_build_metrics_row_contains_thermal_and_deficit_labels() -> None:
     html = _build_metrics_row(data)
     assert "Thermal Cost (NPV)" in html
     assert "Deficit Cost (NPV)" in html
-
-
-# ---------------------------------------------------------------------------
-# test__build_cost_table
-# ---------------------------------------------------------------------------
-
-
-def test_build_cost_table_contains_data_table_class() -> None:
-    """_build_cost_table must return HTML with class 'data-table'."""
-    costs = _make_costs_df()
-    summary = compute_cost_summary(costs, 0.0)
-    html = _build_cost_table(summary)
-    assert 'class="data-table"' in html
-
-
-def test_build_cost_table_has_tbody_with_rows() -> None:
-    """_build_cost_table must include a <tbody> with at least one <tr>."""
-    costs = _make_costs_df()
-    summary = compute_cost_summary(costs, 0.0)
-    html = _build_cost_table(summary)
-    assert "<tbody>" in html
-    assert "<tr>" in html
-
-
-def test_build_cost_table_empty_df_returns_placeholder() -> None:
-    """_build_cost_table on an empty DataFrame must return a fallback <p>."""
-    html = _build_cost_table(pd.DataFrame())
-    assert "<table" not in html
-    assert "No cost data" in html
-
-
-# ---------------------------------------------------------------------------
-# test__chart_cost_bar
-# ---------------------------------------------------------------------------
-
-
-def test_chart_cost_bar_returns_figure() -> None:
-    """_chart_cost_bar must return a plotly Figure."""
-    costs = _make_costs_df()
-    summary = compute_cost_summary(costs, 0.0)
-    fig = _chart_cost_bar(summary)
-    assert isinstance(fig, go.Figure)
-
-
-def test_chart_cost_bar_has_vertical_bar_traces() -> None:
-    """_chart_cost_bar must produce at least one vertical Bar trace."""
-    costs = _make_costs_df()
-    summary = compute_cost_summary(costs, 0.0)
-    fig = _chart_cost_bar(summary)
-    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
-    assert len(bar_traces) >= 1
-    # Bars are vertical (default orientation=None, x=groups, y=means)
-    for trace in bar_traces:
-        assert trace.orientation != "h"
-
-
-def test_chart_cost_bar_error_bars_p10_p90() -> None:
-    """_chart_cost_bar must set error_y with p5–p95 range on each bar trace.
-
-    The chart is vertical (y=means), so error bars are on the y-axis.
-    Given p5=800, mean=1000, p95=1200: error_y.array=[200] and
-    error_y.arrayminus=[200].
-    """
-    summary = pd.DataFrame(
-        {
-            "group": ["Thermal"],
-            "mean": [1000.0],
-            "std": [100.0],
-            "p5": [800.0],
-            "p10": [850.0],
-            "p90": [1150.0],
-            "p95": [1200.0],
-            "pct": [100.0],
-        }
-    )
-    fig = _chart_cost_bar(summary)
-
-    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
-    assert len(bar_traces) == 1
-    trace = bar_traces[0]
-    assert trace.error_y is not None
-    assert trace.error_y.visible is True
-    assert trace.error_y.array == (200.0,)
-    assert trace.error_y.arrayminus == (200.0,)
-
-
-def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
-    """_chart_cost_bar must omit error_x when p10 or p90 is NaN."""
-    import math
-
-    summary = pd.DataFrame(
-        {
-            "group": ["Thermal"],
-            "mean": [1000.0],
-            "std": [0.0],
-            "p5": [math.nan],
-            "p10": [math.nan],
-            "p90": [math.nan],
-            "p95": [math.nan],
-            "pct": [100.0],
-        }
-    )
-    fig = _chart_cost_bar(summary)
-
-    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
-    assert len(bar_traces) == 1
-    assert bar_traces[0].error_x is None or bar_traces[0].error_x.visible is not True
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ few derived/aggregate columns. Two places classify those columns:
 
 - the dashboard cost chart (``dashboard/chart_helpers.py::COST_GROUPS``), and
 - the source model↔Cobre cost-breakdown comparison
-  (``comparators/charts.py::_COST_MAP`` + ``cobre_readers.read_cobre_cost_breakdown``).
+  (``comparators.charts._COST_MAP`` + ``cobre_readers.read_cobre_cost_breakdown``).
 
 They used to each hard-code their own column lists and drifted: the comparator's
 sum list omitted ``contract_cost`` entirely (silently dropping it from the

@@ -10,33 +10,13 @@ from collections.abc import Mapping, Sequence
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.horizon import POST_STUDY_YEAR, historical_start_date
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.pandas_utils import is_na
 
 _LOG = logging.getLogger(__name__)
-
-_BUSES_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/buses.schema.json"
-)
-_LINES_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/lines.schema.json"
-)
-_PENALTIES_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/penalties.schema.json"
-)
-_NCS_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/non_controllable_sources.schema.json"
-)
-_NCS_FACTORS_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/non_controllable_factors.schema.json"
-)
 
 # --------------------------------------------------------------------------
 # Penalty conversion constants
@@ -46,8 +26,7 @@ _NCS_FACTORS_SCHEMA_URL = (
 # "Penalidades
 # (Ex.: Penalid.dat)" and the internal-default tables on pages 87–88.
 #
-# Time-aspect summary (re-derived from cobre/crates/cobre-sddp/src/lp_builder/
-# matrix.rs in current HEAD):
+# Time-aspect summary (re-derived from cobre's SDDP LP builder, matrix.rs):
 #
 # Every cobre penalty coefficient in penalties.json is multiplied by some
 # hours quantity before entering the LP objective. The variable it sits on
@@ -77,7 +56,7 @@ _NCS_FACTORS_SCHEMA_URL = (
 #   Affected: hydro.water_withdrawal_violation_(pos|neg)_cost,
 #   hydro.evaporation_violation_(pos|neg)_cost,
 # hydro.inflow_nonnegativity_cost. Cobre's docstring on evaporation_violation_cost says
-# "$/mm" but the actual LP column (matrix.rs:346-347) reads f_evap_plus/minus as flow
+# "$/mm" but the actual LP column (matrix.rs) reads f_evap_plus/minus as flow
 # rates in m³/s — same unit as withdrawal. The "_m3s" suffix in the simulation output
 # `evaporation_violation_pos_m3s` confirms this. → Conversion: **× ρ_max_acum**
 # (`MAX_PRODTACUM_SIN`) for DESVIO and evaporation (per source-model manual p.87); **×
@@ -137,11 +116,8 @@ HM3_TO_MWH_PER_RHO: float = 1e6 / 3600.0  # ≈ 277.78
 #
 # These are the source model's v30 values verbatim: tiny (~1e-4 R$/MWh) regularization
 # costs whose only role is to break LP ties in a fixed merit order (exchange < spillage
-# < … < excess), well below any operational or deterrent cost. An earlier revision
-# multiplied them by a uniform uplift factor to widen the HiGHS coefficient range; that
-# factor was reverted to 1.0 (a no-op) and is now dropped — the bare the source model
-# values condition fine at cobre's case scale.
-_PINT = 0.000273  # intercâmbio  → line.exchange_cost
+# < … < excess), well below any operational or deterrent cost.
+PINT = 0.000273  # intercâmbio  → line.exchange_cost
 
 # The source model halves the intercâmbio penalty on lines that touch a fictitious
 # submercado (e.g. NOFICT1). Rationale: a fictitious node is a routing-only hop with no
@@ -149,10 +125,10 @@ _PINT = 0.000273  # intercâmbio  → line.exchange_cost
 # accumulate twice the penalty of an equivalent direct real → real link. The 0.5
 # discount restores cost-parity between the two topologies.  Emitted as the per-line
 # `exchange_cost` override defined in lines.schema.json; absence falls back to the
-# global `_PINT` value.
+# global `PINT` value.
 _PINT_FICTITIOUS_DISCOUNT = 0.5
-_PCORTEOL = 0.000344  # corte geração eólica → ncs.curtailment_cost
-_PEXC = 0.000355  # excesso de energia → bus.excess_cost
+PCORTEOL = 0.000344  # corte geração eólica → ncs.curtailment_cost
+PEXC = 0.000355  # excesso de energia → bus.excess_cost
 
 # Flow-domain (R$/MWh equivalent, multiplied by ρ_avg before emission). Cobre's
 # `hydro.spillage_cost` covers ALL spillage (reservoir + run-of-river). In the
@@ -171,17 +147,13 @@ _PCDESV = 0.000300  # volume desviado → hydro.diversion_cost
 # constraints (water-cycle physics, water-supply requirements) at the top of the merit
 # order so the LP violates them only as a last resort. We apply that 10× faithfully (it
 # doubles as the PENALID fallback below, and `_ELETRI_HIGH_MULT` reuses the same
-# magnitude). Earlier revisions trialled softer factors (1.1×, 2×) to tame HiGHS's
-# coefficient range, but the bare 10× conditions acceptably at cobre's case scale and
-# stays the source-model-faithful.
+# magnitude).
 _EVAPORATION_MULT = 10.0
 
 # NOTE: when PENALID supplies TURBMN, VAZMIN, TURBMX with the same R$/MWh value
 # (typical the source model convention), the resulting
-# turbined/outflow-below/outflow-above slack costs share an LP coefficient (ρ_avg
-# cancels nothing). An earlier revision multiplied each by a ~1 % "tie-break" factor to
-# break that degeneracy; the factors were all reverted to 1.00 (no-op) and have been
-# dropped. Reintroduce distinct spacing here if HiGHS degeneracy resurfaces.
+# turbined/outflow-below/outflow-above slack costs share an LP coefficient. Reintroduce
+# distinct spacing here if HiGHS degeneracy resurfaces.
 
 # --- Cobre Family-D fields not yet wired into the LP -----------------------
 # Storage-floor and filling-target violation costs are declared on cobre's schema
@@ -278,7 +250,6 @@ def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             "sistema.dat contains no deficit cost data (custo_deficit is None)"
         )
 
-    # Build per-subsystem deficit segments.
     # Columns: codigo_submercado, nome_submercado, ficticio,
     # patamar_deficit, custo, corte
     buses_by_code: dict[int, dict] = {}
@@ -352,7 +323,7 @@ def convert_buses(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     buses.sort(key=lambda b: b["id"])
 
     return {
-        "$schema": _BUSES_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("system/buses.json"),
         "buses": buses,
     }
 
@@ -480,7 +451,7 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
 
     if limites_df is None or limites_df.empty:
         return {
-            "$schema": _LINES_SCHEMA_URL,
+            "$schema": cobre_schemas.schema_url_for("system/lines.json"),
             "lines": [],
         }
 
@@ -562,11 +533,11 @@ def convert_lines(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             },
         }
         if src in fictitious_codes or tgt in fictitious_codes:
-            line_entry["exchange_cost"] = _PINT * _PINT_FICTITIOUS_DISCOUNT
+            line_entry["exchange_cost"] = PINT * _PINT_FICTITIOUS_DISCOUNT
         lines.append(line_entry)
 
     return {
-        "$schema": _LINES_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("system/lines.json"),
         "lines": lines,
     }
 
@@ -622,7 +593,7 @@ def _own_productivities(
     return out
 
 
-def _hydro_penalty_costs(
+def hydro_penalty_costs(
     *,
     rho_avg: float,
     rho_max_acum: float,
@@ -669,9 +640,7 @@ def _hydro_penalty_costs(
     # so cobre_coef = P_R$_MWh × ρ × HM3_TO_MWH_PER_RHO. The 730h/month assumption
     # cancels out — this is dimensional energy-equivalence, not a per-hour rate.
     # ρ here is ρ_max_acum (MAX_PRODTACUM_SIN), per the agreed criterion and
-    # matching the evaporation / water-withdrawal slacks (manual p.87). (Earlier
-    # versions used × C_M3S2HM3 here which was wrong by the factor
-    # MONTH_HOURS = 730.)
+    # matching the evaporation / water-withdrawal slacks (manual p.87).
     #
     # ⚠️ This volumetric (730-cancelling) form is correct ONLY because cobre
     # prices these Family-D slots with NO time multiplier (`objective = penalty`).
@@ -818,12 +787,7 @@ def convert_penalties(
     primary_deficit_cost = 0.0
     max_deficit_cost = 0.0
     if deficit_df is not None and not deficit_df.empty:
-        first_sub = deficit_df.sort_values(
-            [
-                "codigo_submercado",
-                "patamar_deficit",
-            ]
-        )
+        first_sub = deficit_df.sort_values(["codigo_submercado", "patamar_deficit"])
         primary_deficit_cost = float(first_sub.iloc[0]["custo"])
         max_deficit_cost = float(deficit_df["custo"].max())
 
@@ -857,8 +821,8 @@ def convert_penalties(
     # The ρ-scaled hydro penalty block is computed by a pure helper so the
     # global (base) penalties.json and the per-stage override parquet built by
     # ``convert_hydro_penalty_overrides`` apply byte-identical formulas — see
-    # ``_hydro_penalty_costs``.
-    hydro_costs = _hydro_penalty_costs(
+    # ``hydro_penalty_costs``.
+    hydro_costs = hydro_penalty_costs(
         rho_avg=rho_avg,
         rho_max_acum=rho_max_acum,
         penalid_costs=penalid_costs,
@@ -870,12 +834,12 @@ def convert_penalties(
     # through directly (no productivity multiplier, hence not stage-varying and not part
     # of the hydro override).
     # --------------------------------------------------------------------
-    excess_cost = _PEXC
-    exchange_cost = _PINT
-    curtailment_cost = _PCORTEOL
+    excess_cost = PEXC
+    exchange_cost = PINT
+    curtailment_cost = PCORTEOL
 
     return {
-        "$schema": _PENALTIES_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("penalties.json"),
         "bus": {
             "deficit_segments": [
                 {
@@ -969,7 +933,7 @@ def convert_hydro_penalty_overrides(
     # columns that differ from the global base (sparse-override contract).
     stage_overrides: list[tuple[int, dict[str, float]]] = []
     for s in range(n_stages):
-        stage_costs = _hydro_penalty_costs(
+        stage_costs = hydro_penalty_costs(
             rho_avg=per_stage_rho_avg[s],
             rho_max_acum=per_stage_rho_max_acum[s],
             penalid_costs=penalid_costs,
@@ -1033,7 +997,7 @@ def convert_line_bounds(
     per-block-factor JSON document, now deleted — and folds each per-block
     multiplicative factor into an absolute-MW override row, ``direct_mw =
     base_direct_mw × direct_factor`` (and the reverse equivalent), per cobre
-    decision 10 (epic 02 §7.2). A block row is emitted only where it differs
+    decision 10. A block row is emitted only where it differs
     from the base (i.e. the factor is not 1.0 for both directions); a
     line-stage whose blocks are all uniform gets no block rows, since the base
     row alone is equivalent.
@@ -1133,16 +1097,10 @@ def convert_line_bounds(
         k: v for k, (_, v) in last_year_per_key.items()
     }
 
-    # ------------------------------------------------------------------
-    # Per-block factors (cobre decision 10, epic 02 §7.2): fold
+    # Per-block factors (cobre decision 10): fold
     # ``patamar.dat::intercambio_patamares`` into per-block direct/reverse
-    # multipliers, keyed the same way as the base lookup above so block rows
-    # can be derived as base × factor. This is the factor lookup that used to
-    # live in a now-deleted standalone converter; the pairing and the
-    # per-calendar-month post-study seasonalization are unchanged from that
-    # deleted code, only the destination (rows on this table, not a separate
-    # JSON document) is new.
-    # ------------------------------------------------------------------
+    # multipliers, keyed like the base lookup above so block rows derive as
+    # base × factor.
     patamar = case.patamar
     factors_df: pd.DataFrame | None = patamar.intercambio_patamares
 
@@ -1236,14 +1194,7 @@ def convert_line_bounds(
 
     for pair, line_id in sorted(pair_to_line_id.items(), key=lambda x: x[1]):
         src, tgt = pair
-        freeze_caps = date_lookup.get(
-            (
-                src,
-                tgt,
-                ls_y,
-                ls_m,
-            )
-        ) or last_year_lookup.get(
+        freeze_caps = date_lookup.get((src, tgt, ls_y, ls_m)) or last_year_lookup.get(
             (src, tgt, ls_m), {"direct_mw": 0.0, "reverse_mw": 0.0}
         )
         y, m = start_year, start_month
@@ -1399,7 +1350,12 @@ def convert_non_controllable_sources(
     df_ncs: pd.DataFrame | None = sistema.geracao_usinas_nao_simuladas
 
     if df_ncs is None or df_ncs.empty:
-        return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": []}
+        return {
+            "$schema": cobre_schemas.schema_url_for(
+                "system/non_controllable_sources.json"
+            ),
+            "non_controllable_sources": [],
+        }
 
     horizon = case.horizon
     start_month = horizon.start_month
@@ -1468,7 +1424,10 @@ def convert_non_controllable_sources(
         )
         ncs_id += 1
 
-    return {"$schema": _NCS_SCHEMA_URL, "non_controllable_sources": ncs_list}
+    return {
+        "$schema": cobre_schemas.schema_url_for("system/non_controllable_sources.json"),
+        "non_controllable_sources": ncs_list,
+    }
 
 
 def convert_ncs_factors(
@@ -1498,7 +1457,9 @@ def convert_ncs_factors(
 
     if df is None or df.empty:
         return {
-            "$schema": _NCS_FACTORS_SCHEMA_URL,
+            "$schema": cobre_schemas.schema_url_for(
+                "scenarios/non_controllable_factors.json"
+            ),
             "non_controllable_factors": [],
         }
 
@@ -1520,7 +1481,9 @@ def convert_ncs_factors(
 
     if df.empty:
         return {
-            "$schema": _NCS_FACTORS_SCHEMA_URL,
+            "$schema": cobre_schemas.schema_url_for(
+                "scenarios/non_controllable_factors.json"
+            ),
             "non_controllable_factors": [],
         }
 
@@ -1602,7 +1565,9 @@ def convert_ncs_factors(
                 y += 1
 
     return {
-        "$schema": _NCS_FACTORS_SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for(
+            "scenarios/non_controllable_factors.json"
+        ),
         "non_controllable_factors": results,
     }
 

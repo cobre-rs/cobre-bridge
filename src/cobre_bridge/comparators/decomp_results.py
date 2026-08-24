@@ -44,7 +44,6 @@ silence.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections.abc import Sequence
@@ -52,11 +51,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import pandas as pd
 import polars as pl
 
 from cobre_bridge.cobre_io import case_dir_for
-from cobre_bridge.comparators import cobre_readers
+from cobre_bridge.comparators import cobre_readers, fpha
 from cobre_bridge.comparators.decomp_readers import (
     read_dec_desvfpha,
     read_dec_estatfpha,
@@ -73,15 +71,14 @@ from cobre_bridge.comparators.decomp_readers import (
     read_relato_convergence,
     read_relato_costs,
     read_relato_membership,
-    reconcile_kdollars_to_reais,
 )
 from cobre_bridge.comparators.results import PercentileData, ResultComparison
 from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.constraint_registers import (
-        ConstraintCensus,
         ConstraintRecord,
         ConstraintTerm,
     )
@@ -90,12 +87,12 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger(__name__)
 
 #: Minimum turbined flow (m³/s) for the derived gen/turbined productivity
-#: (ticket-016) to be meaningful -- mirrors
+#: to be meaningful -- mirrors
 #: :data:`cobre_bridge.comparators.results._PRODUCTIVITY_TURB_EPS`: near-zero
 #: turbining makes generation/turbined an undefined 0/0 on both sides.
 _PRODUCTIVITY_TURBINED_EPS: float = 1.0e-6
 
-#: ticket-018: cobre's ``stored_energy_final_mwh`` is MWh; the source model's
+#: cobre's ``stored_energy_final_mwh`` is MWh; the source model's
 #: own REE ``earm_final_MWmes`` is MWmês (average MW sustained over a month).
 #: 730 h/month is the same implicit hours-per-month convention
 #: `report_builder`'s Energy Balance chart already applies to the SIN-total
@@ -133,14 +130,11 @@ _BUS_VARIABLES: tuple[_Variable, ...] = (
     _Variable("bus", "spot_price", "cmo", "spot_price", "$/MWh"),
 )
 
-#: Map each (level, ``_Variable.name``) pair to the canonical variable name
-#: the shared render/chart layer expects (``analyze.build_results_dataset``
-#: and everything downstream of it key charts off this name, not the
-#: decomp-local ``_Variable.name``). Storage is the one name that does not
-#: match its ``_Variable``/cobre-column spelling: the comparison is on
-#: *useful* volume (see the module docstring), but the canonical chart
-#: variable is still ``storage_final_hm3`` — the same name the newave-side
-#: comparator uses for its (absolute-volume) storage rows.
+#: (level, ``_Variable.name``) -> the canonical variable name the shared
+#: chart layer keys off (``analyze.build_results_dataset`` downstream), not
+#: the decomp-local ``_Variable.name``. Storage maps to ``storage_final_hm3``
+#: to match the newave-side comparator, though the comparison is on *useful*
+#: volume — do not "fix" the value to the ``_Variable``/column spelling.
 _CANONICAL_VARIABLE: dict[tuple[str, str], str] = {
     ("hydro", "generation"): "generation_mw",
     ("hydro", "turbined"): "turbined_m3s",
@@ -172,6 +166,26 @@ def _stage_rows(frame: pl.DataFrame) -> pl.DataFrame:
     return frame
 
 
+def _weighted_group_mean(
+    frame: pl.DataFrame,
+    group: list[str],
+    columns: list[str],
+    *,
+    weight_col: str = "probabilidade",
+) -> pl.DataFrame:
+    """Per-group weighted mean with a zero-weight fallback -- never divide by ~0."""
+    weight = pl.col(weight_col)
+    weight_sum = weight.sum()
+    aggs = [
+        pl.when(weight_sum.abs() > 1e-12)
+        .then((pl.col(c) * weight).sum() / weight_sum)
+        .otherwise(pl.col(c).mean())
+        .alias(c)
+        for c in columns
+    ]
+    return frame.group_by(group).agg(aggs).sort(group)
+
+
 def _scenario_mean(
     frame: pl.DataFrame,
     key: str,
@@ -186,7 +200,7 @@ def _scenario_mean(
     entity per stage: ``None`` for tables that are already one row per stage,
     a single column name for a single-code entity, or a list of column names
     for a composite key -- e.g. an interchange corridor's
-    ``(codigo_submercado_de, codigo_submercado_para)`` pair (ticket-007).
+    ``(codigo_submercado_de, codigo_submercado_para)`` pair.
 
     ``probabilities`` -- a :func:`_scenario_probabilities`-shaped
     ``(estagio, cenario, probabilidade)`` lookup -- turns the fold into a
@@ -236,16 +250,7 @@ def _scenario_mean(
         )
         .with_columns(pl.col("probabilidade").fill_null(1.0))
     )
-    weight = pl.col("probabilidade")
-    weight_sum = weight.sum()
-    aggs = [
-        pl.when(weight_sum.abs() > 1e-12)
-        .then((pl.col(c) * weight).sum() / weight_sum)
-        .otherwise(pl.col(c).mean())
-        .alias(c)
-        for c in present
-    ]
-    return joined.group_by(group).agg(aggs).sort(group)
+    return _weighted_group_mean(joined, group, present)
 
 
 #: Canonical schema :func:`_scenario_probabilities` returns -- the
@@ -256,6 +261,19 @@ _SCENARIO_PROBABILITY_SCHEMA: dict[str, type[pl.DataType]] = {
     "cenario": pl.Int64,
     "probabilidade": pl.Float64,
 }
+
+
+def _union_relato_reports(raw: pl.DataFrame, monthly: pl.DataFrame) -> pl.DataFrame:
+    """Union ``relato``/``relato2`` -- relato2 wins for stages it covers."""
+    if monthly.is_empty():
+        return raw
+    if raw.is_empty():
+        return monthly
+    fan_stages = monthly["estagio"].unique().to_list()
+    return pl.concat(
+        [raw.filter(~pl.col("estagio").is_in(fan_stages)), monthly],
+        how="diagonal_relaxed",
+    )
 
 
 def _scenario_probabilities(decomp_dir: Path) -> pl.DataFrame:
@@ -297,18 +315,7 @@ def _scenario_probabilities(decomp_dir: Path) -> pl.DataFrame:
 
     if raw.is_empty() and monthly.is_empty():
         return pl.DataFrame(schema=_SCENARIO_PROBABILITY_SCHEMA)
-    if raw.is_empty():
-        combined = monthly
-    elif monthly.is_empty():
-        combined = raw
-    else:
-        # relato2 is authoritative for any stage it covers -- drop those
-        # stages from relato first, exactly like _cost_frames's own union.
-        fan_stages = monthly["estagio"].unique().to_list()
-        combined = pl.concat(
-            [raw.filter(~pl.col("estagio").is_in(fan_stages)), monthly],
-            how="diagonal_relaxed",
-        )
+    combined = _union_relato_reports(raw, monthly)
 
     return (
         combined.select("estagio", "cenario", "probabilidade")
@@ -394,9 +401,9 @@ def _hydro_productivity_results(
 ) -> list[ResultComparison]:
     """Derive per-(plant, stage) realized productivity = generation / turbined.
 
-    ticket-016: consumes the ``generation_mw``/``turbined_m3s`` hydro
+    Consumes the ``generation_mw``/``turbined_m3s`` hydro
     ``ResultComparison`` rows :func:`_result_comparisons` already produced
-    (E1: the source values come from ``dec_oper_usih``'s stage-aggregate
+    (the source values come from ``dec_oper_usih``'s stage-aggregate
     rows, the Cobre values from the cobre hydro means, joined on the
     id-map-resolved ``(entity_id, stage_id)`` pair) -- so this reuses that
     exact alignment/restriction instead of a separate lookup or filter.
@@ -465,6 +472,25 @@ def _hydro_productivity_results(
     return productivity
 
 
+def reconcile_kdollars_to_reais(value: float) -> float:
+    """Convert a native k$ cost value to R$ (×10³).
+
+    Every cost the source model reports — `read_relato_costs`,
+    `read_relato_expected_cost`, `read_dec_oper_gnl`'s ``custo_geracao`` — is
+    in k$ (thousands of BRL), while cobre reports costs in R$. Silently
+    mixing the two is the same unit trap documented in
+    `project_decomp_fcf_unit_conversion_bug`: cobre's boundary FCF coefficients
+    were consumed verbatim in k$ against a R$-denominated model, undervaluing
+    water by three orders of magnitude. This helper is the single conversion
+    site — readers stay in native k$, and callers convert once, explicitly.
+
+    Downstream, two different R$ conventions apply: the Overview cost dict
+    uses plain R$ (this factor, ×10³), while `nw_sin` uses
+    10⁶ R$ (an additional ÷10⁶ on top of this factor).
+    """
+    return value * 1e3
+
+
 #: Canonical convergence-chart schema -- matches
 #: :func:`cobre_readers.read_cobre_convergence`'s own return schema exactly,
 #: so :func:`~cobre_bridge.comparators.charts.convergence_chart` can read
@@ -479,7 +505,7 @@ _CONVERGENCE_SCHEMA: dict[str, type[pl.DataType]] = {
 def _decomp_convergence_frame(decomp_dir: Path) -> pl.DataFrame:
     """DECOMP-side convergence bounds in the canonical chart schema.
 
-    ticket-012: renames ``relato.convergencia``'s ``iteracao``/``zinf``/
+    Renames ``relato.convergencia``'s ``iteracao``/``zinf``/
     ``zsup`` onto the ``iteration``/``lower_bound``/``upper_bound_mean``
     columns :func:`cobre_readers.read_cobre_convergence` emits -- the shape
     :func:`~cobre_bridge.comparators.charts.convergence_chart` reads on each
@@ -574,62 +600,47 @@ def _bus_side(
     return _map_entities(aggregated, "codigo_submercado", id_map_bus)
 
 
-# --- ticket-007: interchange corridor -> cobre line alignment ---
+# --- interchange corridor -> cobre line alignment ---
 #
 # DECOMP publishes exchange per submarket-pair corridor (``dec_oper_interc``);
-# the converted Cobre case publishes exchange per directed line
-# (``system/lines.json``, read into simulation results by
-# ``cobre_readers.read_cobre_line_means`` as ``entity_id``/``stage_id``/
-# ``net_flow_mw``). The two topologies usually coincide (one deck-declared
-# exchange pair -> one cobre line), but the converter-created transhipment
-# bus (``DecompIdMap.transhipment_bus_id``) can realize a corridor as a pair
-# of legs instead of a single line -- see epic-03's "Modeling nuance"
-# section. This block reconciles the two; ticket-008 turns the result into
-# ``ResultComparison`` line rows and the Network tab metadata.
+# the converted case publishes it per directed cobre line
+# (``system/lines.json``, read as ``net_flow_mw`` by
+# ``cobre_readers.read_cobre_line_means``). Usually one corridor -> one line,
+# but the converter-created transhipment bus
+# (``DecompIdMap.transhipment_bus_id``) can realize a corridor as a pair of
+# legs; this block reconciles the two.
 #
-# Facts confirmed against the live code (not assumed from the ticket prose):
-# - ``system/lines.json`` line entries key their endpoints
-#   ``source_bus_id``/``target_bus_id`` (``decomp/network.py::convert_lines``,
-#   ``converters/network.py::convert_lines``) -- not ``from_bus``/``to_bus``.
-# - A cobre line's ``net_flow_mw`` is positive in its own
-#   ``source_bus_id -> target_bus_id`` direction: ``comparators/alignment.py``'s
-#   ``LineEntity`` docstring states it explicitly ("Cobre models each
-#   normalized pair as a single line where positive flow goes from
-#   source_bus to target_bus"), and ``dashboard/tabs/network.py``'s bus
-#   balance credits the *target* bus and debits the *source* bus with the
-#   same ``net_flow_mw`` value, which only holds under that convention.
-# - ``dec_oper_interc``'s real columns (``idecomp`` 1.14,
-#   ``idecomp.decomp.dec_oper_interc.DecOperInterc.tabela``) are
+# Out-of-file column/direction contracts this alignment depends on:
+# - ``system/lines.json`` keys endpoints ``source_bus_id``/``target_bus_id``,
+#   not ``from_bus``/``to_bus`` (``convert_lines`` on both tracks).
+# - ``net_flow_mw`` is positive in the line's own ``source_bus_id ->
+#   target_bus_id`` direction (``comparators/alignment.py``'s ``LineEntity``).
+# - ``dec_oper_interc`` (``idecomp`` 1.14) names its corridor endpoints
 #   ``codigo_submercado_de``/``codigo_submercado_para`` (not
-#   ``submercado_de``/``submercado_para``), plus ``intercambio_origem_MW``,
-#   ``intercambio_destino_MW``, and ``perdas_MW``.
+#   ``submercado_de``/``submercado_para``), plus ``intercambio_origem_MW``/
+#   ``intercambio_destino_MW``/``perdas_MW``.
 
 
 def _read_cobre_lines_index(cobre_output_dir: Path) -> dict[tuple[int, int], int]:
     """``{(source_bus_id, target_bus_id): line_id}`` from ``system/lines.json``.
 
     A missing ``system/lines.json`` -- e.g. a case predating the ``IA``
-    exchange-network converter (``decomp/network.py::convert_lines_placeholder``)
+    exchange-network converter (``decomp/network.py::convert_lines``)
     -- yields an empty index rather than raising: :func:`_corridor_line_alignment`
     then resolves nothing, and :func:`_interc_side` reports every corridor as
     unresolved instead of failing the comparison (the Network tab degrades to
-    empty).
+    empty). Built from :func:`cobre_readers.read_cobre_lines`'s raw ``"lines"``
+    list -- this function owns only the bus-pair index transform.
 
-    [ASSUMPTION] (epic-03 Pending Decision, star topology): more than one
+    [ASSUMPTION] (star topology): more than one
     line declared between the *same ordered* bus pair makes that leg
     ambiguous -- both are dropped from the index so any corridor that would
     resolve through it is reported unresolved rather than guessing which
     line applies.
     """
-    lines_path = case_dir_for(cobre_output_dir) / "system" / "lines.json"
-    if not lines_path.exists():
-        return {}
-    with lines_path.open() as f:
-        data = json.load(f)
-
     index: dict[tuple[int, int], int] = {}
     ambiguous: set[tuple[int, int]] = set()
-    for line in data.get("lines", []):
+    for line in cobre_readers.read_cobre_lines(cobre_output_dir):
         key = (int(line["source_bus_id"]), int(line["target_bus_id"]))
         if key in index:
             ambiguous.add(key)
@@ -687,7 +698,7 @@ def _corridor_line_alignment(
     mapping" into a reported, never-silently-dropped unresolved corridor,
     scoped to the corridors ``dec_oper_interc`` actually carries.
 
-    [ASSUMPTION] (record per epic-03 Pending Decision): the two-leg
+    [ASSUMPTION]: the two-leg
     reconciliation assumes the converted case's exchange topology is a star
     through the transhipment bus, with at most one ``de<->IV<->para`` path
     per corridor -- guaranteed structurally here since ``DecompIdMap`` has
@@ -696,12 +707,12 @@ def _corridor_line_alignment(
     line. Alternatives considered: (a) direct submarket-pair match only --
     fails on the star topology, rejected; (b) transhipment-aware two-leg
     reconciliation -- chosen; (c) compare at the bus-injection level instead
-    of per line -- defers to a future ticket, out of scope. A deck whose
+    of per line -- out of scope, not implemented here. A deck whose
     exchange graph is genuinely non-star (e.g. two different corridors that
     would need to share one leg) is not guessed at by this function -- each
     corridor is resolved independently, so a shared leg is assigned the same
     value by both corridors rather than an aggregate; that residual gap is a
-    known limitation of the star assumption, not something this ticket
+    known limitation of the star assumption, not something this function
     reconciles further.
     """
     lines_index = _read_cobre_lines_index(cobre_output_dir)
@@ -802,15 +813,11 @@ def _interc_side(
         de_raw = row["codigo_submercado_de"]
         para_raw = row["codigo_submercado_para"]
         if de_raw is None or para_raw is None:
-            # The deck's own ``dec_oper_interc`` reports some corridors --
-            # the Itaipu 50 Hz "IV" node, in particular -- by
-            # ``nome_submercado_*`` only: "IV" carries no ``SB``-declared
-            # numeric code, so ``codigo_submercado_de``/``_para`` comes back
-            # null on that side. Such a corridor can never resolve through
-            # ``_corridor_line_alignment`` regardless of how it is looked up
-            # -- the transhipment bus is never an outer-loop endpoint there
-            # (D-UNITS) -- so report it with the ``-1`` "no SB code" sentinel
-            # instead of crashing on the ``int()`` cast below.
+            # The Itaipu 60 Hz "IV" node -- the transshipment corridor into
+            # Ivaiporã -- reports its corridor by ``nome_submercado_*`` only,
+            # no ``SB``-declared numeric code, so ``codigo_submercado_de``/
+            # ``_para`` comes back null. Report it with the ``-1`` "no SB
+            # code" sentinel rather than crashing on the ``int()`` cast below.
             unresolved.add(
                 (
                     int(de_raw) if de_raw is not None else -1,
@@ -855,9 +862,9 @@ def _interc_side(
     return result, sorted(unresolved)
 
 
-# --- ticket-008: line ResultComparison rows + Network tab metadata ---
+# --- line ResultComparison rows + Network tab metadata ---
 #
-# Wires ticket-007's corridor alignment into ``build_decomp_dataset``: line
+# Wires the corridor alignment into ``build_decomp_dataset``: line
 # ``ResultComparison`` rows (mirroring ``results._compare_lines``'s emitted
 # shape) plus the three ``PercentileData`` fields the shared Network tab
 # (``report_builder``, ``charts.line_summary_chart``) consumes.
@@ -887,31 +894,6 @@ def _line_entity_names(line_meta: list[dict], id_map: DecompIdMap) -> dict[int, 
     return names
 
 
-def _build_line_id_map(decomp_dir: Path) -> DecompIdMap | None:
-    """Best-effort id map for the corridor -> line alignment.
-
-    Mirrors :func:`_read_aligned_frames`'s own id-map construction (deck
-    discovery -> ``Dadger.read`` -> :meth:`DecompIdMap.from_dadger`), but
-    degrades to ``None`` on a missing/invalid deck instead of failing the
-    whole dataset build: the Network tab is one optional section among many
-    (ticket-008's Error Handling), and every fixture that exercises
-    ``build_decomp_dataset`` against a bare directory (every other level's
-    own tests) must keep working unchanged.
-    """
-    from idecomp.decomp import Dadger
-
-    from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import discover_decomp_files
-
-    try:
-        files = discover_decomp_files(decomp_dir)
-        dadger = Dadger.read(str(files.dadger))
-        return DecompIdMap.from_dadger(dadger)
-    except (FileNotFoundError, ValueError) as exc:
-        _LOG.info("No deck available for line alignment: %s", exc)
-        return None
-
-
 def _line_result_comparisons(
     decomp_dir: Path,
     cobre_output_dir: Path,
@@ -920,11 +902,11 @@ def _line_result_comparisons(
     *,
     probabilities: pl.DataFrame | None = None,
 ) -> tuple[list[ResultComparison], list[list[int]]]:
-    """Join ticket-007's aligned DECOMP line flow onto Cobre's per-line means.
+    """Join the aligned DECOMP line flow onto Cobre's per-line means.
 
     Mirrors :func:`_result_comparisons`'s join shape, but keyed by cobre line
     id rather than a source-model entity code: a single cobre line can be the
-    shared leg of more than one corridor under the star topology (epic-03's
+    shared leg of more than one corridor under the star topology (the
     two-leg transhipment path), so ``newave_code`` -- unlike every other
     level's rows -- carries no single canonical source-model code; it stays
     at the constant ``0`` placeholder, mirroring the SIN row's own
@@ -983,44 +965,39 @@ def _line_result_comparisons(
     return results, unresolved_lists
 
 
-def _line_bounds_and_meta(cobre_output_dir: Path) -> tuple[pd.DataFrame, list[dict]]:
+def _line_bounds_and_meta(cobre_output_dir: Path) -> tuple[pl.DataFrame, list[dict]]:
     """Cobre-side line capacity bounds + metadata for the Network tab.
 
     Both are pure Cobre-case artifacts, not DECOMP-derived, so this reads
     them exactly the way ``results.compare_results`` does for the source
-    model's own Network tab:
+    model's own Network tab, via the shared ``cobre_readers`` readers:
 
-    - ``line_bounds``: ``constraints/line_bounds.parquet`` verbatim, via
-      pandas (``charts.line_summary_chart`` indexes it with ``.iterrows()``
-      / ``row["..."]``, so it must stay pandas, never polars -- handing it a
-      polars frame makes the bounds overlay silently disappear). This is
-      already per-stage: ``decomp/network.py::convert_lines`` writes one base
-      row (``block_id`` null) per ``(line, stage)`` carrying the resolved
-      max-of-blocks ``IA`` capacity for that stage, so a case whose capacity
-      genuinely never changes across stages naturally produces identical
-      per-stage rows here -- no separate static-capacity broadcast needs
-      implementing on top.
-    - ``line_meta``: ``system/lines.json``'s ``"lines"`` list verbatim --
-      each entry's own nested ``capacity.direct_mw``/``capacity.reverse_mw``
-      is exactly the shape ``line_summary_chart`` reads.
+    - ``line_bounds``: :func:`cobre_readers.read_cobre_line_bounds` verbatim.
+      This is already per-stage: ``decomp/network.py::convert_lines`` writes
+      one base row (``block_id`` null) per ``(line, stage)`` carrying the
+      resolved max-of-blocks ``IA`` capacity for that stage, so a case whose
+      capacity genuinely never changes across stages naturally produces
+      identical per-stage rows here -- no separate static-capacity broadcast
+      needs implementing on top.
+    - ``line_meta``: :func:`cobre_readers.read_cobre_lines`'s ``"lines"``
+      list verbatim -- each entry's own nested ``capacity.direct_mw``/
+      ``capacity.reverse_mw`` is exactly the shape ``line_summary_chart``
+      reads.
 
-    A missing file degrades to an empty frame / empty list rather than
-    raising -- the Network tab is optional (ticket-008's Error Handling).
+    The Network tab is optional: a missing ``line_bounds.parquet`` degrades
+    to an empty frame via the reader's own typed-empty contract; a missing
+    or unparseable ``lines.json`` degrades to an empty ``line_meta`` (with a
+    warning) rather than raising, unchanged from before this module routed
+    through the shared readers.
     """
-    case_dir = case_dir_for(cobre_output_dir)
+    line_bounds = cobre_readers.read_cobre_line_bounds(cobre_output_dir)
 
-    bounds_path = case_dir / "constraints" / "line_bounds.parquet"
-    line_bounds = (
-        pd.read_parquet(bounds_path) if bounds_path.exists() else pd.DataFrame()
-    )
+    try:
+        line_meta = cobre_readers.read_cobre_lines(cobre_output_dir)
+    except cobre_readers.CobreReadError as exc:
+        _LOG.warning("Failed to read lines.json for network tab: %s", exc)
+        line_meta = []
 
-    lines_path = case_dir / "system" / "lines.json"
-    line_meta: list[dict] = []
-    if lines_path.exists():
-        try:
-            line_meta = json.loads(lines_path.read_text()).get("lines", [])
-        except (OSError, json.JSONDecodeError) as exc:
-            _LOG.warning("Failed to read %s: %s", lines_path, exc)
     return line_bounds, line_meta
 
 
@@ -1065,7 +1042,7 @@ def _energy_balance_frames(
 
     Returns ``(nw_market, nw_net_load, nw_sin)`` — the long
     ``newave_code``/``stage``/``variable``/``value`` frames
-    :func:`~cobre_bridge.comparators.charts.build_energy_balance_tab` and
+    :func:`~cobre_bridge.comparators.report_builder.build_energy_balance_tab` and
     :func:`~cobre_bridge.comparators.charts.cobre_aggregate_chart` read.
     *probabilities* is forwarded to the single :func:`_scenario_mean` fold
     below (see :func:`_hydro_side` for its scenario-weighting contract).
@@ -1081,7 +1058,7 @@ def _energy_balance_frames(
     graceful-degradation path for a variable absent on one side.
 
     ``newave_code`` here is the **Cobre bus id**, not the raw DECOMP
-    ``codigo_submercado`` — ``nw_bus_names`` (ticket-002,
+    ``codigo_submercado`` — ``nw_bus_names`` (built by
     ``build_decomp_dataset``) is populated from ``read_cobre_bus_metadata``
     and is therefore keyed by Cobre bus id, and ``build_energy_balance_tab``
     joins ``nw_market``/``nw_net_load`` against it by that same key.
@@ -1169,17 +1146,12 @@ def _energy_balance_frames(
     else:
         nw_net_load = _empty_market_frame()
 
-    # --- nw_sin: EARMF / ENA summed across every submarket the deck
-    # declares. The converter-created transhipment bus never appears among
-    # ``codigo_submercado`` values (D-UNITS) — it has no source-model code of
-    # its own, it is referenced only by name in ``IA`` records — so summing
-    # every row this reader returns already excludes it; no extra filter
-    # needed (mirrors the guarantee ``TestBusSideExcludesTranshipment``
-    # pins down for the tidy-comparison bus rows). ``newave_code`` is the
-    # constant SIN placeholder ``0``, matching ``read_medias_sin``'s
-    # newave-side convention. Built as a plain per-stage sum — additive by
-    # construction — so a later epic can ``pl.concat`` its own cost-series
-    # rows onto this frame instead of overwriting it.
+    # nw_sin: EARMF / ENA summed across every submarket the deck declares. The
+    # transhipment bus never appears among ``codigo_submercado`` values
+    # (D-UNITS) — referenced only by name in ``IA`` records — so the sum
+    # already excludes it, no filter needed (``TestBusSideExcludesTranshipment``
+    # pins this down). ``newave_code`` is the SIN placeholder ``0``, matching
+    # ``read_medias_sin``'s newave-side convention.
     system_energy = {"earm_final_MWmes", "ena_MWmes"}
     if system_energy <= present:
         sin_agg = aggregated.group_by("estagio").agg(
@@ -1204,19 +1176,14 @@ def _energy_balance_frames(
     return nw_market, nw_net_load, nw_sin
 
 
-# --- ticket-010: Overview cost metadata (nw_costs / nw_sin cost rows) ---
+# --- Overview cost metadata (nw_costs / nw_sin cost rows) ---
 #
-# Fills the Overview tab's cost sections: the NPV breakdown dict consumed by
-# ``charts.overview_metrics``/``cost_breakdown_chart``/``_table`` (keyed by
-# ``charts._COST_MAP``'s the source model label strings) and the per-stage
-# ``nw_sin`` rows consumed by ``charts._extract_stage_cost_series``
-# (``COPER``/``CUSTO_FUTURO``/``CTERM``). This is the single place the
-# native k$ -> R$ reconciliation happens for both target unit conventions
-# (see epic-04's "TOP RISK" table): the dict is R$ (``reconcile_kdollars_to_
-# reais``, x1e3); ``nw_sin`` is 10^6 R$ (an additional /1e6 on top of that
-# factor).
+# The single place the native k$ -> R$ reconciliation happens, for both target
+# unit conventions: the NPV breakdown dict is R$
+# (``reconcile_kdollars_to_reais``, x1e3); the per-stage ``nw_sin`` cost rows
+# are 10^6 R$ (an additional /1e6 on top of that factor).
 
-#: ``relatorio_operacao_custos`` numeric cost columns this ticket aggregates
+#: ``relatorio_operacao_custos`` numeric cost columns aggregated here
 #: -- every cost column the table carries except the per-submarket
 #: ``cmo_<sbm>`` marginal-*price* columns (not a cost) and the
 #: estagio/cenario/probabilidade bookkeeping columns.
@@ -1295,16 +1262,7 @@ def _probability_weighted_stage_cost(
             .agg([pl.col(c).mean().alias(c) for c in present])
             .sort("estagio")
         )
-    weight = pl.col("probabilidade")
-    weight_sum = weight.sum()
-    aggs = [
-        pl.when(weight_sum.abs() > 1e-12)
-        .then((pl.col(c) * weight).sum() / weight_sum)
-        .otherwise(pl.col(c).mean())
-        .alias(c)
-        for c in present
-    ]
-    return frame.group_by("estagio").agg(aggs).sort("estagio")
+    return _weighted_group_mean(frame, ["estagio"], present)
 
 
 def _cost_frames(decomp_dir: Path) -> tuple[dict[str, float], pl.DataFrame]:
@@ -1346,16 +1304,7 @@ def _cost_frames(decomp_dir: Path) -> tuple[dict[str, float], pl.DataFrame]:
     """
     raw = read_relato_costs(decomp_dir)
     monthly = read_relato2_costs(decomp_dir)
-    if monthly.is_empty():
-        combined = raw
-    else:
-        # relato2 is authoritative for any stage it covers -- drop those stages
-        # from relato first so a fan stage is never double-counted on union.
-        fan_stages = monthly["estagio"].unique().to_list()
-        combined = pl.concat(
-            [raw.filter(~pl.col("estagio").is_in(fan_stages)), monthly],
-            how="diagonal_relaxed",
-        )
+    combined = _union_relato_reports(raw, monthly)
     per_stage = _probability_weighted_stage_cost(combined, list(_RELATO_COST_COLUMNS))
     present = [c for c in _RELATO_COST_COLUMNS if c in per_stage.columns]
 
@@ -1406,13 +1355,12 @@ def _cost_frames(decomp_dir: Path) -> tuple[dict[str, float], pl.DataFrame]:
 def _union_cost_rows(nw_sin: pl.DataFrame, cost_rows: pl.DataFrame) -> pl.DataFrame:
     """Union :func:`_cost_frames`'s cost rows onto the existing ``nw_sin``.
 
-    ``nw_sin`` (from :func:`_energy_balance_frames`, ticket-006) already
+    ``nw_sin`` (from :func:`_energy_balance_frames`) already
     carries the EARM/ENA rows -- this must add the cost rows alongside them,
     never overwrite. A columnless frame on either side (the
     ``_AlignedDecompFrames``/``PercentileData`` dataclass default
-    ``pl.DataFrame()``, which every fixture that predates ticket-006/010
-    still carries) cannot be vertically concatenated against a typed frame,
-    so it is treated as "nothing to union" instead of raising a
+    ``pl.DataFrame()``) cannot be vertically concatenated against a typed
+    frame, so it is treated as "nothing to union" instead of raising a
     schema-mismatch error.
     """
     if not nw_sin.columns:
@@ -1422,31 +1370,19 @@ def _union_cost_rows(nw_sin: pl.DataFrame, cost_rows: pl.DataFrame) -> pl.DataFr
     return pl.concat([nw_sin, cost_rows], how="vertical", rechunk=True)
 
 
-# --- ticket-013: Performance tab timing metadata ---
+# --- Performance tab timing metadata ---
 #
-# Fills the Performance tab's DECOMP-side wall-clock metadata (Caveat #2):
-# DECOMP is nested Benders over an explicit tree, not sampled SDDP -- it has
-# no forward/backward pass structure, so ``nw_tim_iterations`` never carries
-# ``forward_seconds``/``backward_seconds``. ``performance_fwd_bwd_split_chart``
-# renders cobre-only whenever those columns are absent (charts.py's own
-# ``has_nw`` guard checks for them, not just frame emptiness).
+# DECOMP is nested Benders over an explicit tree, not sampled SDDP -- no
+# forward/backward pass structure, so ``nw_tim_iterations`` never carries
+# ``forward_seconds``/``backward_seconds`` and
+# ``performance_fwd_bwd_split_chart`` renders cobre-only (its ``has_nw`` guard
+# checks for those columns, not just frame emptiness).
 
 #: ``decomp.tim``'s ``Etapa`` phase name -> the two keys
-#: ``charts.performance_metric_cards`` reads (``"Tempo Total"`` /
-#: ``"Calculo da Politica"``), so the shared card renderer needs no
-#: source-specific branch. Confirmed against the real reduced deck
-#: (``example/decomp-mar-26-rv2-reduced/decomp.tim``, read from the case
-#: root): DECOMP emits
-#: exactly four phases -- ``"Leitura de Dados"``, ``"Convergencia"``,
-#: ``"Impressao"``, ``"Tempo Total"``. ``"Convergencia"`` is DECOMP's nested
-#: Benders backward/forward loop -- the DECOMP analog of "Calculo da
-#: Politica" (policy training) on the source model's own ``newave.tim``.
-#: A deck whose ``decomp.tim`` doesn't carry one of these two ``Etapa`` rows
-#: -- an incomplete/truncated run -- gets ``0.0`` for that key, explicitly,
-#: from :func:`_decomp_tim_stages` itself (never KeyError, never omitted):
-#: the two keys are guaranteed present whenever ``decomp.tim`` was read at
-#: all, so the metric cards' own ``.get(key, 0.0)`` fallback is defense in
-#: depth, not the sole guarantee.
+#: ``charts.performance_metric_cards`` reads, so the shared card renderer needs
+#: no source-specific branch. ``"Convergencia"`` is DECOMP's nested-Benders
+#: loop -- its analog of ``newave.tim``'s ``"Calculo da Politica"`` (policy
+#: training).
 _DECOMP_TIM_PHASE_MAP: dict[str, str] = {
     "Tempo Total": "Tempo Total",
     "Convergencia": "Calculo da Politica",
@@ -1609,9 +1545,9 @@ class _AlignedDecompFrames:
     """One run's DECOMP-side + Cobre-side frames, aligned to Cobre ids/stages.
 
     The shared read/align result :func:`build_decomp_dataset` builds on, via
-    :func:`_read_aligned_frames` — deck discovery, id-map construction,
-    per-level scenario averaging, and the matching Cobre means run exactly
-    once.
+    :func:`_read_aligned_frames` — per-level scenario averaging and the
+    matching Cobre means, off the shared :class:`~cobre_bridge.decomp.case.DecompCase`
+    parse, run exactly once.
     """
 
     source_hydro: pl.DataFrame
@@ -1624,43 +1560,37 @@ class _AlignedDecompFrames:
     thermal_names: dict[int, str]
     bus_names: dict[int, str]
     unmapped: dict[str, list[int]]
-    # --- ticket-006: Energy Balance tab reference frames ---
+    # --- Energy Balance tab reference frames ---
     # Long newave_code/stage/variable/value frames built by
-    # :func:`_energy_balance_frames`; defaulted so existing fixtures that
-    # construct this dataclass without them (built before this ticket) keep
-    # working unchanged.
+    # :func:`_energy_balance_frames`; defaulted so fixtures that construct
+    # this dataclass without them keep working unchanged.
     nw_market: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_net_load: pl.DataFrame = field(default_factory=pl.DataFrame)
     nw_sin: pl.DataFrame = field(default_factory=pl.DataFrame)
 
 
 def _read_aligned_frames(
-    decomp_dir: Path,
+    case: DecompCase,
     cobre_output_dir: Path,
     *,
     probabilities: pl.DataFrame | None = None,
 ) -> _AlignedDecompFrames:
     """Read and align both sides of one DECOMP-vs-Cobre comparison run.
 
-    ``decomp_dir`` is the deck directory (it must contain the ``dec_oper_*.csv``
-    result tables and the deck files needed to rebuild the id map, all directly
-    in that directory); ``cobre_output_dir`` is Cobre's output directory, whose
-    case directory supplies the entity registries. Entities the id map cannot
-    resolve are reported via ``unmapped`` rather than dropped in silence.
-    *probabilities* -- a :func:`_scenario_probabilities` lookup, built once
-    by :func:`build_decomp_dataset` -- is forwarded unchanged to every
-    per-level fold (:func:`_hydro_side`/:func:`_thermal_side`/
-    :func:`_bus_side`/:func:`_energy_balance_frames`); ``None`` keeps their
-    unweighted default.
+    *case* is the shared, once-parsed deck
+    (:class:`~cobre_bridge.decomp.case.DecompCase`, built once by
+    :func:`build_decomp_dataset`); its directory must also contain the
+    ``dec_oper_*.csv`` result tables read directly below.
+    ``cobre_output_dir`` is Cobre's output directory, whose case directory
+    supplies the entity registries. Entities the id map cannot resolve are
+    reported via ``unmapped`` rather than dropped in silence. *probabilities*
+    -- a :func:`_scenario_probabilities` lookup, built once by
+    :func:`build_decomp_dataset` -- is forwarded unchanged to every per-level
+    fold (:func:`_hydro_side`/:func:`_thermal_side`/:func:`_bus_side`/
+    :func:`_energy_balance_frames`); ``None`` keeps their unweighted default.
     """
-    from idecomp.decomp import Dadger
-
-    from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import discover_decomp_files
-
-    files = discover_decomp_files(decomp_dir)
-    dadger = Dadger.read(str(files.dadger))
-    id_map = DecompIdMap.from_dadger(dadger)
+    decomp_dir = case.files.dadger.parent
+    id_map = case.id_map
 
     hydro_codes = {code: id_map.hydro_id(code) for code in id_map.hydro_codes}
     thermal_codes = {code: id_map.thermal_id(code) for code in id_map.thermal_codes}
@@ -1713,7 +1643,7 @@ def _read_aligned_frames(
     )
 
 
-# --- ticket-014: Hydro Operation + Plant Details tab metadata ---
+# --- Hydro Operation + Plant Details tab metadata ---
 #
 # Fills the four remaining hydro ``PercentileData`` fields the shared Hydro
 # Operation tab (``hydro_per_bus_chart``/``hydro_aggregate_chart``/
@@ -1727,7 +1657,7 @@ def _merge_hydro_bus_ids(
     """Copy each hydro's metadata dict and inject its cobre bus ids.
 
     ``cobre_readers.read_cobre_hydro_metadata`` carries plant physics only
-    -- no bus information (decision B1, see that reader's docstring); the
+    -- no bus information (see that reader's docstring); the
     plant -> bus *label* is re-sourced from
     ``cobre_readers.read_cobre_hydro_bus_labels``'s
     ``hydro_bus_generation``-partition-derived map, exactly the way
@@ -1742,49 +1672,35 @@ def _merge_hydro_bus_ids(
     dict of new per-plant dicts; neither *meta* nor *labels* is mutated.
     """
     return {
-        hydro_id: {**entry, "bus_ids": labels.get(hydro_id, [])}
+        # Sorted list, not the reader's frozenset: bus_ids lands in the
+        # JSON-serialized metadata side-table, which rejects a frozenset.
+        hydro_id: {**entry, "bus_ids": sorted(labels.get(hydro_id, []))}
         for hydro_id, entry in meta.items()
     }
 
 
-# --- ticket-017: Productivity tab's "Fitted production functions (FPHA)"
+# --- Productivity tab's "Fitted production functions (FPHA)"
 # section (`fpha_metrics`/`fpha_surface`/`fpha_spill`) ---
 #
-# [ASSUMPTION] (epic-06 Pending Decision, Confidence Low): the newave-side
-# comparison (`analyze.build_fpha_comparison`) reconstructs BOTH solvers'
-# fitted production surfaces on a shared ``(V, Q)`` grid and renders a full
-# 3D overlay -- option (a) in the ticket. That needs the source side's
-# fitted PLANE coefficients (``gamma_0``/``gamma_v``/``gamma_q``/``gamma_s``
-# + a multiplier), evaluated at that shared grid. None of this ticket's
-# three declared readers carries them: `read_dec_estatfpha`'s table is a
-# single DECK-WIDE variavel/valor summary (no per-hydro/stage key at all);
-# `read_dec_desvfpha`'s table carries the REALIZED ``(V, Q, S)`` operating
-# points from the forward pass, not a fitted plane; `read_eco_fpha`'s table
-# gives only the fitting-grid *bounds*/node counts, no coefficients. The
-# plane coefficients themselves live in a fourth file (``avl_cortesfpha.rvN``
-# / idecomp's ``AvlCortesFpha``) that is explicitly NOT one of this ticket's
-# three declared readers. Option (a) is therefore genuinely infeasible on
-# the declared reader scope, so this ships the documented fallback (b):
-# `fpha_metrics` only -- `fpha_surface`/`fpha_spill` always stay `None`, and
-# the report's existing FPHA-section gate (a plain
-# ``if not fpha_metrics.is_empty()`` in `report_builder`, unmodified by this
-# ticket) already renders `fpha_detail_chart`'s "No production-function
-# (FPHA) data available" placeholder for an empty surface/spill pair, so no
-# exception follows from leaving them empty.
+# [ASSUMPTION] (Confidence Low): the full 3D FPHA overlay the newave side
+# renders (`analyze.build_fpha_comparison`, option (a)) needs the source side's
+# fitted PLANE coefficients on a shared ``(V, Q)`` grid. None of the three
+# declared readers carries them (`read_dec_estatfpha` is a deck-wide summary,
+# `read_dec_desvfpha` the realized ``(V, Q, S)`` operating points,
+# `read_eco_fpha` only the fitting-grid bounds/counts); the coefficients live
+# in a fourth file (``avl_cortesfpha.rvN`` / idecomp's ``AvlCortesFpha``) that
+# is not a declared reader. So (a) is infeasible and this ships fallback (b):
+# `fpha_metrics` only, `fpha_surface`/`fpha_spill` always `None` (never
+# fabricated; the ``if not fpha_metrics.is_empty()`` gate in `report_builder`
+# renders the empty-surface placeholder, so no exception follows).
 #
-# Within (b), rather than reporting the source model's own fph-vs-fpha
-# self-consistency in isolation (a number with no Cobre linkage at all),
-# `_fpha_metrics` evaluates Cobre's OWN fitted envelope
-# (`cobre_readers.read_cobre_fpha_planes`) AT the source model's realized
-# operating points (`read_dec_desvfpha`'s ``volume_total_hm3``/
-# ``vazao_turbinada_m3s``/``vazao_vertida_m3s``) and compares it to the
-# source model's own realized ``geracao_hidraulica_fpha`` (the value its LP
-# actually consumed at that point) -- a genuine, non-fabricated cross-solver
-# comparison, just sampled at the source model's own trajectory instead of a
-# shared dense grid (so it never claims the full-surface fidelity (a) would
-# have shown). ``n_planes_newave`` stays null throughout -- no declared
-# reader counts the source model's planes; ``n_planes_cobre``/``n_v`` are
-# real counts from `read_cobre_fpha_planes`/`read_eco_fpha`.
+# Within (b), `_fpha_metrics` evaluates Cobre's own fitted envelope
+# (`read_cobre_fpha_planes`) AT the source model's realized operating points
+# (`read_dec_desvfpha`) and compares it to the source's own realized
+# ``geracao_hidraulica_fpha`` -- a genuine cross-solver comparison sampled at
+# the trajectory, not a dense grid (so it never claims (a)'s full-surface
+# fidelity). ``n_planes_newave`` stays null (no declared reader counts source
+# planes).
 
 
 def _log_decomp_fpha_deck_summary(decomp_dir: Path) -> None:
@@ -1831,9 +1747,9 @@ def _decomp_fpha_grid_nv(
     `read_eco_fpha`.
 
     Degrades to an empty frame -- never raises -- when the deck ships no
-    ``eco_fpha`` table (confirmed absent on the reduced deck this ticket was
-    developed against): ``n_v`` then stays null on every metrics row, honest
-    about the value being genuinely unavailable rather than fabricating one.
+    ``eco_fpha`` table (confirmed absent on the reduced deck): ``n_v`` then
+    stays null on every metrics row, honest about the value being genuinely
+    unavailable rather than fabricating one.
     """
     empty = pl.DataFrame(
         schema={"cobre_id": pl.Int64, "stage": pl.Int64, "n_v": pl.Int64}
@@ -1859,53 +1775,6 @@ def _decomp_fpha_grid_nv(
     )
 
 
-def _evaluate_cobre_fpha_at_points(
-    cb_planes: pl.DataFrame, points: pl.DataFrame
-) -> pl.DataFrame:
-    """Evaluate Cobre's min-over-planes FPHA envelope at the source model's
-    own realized (hydro, stage, v, q, s) operating points.
-
-    ``points`` carries one row per realized sample, with columns
-    ``_point_id`` (a stable row identity), ``cobre_id``, ``stage``,
-    ``v_hm3``, ``q_m3s``, ``s_m3s``. ``cb_planes`` is
-    `cobre_readers.read_cobre_fpha_planes`'s own ``hydro_id``/``stage_id``/
-    ``gamma_0``/``gamma_v``/``gamma_q``/``gamma_s``/``kappa`` frame (multiple
-    plane rows per (hydro_id, stage_id)). Mirrors
-    `cobre_bridge.comparators.analyze._evaluate_fpha_envelope`'s own
-    ``kappa * (gamma_0 + gamma_v * v + gamma_q * q + gamma_s * s)``
-    min-over-planes definition (``gamma_v`` already multiplies *absolute*
-    volume for Cobre's own coefficients, so no volume offset applies here --
-    the source model's own ``volume_total_hm3`` is likewise absolute, not
-    useful, volume), expressed as a join + group-by rather than a numpy
-    broadcast since this evaluates a scattered point cloud, not a dense grid.
-
-    Returns one row per ``_point_id`` with the envelope value in
-    ``cobre_gh_mw``; a point whose (hydro, stage) has no Cobre planes drops
-    out of the join rather than null-keeping.
-    """
-    keyed_planes = cb_planes.rename({"hydro_id": "cobre_id", "stage_id": "stage"}).cast(
-        {"cobre_id": pl.Int64, "stage": pl.Int64}
-    )
-    joined = points.join(keyed_planes, on=["cobre_id", "stage"], how="inner")
-    if joined.is_empty():
-        return pl.DataFrame(schema={"_point_id": pl.Int64, "cobre_gh_mw": pl.Float64})
-    return (
-        joined.with_columns(
-            (
-                pl.col("kappa")
-                * (
-                    pl.col("gamma_0")
-                    + pl.col("gamma_v") * pl.col("v_hm3")
-                    + pl.col("gamma_q") * pl.col("q_m3s")
-                    + pl.col("gamma_s") * pl.col("s_m3s")
-                )
-            ).alias("plane_value")
-        )
-        .group_by("_point_id")
-        .agg(pl.col("plane_value").min().alias("cobre_gh_mw"))
-    )
-
-
 def _fpha_metrics(
     decomp_dir: Path,
     cobre_output_dir: Path,
@@ -1922,9 +1791,9 @@ def _fpha_metrics(
     absent/empty, or no realized point resolves onto a Cobre hydro with
     fitted planes. `build_decomp_dataset` passes ``None`` straight through
     to `~cobre_bridge.comparators.results.PercentileData.fpha_metrics`; the
-    report's FPHA section gate (`report_builder`, unmodified by this ticket)
-    treats that identically to an empty frame via its own ``_meta_frame``
-    helper, so the section is omitted, never a crash.
+    report's FPHA section gate (`report_builder`) reads it as the empty
+    `RenderInputs.fpha_metrics` default, so the section is omitted, never a
+    crash.
     """
     cb_planes = cobre_readers.read_cobre_fpha_planes(cobre_output_dir)
     if cb_planes is None or id_map is None:
@@ -1958,7 +1827,10 @@ def _fpha_metrics(
         .with_columns(pl.col("_point_id").cast(pl.Int64))
     )
 
-    envelope = _evaluate_cobre_fpha_at_points(cb_planes, points)
+    # Cobre's own kappa/gamma_v already multiply absolute volume, and the
+    # source model's own volume_total_hm3 is likewise absolute (not useful)
+    # volume -- fpha.point_cloud's default volume_offset=0.0 applies here.
+    envelope = fpha.point_cloud(cb_planes, points)
     if envelope.is_empty():
         return None
 
@@ -2007,33 +1879,18 @@ def _fpha_metrics(
             .alias("plant_name"),
             pl.lit(None).cast(pl.Int64).alias("n_planes_newave"),
         )
-        .select(
-            "cobre_id",
-            "plant_name",
-            "stage",
-            "n_planes_newave",
-            "n_planes_cobre",
-            "n_v",
-            "nmae",
-            "bias",
-            "max_abs_dev",
-            "gh_max_ratio",
-        )
+        .select(list(fpha.FPHA_METRICS_SCHEMA))
         .sort(["cobre_id", "stage"])
     )
     return metrics if not metrics.is_empty() else None
 
 
-# --- ticket-018: REE energy rollup via membership ---
+# --- REE energy rollup via membership ---
 #
 # DECOMP reports energy at REE (reservoir-equivalent-energy) granularity
-# (`read_dec_oper_ree`); Cobre has no REE entity and `DecompIdMap` carries no
-# REE map, so the Cobre counterpart is built by rolling each REE's member
-# plants' own energy up through the `relato.uhes_rees_submercados`
-# membership table (`read_relato_membership`) instead. Reuses
-# `build_decomp_dataset`'s own `line_id_map` (ticket-008) for the hydro
-# code -> Cobre id half of that membership, the same way `_fpha_metrics`
-# already does, rather than rebuilding a third `DecompIdMap`.
+# (`read_dec_oper_ree`); Cobre has no REE entity, so the counterpart is built
+# by rolling each REE's member plants' energy up through the
+# `relato.uhes_rees_submercados` membership table (`read_relato_membership`).
 
 
 def _ree_membership_map(
@@ -2045,7 +1902,7 @@ def _ree_membership_map(
 
     A hydro code with no row in *membership* cannot be attributed to any REE
     -- it is excluded from every REE sum and returned (sorted) as the second
-    element instead of being silently dropped (ticket-018 requirement 4).
+    element instead of being silently dropped.
     """
     code_to_ree: dict[int, int] = {}
     if not membership.is_empty():
@@ -2071,10 +1928,9 @@ _EMPTY_COBRE_REE_SUMS_SCHEMA: dict[str, type[pl.DataType]] = {
 }
 
 #: Columns :func:`_cobre_ree_sums` reads off *cobre_hydro* besides
-#: ``entity_id``/``stage_id``. A frame missing either -- e.g. some other
-#: ticket's trimmed test fixture that only carries the E1 hydro-comparison
-#: columns -- degrades to an empty sum instead of a Polars
-#: ``ColumnNotFoundError``.
+#: ``entity_id``/``stage_id``. A frame missing either -- e.g. a trimmed
+#: test fixture that only carries the base hydro-comparison columns --
+#: degrades to an empty sum instead of a Polars ``ColumnNotFoundError``.
 _REE_COBRE_ENERGY_COLUMNS: tuple[str, ...] = (
     "incremental_inflow_energy_mw",
     "stored_energy_final_mwh",
@@ -2086,7 +1942,7 @@ def _cobre_ree_sums(
 ) -> pl.DataFrame:
     """Membership-weighted sum of Cobre hydro ENA/EARM per (codigo_ree, stage).
 
-    *cobre_hydro* is `_AlignedDecompFrames.cobre_hydro` (ticket-002's own
+    *cobre_hydro* is `_AlignedDecompFrames.cobre_hydro` (the aligned
     Cobre hydro means, reused rather than re-read); *ree_by_cobre_id* inverts
     :func:`_ree_membership_map`'s own map, one entry per member plant. A
     Cobre hydro id absent from it -- every plant this rollup could not
@@ -2190,8 +2046,7 @@ def _ree_result_comparisons(
     raising -- matching every other optional field this module builds. A
     hydro code absent from the membership table is excluded from every REE
     sum and returned (sorted) as the second element, with a WARNING
-    diagnostic recording the codes (ticket-018 requirement 4, never silently
-    dropped).
+    diagnostic recording the codes (never silently dropped).
     """
     if id_map is None:
         return [], []
@@ -2244,15 +2099,13 @@ def _ree_result_comparisons(
         name = names.get(ree_code, "")
         cobre_earm_mwmes = float(row["earm_mwh"]) / _EARM_MWH_TO_MWMES
         # cobre's ``ena_mw`` is a stage-mean MW (average inflow power); DECOMP's
-        # ``ena_MWmes`` is the natural energy *over the stage* (MW-month), which
-        # scales with stage duration. Convert the rate to MWmês by the stage's
-        # own duration in months (``stage_hours / 730``), mirroring EARM's ÷730
-        # — otherwise a weekly stage's average power is compared to a week's
-        # energy, a ~stage_hours/730 mismatch that inflates the weekly ENA
-        # several-fold. Falls back to one month when hours are unavailable
-        # (e.g. a fixture without stage metadata). The residual per-REE offset
-        # that remains is the productivity/FPHA-coefficient difference between
-        # DECOMP's REE aggregate and cobre's per-plant model, not a unit error.
+        # ``ena_MWmes`` is energy *over the stage* (MW-month), scaling with stage
+        # duration. Multiply the rate by the stage's duration in months
+        # (``stage_hours / 730``, mirroring EARM's ÷730) — else a weekly stage's
+        # mean power is compared to a week's energy, a ~stage_hours/730 mismatch
+        # that inflates the weekly ENA several-fold. Falls back to one month when
+        # hours are unavailable. The residual per-REE offset is the
+        # productivity/FPHA difference vs cobre's per-plant model, not a unit error.
         stage_months = (
             stage_hours.get(stage, _EARM_MWH_TO_MWMES) / _EARM_MWH_TO_MWMES
             if stage_hours is not None
@@ -2284,21 +2137,16 @@ def _ree_result_comparisons(
     return results, unmapped
 
 
-# --- ticket-020: evaporation comparison (hydro, "evaporation_m3s") ---
+# --- evaporation comparison (hydro, "evaporation_m3s") ---
 #
-# The source model reports evaporation as a per-stage *volume* in hm³
+# Source model: evaporation as a per-stage *volume* in hm³
 # (`read_dec_oper_evap`'s `evaporacao_calculada_hm3` -- the run's own water
-# balance, not the fitted `evaporacao_modelo_hm3` estimate); Cobre reports it
-# as a mean *flow* in m³/s (`evaporation_m3s`, already carried by
-# `_read_aligned_frames`'s `cobre_hydro`, see `cobre_readers.
-# read_cobre_hydro_means`). Reconciling the two units needs the stage's own
-# duration -- unlike the source model's *own* MEDIAS report (`results.py`'s
-# `_compare_hydros`, which divides by the rounded fixed monthly constant
-# 2.63), the source model's stages here are not always full calendar months
-# (sub-monthly patamares), so the divisor must come from the stage's actual
-# hours (`_cobre_stage_hours`, sourced from the Cobre case's own
-# ``stages.json`` via `cobre_readers._load_block_hours` -- reused rather than
-# re-parsed so the two block-hours readings can never drift apart).
+# balance, not the fitted `evaporacao_modelo_hm3`). Cobre: a mean *flow* in
+# m³/s (`evaporation_m3s`). The divisor reconciling them must come from the
+# stage's actual hours (`_cobre_stage_hours`), not the fixed monthly 2.63 the
+# source's own MEDIAS report uses (`results.py`'s `_compare_hydros`) -- stages
+# here are not always full calendar months (sub-monthly patamares). Reuses
+# `cobre_readers._load_block_hours` so the two block-hours readings can't drift.
 
 
 def _cobre_stage_hours(cobre_output_dir: Path) -> dict[int, float]:
@@ -2390,17 +2238,17 @@ def _evaporation_result_comparisons(
     evaporation series on only one side -- the source model's
     ``dec_oper_evap`` but no Cobre ``evaporation_m3s`` for that plant, or the
     reverse -- is excluded from the paired join and returned (sorted, by
-    Cobre id) as the second element instead of being silently dropped
-    (ticket-020 requirement 5), with a WARNING diagnostic recording the
-    count.
+    Cobre id) as the second element instead of being silently dropped, with
+    a WARNING diagnostic recording the count.
 
     TRACKED COBRE-GAP WORKAROUND (C11): Cobre's own evaporation model
     over-scales the volume it deposits on a sub-monthly stage -- it applies
     (pre-fix) a full calendar month's worth of evaporation regardless of the
     stage's actual duration (see `decomp.hydro.
-    _evaporation_coefficients_mm`'s docstring and the spec at
-    ``~/git/cobre/plans/evaporation-stage-duration-scaling-spec.md``). The
-    reconciliation below ONLY rescales the source model's own hm³ volume into
+    _evaporation_coefficients_mm`'s docstring; its removal condition is
+    registered in the cobre repository's conversion-found-improvements
+    registry). The reconciliation below ONLY rescales the source model's own
+    hm³ volume into
     a directly comparable m³/s flow via :func:`_hm3_to_m3s`; Cobre's
     ``evaporation_m3s`` value is compared UNCHANGED. Any residual divergence
     this surfaces on a sub-monthly stage is that known Cobre gap (C11), not a
@@ -2497,70 +2345,25 @@ def _evaporation_result_comparisons(
     return results, one_sided
 
 
-# --- ticket-019: Constraints tab (gc_* metadata, DECOMP-side LHS) ---
+# --- Constraints tab (gc_* metadata, DECOMP-side LHS) ---
 #
-# `constraints_compare` already supplies the source-agnostic pieces verbatim:
-# `_load_generic_constraints`/`_load_generic_constraint_bounds` (the
-# converted case's own constraint/bounds tables) and `evaluate_lhs_cobre`
-# (the Cobre-side LHS from simulation output). What is missing is the
-# DECOMP-side LHS -- `evaluate_lhs_newave` is MEDIAS-USIH/int*.out +
-# EntityAlignment/NewaveIdMap-coupled and cannot serve DECOMP (see the
-# module's own docstring) -- so `_generic_constraint_lhs_decomp` below is
-# its DECOMP sibling: it evaluates each constraint directly against
-# `dec_oper_usih`/`dec_oper_usit`/`dec_oper_rhesoft`, using the
-# special-constraint register (`decomp.constraint_registers.
-# read_constraints`) to recover the same coefficients the conversion-time
-# emitters (`decomp.constraints.emit_re_generics`/`emit_rhq_rhv_generics`/
+# `constraints_compare` supplies the source-agnostic pieces (the converted
+# case's own constraint/bounds tables, and `evaluate_lhs_cobre`). Only the
+# DECOMP-side LHS is missing -- `evaluate_lhs_newave` is
+# MEDIAS/NewaveIdMap-coupled and cannot serve DECOMP -- so
+# `_generic_constraint_lhs_decomp` below evaluates each constraint against
+# `dec_oper_usih`/`dec_oper_usit`/`dec_oper_rhesoft`, recovering via the
+# special-constraint register (`decomp.constraint_registers.read_constraints`)
+# the SAME coefficients the conversion-time emitters
+# (`decomp.constraints.emit_re_generics`/`emit_rhq_rhv_generics`/
 # `emit_rhe_generics`) used to author each constraint's expression.
-
-
-@dataclass(frozen=True)
-class _DecompConstraintContext:
-    """Deck-derived inputs `_generic_constraint_lhs_decomp` needs beyond the
-    `dec_oper_*` tables: the special-constraint census (for RE/HQ/HV term
-    coefficients) and the id map (to translate a plant code to its cobre
-    hydro id for the HV storage floor)."""
-
-    census: ConstraintCensus
-    id_map: DecompIdMap
-
-
-def _decomp_constraint_context(decomp_dir: Path) -> _DecompConstraintContext | None:
-    """Best-effort census + id map for the DECOMP-side generic-constraint LHS.
-
-    Mirrors `_build_line_id_map`'s degrade-gracefully pattern (deck
-    discovery -> ``Dadger.read`` -> a from-dadger builder): a missing or
-    invalid deck yields ``None`` (logged, not raised) instead of failing the
-    whole dataset build -- the Constraints tab's DECOMP-side overlay is one
-    optional section among many.
-    """
-    from idecomp.decomp import Dadger
-
-    from cobre_bridge.decomp.constraint_registers import read_constraints
-    from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import discover_decomp_files
-
-    try:
-        files = discover_decomp_files(decomp_dir)
-        dadger = Dadger.read(str(files.dadger))
-        return _DecompConstraintContext(
-            census=read_constraints(dadger),
-            id_map=DecompIdMap.from_dadger(dadger),
-        )
-    except (FileNotFoundError, ValueError) as exc:
-        _LOG.info(
-            "No deck available for the DECOMP-side generic-constraint LHS "
-            "derivation: %s",
-            exc,
-        )
-        return None
 
 
 def _dec_oper_hydro_stage_frame(
     decomp_dir: Path, *, probabilities: pl.DataFrame | None = None
 ) -> pl.DataFrame:
     """One row per (source hydro code, stage): the stage-aggregate
-    ``dec_oper_usih`` columns this ticket's constraint terms need, averaged
+    ``dec_oper_usih`` columns the constraint terms need, averaged
     over node/scenario.
 
     Reuses `_stage_rows` (keep the duration-weighted ``patamar``-null
@@ -2701,13 +2504,11 @@ class _DecompConstraintLookups:
 
 
 #: Register term variables `_generic_constraint_lhs_decomp` cannot re-derive
-#: from ``dec_oper_*`` output without conversion-time context this
-#: comparator does not rebuild: ``interchange`` (RE ``FI``) needs the same
-#: bus/line direction resolution `decomp.constraints.resolve_fi_term` does
-#: at conversion time; ``QBOM`` (HQ pumping) names a pumping-station code
-#: (not a hydro code), and no ``dec_oper_*`` table reports a pumping
-#: station's own flow directly. A constraint carrying either is skipped
-#: whole (skip-not-partial), never rendered with a partial sum.
+#: from ``dec_oper_*`` output: ``interchange`` (RE ``FI``) needs the bus/line
+#: direction resolution `decomp.constraints.resolve_fi_term` does at conversion
+#: time; ``QBOM`` (HQ pumping) names a pumping-station code (not a hydro code),
+#: and no ``dec_oper_*`` table reports a pumping station's flow. A constraint
+#: carrying either is skipped whole (skip-not-partial), never a partial sum.
 _UNSUPPORTED_TERM_VARIABLES = frozenset({"interchange", "QBOM"})
 
 #: Matches a cobre generic constraint's ``name`` field as authored by the
@@ -2784,17 +2585,22 @@ _GC_LHS_SCHEMA = {
 
 
 def _generic_constraint_lhs_decomp(
-    decomp_dir: Path,
+    case: DecompCase,
     cobre_output_dir: Path,
     gc_constraints: list[dict],
     *,
     probabilities: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Evaluate each generic constraint's LHS from the source model's own
-    operation output (ticket-019).
+    operation output.
 
-    *probabilities* is forwarded unchanged to every underlying
-    :func:`_scenario_mean` fold this derivation relies on
+    *case* is the shared, once-parsed deck :func:`build_decomp_dataset`
+    builds: its ``id_map`` resolves a plant code to its Cobre hydro id (the
+    HV storage floor), and ``dadger`` feeds the special-constraint census
+    (:func:`~cobre_bridge.decomp.constraint_registers.read_constraints`) --
+    neither is re-parsed here. The ``dec_oper_*`` tables are read directly
+    off *case*'s own directory. *probabilities* is forwarded unchanged to
+    every underlying :func:`_scenario_mean` fold this derivation relies on
     (:func:`_dec_oper_hydro_stage_frame`/:func:`_dec_oper_thermal_stage_frame`/
     :func:`_rhe_lhs_lookup`) -- see :func:`_hydro_side` for its
     scenario-weighting contract.
@@ -2828,21 +2634,21 @@ def _generic_constraint_lhs_decomp(
     if not gc_constraints:
         return pl.DataFrame(schema=_GC_LHS_SCHEMA)
 
-    context = _decomp_constraint_context(decomp_dir)
+    from cobre_bridge.decomp.constraint_registers import read_constraints
+
+    decomp_dir = case.files.dadger.parent
+    census = read_constraints(case.dadger)
     census_by_key: dict[tuple[str, int], ConstraintRecord] = {}
-    storage_lookup: dict[tuple[int, int], float] = {}
+    for records in census.by_family.values():
+        for record in records:
+            census_by_key[(record.family, record.constraint_id)] = record
+
     hydro_frame = _dec_oper_hydro_stage_frame(decomp_dir, probabilities=probabilities)
-    if context is not None:
-        for records in context.census.by_family.values():
-            for record in records:
-                census_by_key[(record.family, record.constraint_id)] = record
-        min_storage = {
-            i: float(m.get("min_storage_hm3") or 0.0)
-            for i, m in cobre_readers.read_cobre_hydro_metadata(
-                cobre_output_dir
-            ).items()
-        }
-        storage_lookup = _storage_lookup(hydro_frame, context.id_map, min_storage)
+    min_storage = {
+        i: float(m.get("min_storage_hm3") or 0.0)
+        for i, m in cobre_readers.read_cobre_hydro_metadata(cobre_output_dir).items()
+    }
+    storage_lookup = _storage_lookup(hydro_frame, case.id_map, min_storage)
 
     thermal_frame = _dec_oper_thermal_stage_frame(
         decomp_dir, probabilities=probabilities
@@ -2963,136 +2769,87 @@ def _generic_constraint_lhs_decomp(
 def build_decomp_dataset(
     decomp_dir: Path, cobre_output_dir: Path, *, tolerance: float = 1e-2
 ) -> ComparisonDataset:
-    """Build the canonical results dataset for the current 8 DECOMP variables.
+    """Build the canonical results dataset for a DECOMP-vs-Cobre comparison.
+
+    One :class:`~cobre_bridge.decomp.case.DecompCase` is built and shared
+    across the read/align (:func:`_read_aligned_frames`), Network/
+    Productivity/REE/evaporation, and Constraints sections below -- a single
+    deck parse for the whole dataset build.
 
     Reads and aligns both sides via :func:`_read_aligned_frames`, then emits
     the canonical :class:`~cobre_bridge.comparators.results.ResultComparison`
     shape and assembles it through the shared, source-agnostic
-    :func:`~cobre_bridge.comparators.analyze.build_results_dataset` stat
-    kernel. This is the reuse engine every later epic extends by filling more
-    :class:`~cobre_bridge.comparators.results.PercentileData` fields.
+    :func:`~cobre_bridge.comparators.analyze.build_results_dataset` kernel.
 
-    Per D-PERCENTILEDATA, the returned dataset's ``PercentileData`` carries
-    only the fields available at this stage: the entity-name dicts
-    (``nw_bus_names``, ``nw_hydro_names``), the cobre-side bus percentile
-    band (``bus``, from :func:`cobre_readers.read_cobre_bus_percentiles`),
-    and — as of ticket-006 — the Energy Balance tab's reference frames
-    (``nw_market``, ``nw_net_load``, ``nw_sin``, from
-    :func:`_energy_balance_frames`) and cobre-side aggregates
-    (``bus_aggregates``, ``cobre_bus_meta``, ``cobre_hydro_means``, each read
-    verbatim from the matching ``cobre_readers`` function). ``nw_offset=1``
-    (D-STAGE-OFFSET): DECOMP's ``estagio`` is 1-based from the deck's first
-    stage, unlike the source model's arbitrary calendar-month-numbered
-    MEDIAS stage, so the fixed offset is always 1 rather than derived from
-    the data. As of ticket-008, ``line``/``line_bounds``/``line_meta`` carry
-    the Network tab's cobre percentile band, per-stage capacity bounds, and
-    line metadata (see :func:`_line_bounds_and_meta`). As of ticket-010, the
-    Overview tab's cost sections are filled: ``nw_costs``/``cobre_costs``
-    (the NPV breakdown dicts, from :func:`_cost_frames` and
-    :func:`cobre_readers.read_cobre_cost_breakdown`) and
-    ``cobre_stage_costs`` (from :func:`cobre_readers.read_cobre_stage_costs`);
-    ``nw_sin`` additionally carries the ``COPER``/``CUSTO_FUTURO``/``CTERM``
-    per-stage cost rows, unioned onto the ticket-006 EARM/ENA rows via
-    :func:`_union_cost_rows` rather than overwriting them. As of ticket-012,
-    ``nw_convergence``/``cobre_convergence`` carry the Overview tab's
-    Convergence overlay (see :func:`_decomp_convergence_frame` and
-    :func:`cobre_readers.read_cobre_convergence`). As of ticket-013, the
-    Performance tab's timing
-    metadata is filled: ``nw_tim_stages``/``nw_tim_iterations`` (see
-    :func:`_decomp_tim_stages`/:func:`_decomp_tim_iterations`, sourced from
-    ``decomp.tim``/``relato.convergencia``), ``nw_max_stage`` (see
-    :func:`_decomp_max_stage`), and ``cobre_training_seconds``/
-    ``cobre_iteration_timing`` (verbatim from the matching
-    :mod:`cobre_readers` functions). Per Caveat #2, ``nw_tim_iterations``
-    never carries a ``forward_seconds``/``backward_seconds`` split — DECOMP
-    has no forward/backward pass structure to split. As of ticket-014, the
-    Hydro Operation and Hydro Plant Details tabs are filled: ``hydro`` (the
-    cobre percentile band, from
-    :func:`cobre_readers.read_cobre_hydro_percentiles`),
-    ``cobre_hydro_meta`` (:func:`cobre_readers.read_cobre_hydro_metadata`
-    merged with the plant->bus label via :func:`_merge_hydro_bus_ids`, so
-    every entry carries a ``"bus_ids"`` key), and
-    ``cobre_hydro_per_stage_bounds`` (verbatim from
-    :func:`cobre_readers.read_cobre_hydro_per_stage_bounds`).
-    ``nw_hydro_slacks`` stays at its empty dataclass default — DECOMP has no
-    withdrawal/evaporation-slack analog — so the slack charts render the
-    cobre Mean + p10/p90 band only (``report_builder``'s documented
-    ``has_newave=False`` path). As of ticket-015, ``thermal`` carries the
-    Thermal Operation/Plant Details tabs' cobre percentile band (from
-    :func:`cobre_readers.read_cobre_thermal_percentiles`) — the disjoint
-    thermal counterpart to ticket-014's ``hydro`` field; the thermal
-    ``ResultComparison`` rows themselves are unchanged (E1). As of ticket-016,
-    the Productivity tab's realized per-stage half is filled: a
-    ``productivity_mw_per_m3s`` hydro ``ResultComparison`` row is derived per
-    (plant, stage) from the ``generation_mw``/``turbined_m3s`` rows E1 already
-    produced (see :func:`_hydro_productivity_results`) and appended onto
-    ``results``, so
-    :func:`~cobre_bridge.comparators.analyze.build_results_dataset` fills
-    ``dataset.metadata["productivity_per_stage"]`` the same way it does for
-    the source model. ``productivity_detail`` (the pmo-derived static
-    point/equivalent/accumulated scatter + building-blocks table) stays at its
-    empty dataclass default — DECOMP ships no ``pmo.dat``, so that half has no
-    DECOMP counterpart and the report's static section renders its "No
-    productivity data available" path instead of a fabricated comparison.
-    As of ticket-017, ``fpha_metrics`` carries the Productivity tab's
-    "Fitted production functions (FPHA)" section fidelity table (see
-    :func:`_fpha_metrics` and its preceding [ASSUMPTION] comment for why this
-    is fallback (b) -- fit-fidelity statistics only, evaluated at the source
-    model's own realized operating points against Cobre's fitted envelope --
-    rather than the full grid-reconstructed surface overlay the source model
-    path renders). ``fpha_surface``/``fpha_spill`` stay at their empty
-    dataclass default; the section is entirely omitted (never a fabricated
-    partial render) whenever either side has no fitted planes at all.
-    As of ticket-018, ``results`` additionally carries ``entity_type="ree"``
-    rows (``ena_mwmes``/``earm_final_mwmes``): the source model's own
-    `read_dec_oper_ree` per-REE energy against a membership-weighted
-    (`read_relato_membership`) sum of Cobre's per-plant
-    ``incremental_inflow_energy_mw``/``stored_energy_final_mwh`` (see
-    :func:`_ree_result_comparisons`; EARM is reconciled MWh -> MWmês via
-    :data:`_EARM_MWH_TO_MWMES`). No dedicated ``PercentileData`` field
-    exists for this -- unlike every earlier ticket's tab metadata, the REE
-    section reads straight off the ``results`` rows the same way
-    ``dataset.metadata["productivity_per_stage"]`` does.
-    As of ticket-019, the Constraints tab's ``gc_constraints``/``gc_bounds``/
-    ``gc_lhs_cobre`` are filled verbatim from ``constraints_compare``
-    (source-agnostic: constraint/bounds tables and the Cobre-side simulation
-    LHS); ``gc_lhs_newave`` is the DECOMP-side LHS, derived per constraint
-    family from ``dec_oper_usih``/``dec_oper_usit``/``dec_oper_rhesoft`` and
-    the special-constraint register (see
-    :func:`_generic_constraint_lhs_decomp`'s docstring for the per-family
-    strategy and its deliberately-deferred subset). ``nw_max_stage`` (already
-    set by ticket-013) doubles as this section's stage clamp.
-    As of ticket-020, ``results`` additionally carries a per-(hydro, stage)
-    ``entity_type="hydro"``/``variable="evaporation_m3s"`` row: the source
-    model's own ``dec_oper_evap`` volume (hm³) reconciled into a mean flow
-    (m³/s) via the stage's actual hours and compared against Cobre's own
-    ``evaporation_m3s`` (see :func:`_evaporation_result_comparisons`'s
-    docstring, including the TRACKED COBRE-GAP WORKAROUND (C11) it
-    surfaces rather than corrects away). No dedicated ``PercentileData``
-    field exists for it — like ticket-018's REE rows, it flows straight
-    through ``results``/``dataset.metadata["unmapped"]["evaporation"]``, and
-    is rendered by the existing Hydro Plant Details tab's per-plant
-    ``evaporation_m3s`` panel (``charts._HYDRO_VARIABLES``), not a new chart.
-    Every other field stays at its empty default, and
-    ``bus``/``hydro``/``thermal``/``line`` themselves stay empty whenever the
-    Cobre run has no percentile output (e.g. the deterministic 2-node tree) —
-    no percentile spread is ever fabricated.
-    Scenario weighting: :func:`_scenario_probabilities` is built exactly
-    once, here, from ``decomp_dir``'s ``relato``/``relato2`` reports, and
-    threaded as the ``probabilities`` keyword into every physical-variable
-    fold this function drives (``_read_aligned_frames``,
+    Per D-PERCENTILEDATA, the returned dataset's ``PercentileData`` carries:
+
+    - Entity-name dicts (``nw_bus_names``/``nw_hydro_names``) and the
+      cobre-side ``bus``/``hydro``/``thermal``/``line`` percentile bands, read
+      verbatim from the matching ``cobre_readers`` percentile functions.
+    - The Energy Balance tab's DECOMP-side frames ``nw_market``/
+      ``nw_net_load``/``nw_sin`` (`_energy_balance_frames`) plus the cobre-side
+      ``bus_aggregates``/``cobre_bus_meta``/``cobre_hydro_means``.
+    - The Network tab's ``line_bounds``/``line_meta`` (`_line_bounds_and_meta`).
+    - The Overview tab's ``nw_costs`` (`_cost_frames`), ``cobre_costs``/
+      ``cobre_stage_costs``, and the Convergence overlay ``nw_convergence``/
+      ``cobre_convergence`` (`_decomp_convergence_frame`). The per-stage
+      ``COPER``/``CUSTO_FUTURO``/``CTERM`` rows are unioned onto ``nw_sin``'s
+      EARM/ENA rows via `_union_cost_rows`, never overwriting them.
+    - The Performance tab's ``nw_tim_stages``/``nw_tim_iterations``/
+      ``nw_max_stage`` (`_decomp_tim_stages`/`_decomp_tim_iterations`/
+      `_decomp_max_stage`) plus ``cobre_training_seconds``/
+      ``cobre_iteration_timing``. ``nw_tim_iterations`` never carries a
+      ``forward_seconds``/``backward_seconds`` split -- DECOMP is nested
+      Benders over an explicit tree, with no forward/backward pass to split.
+    - The Hydro/Thermal Operation + Plant Details tabs' ``cobre_hydro_meta``
+      (`_merge_hydro_bus_ids`, so every entry carries a ``"bus_ids"`` key) and
+      ``cobre_hydro_per_stage_bounds``.
+    - The Productivity tab's ``fpha_metrics`` (`_fpha_metrics`; its preceding
+      [ASSUMPTION] comment covers why this is fit-fidelity statistics at the
+      source model's realized points, not a full grid-reconstructed surface).
+    - The Constraints tab's ``gc_constraints``/``gc_bounds``/``gc_lhs_cobre``
+      (verbatim from ``constraints_compare``) and the DECOMP-side
+      ``gc_lhs_newave`` (`_generic_constraint_lhs_decomp`).
+
+    ``results`` also carries a derived ``productivity_mw_per_m3s`` hydro row
+    per (plant, stage) (`_hydro_productivity_results`), ``entity_type="ree"``
+    ENA/EARM rows (`_ree_result_comparisons`), and a per-(hydro, stage)
+    ``evaporation_m3s`` row (`_evaporation_result_comparisons`); these last
+    three have no dedicated ``PercentileData`` field and flow through
+    ``results``/``dataset.metadata["unmapped"]``.
+
+    Unit reconciliations (D2): REE EARM MWh -> MWmês via
+    :data:`_EARM_MWH_TO_MWMES`, REE ENA (a stage-mean MW) -> MWmês via the
+    stage's own hours, and evaporation hm³ -> m³/s via the stage's actual
+    hours -- the last surfaces a TRACKED COBRE-GAP WORKAROUND (C11) rather
+    than correcting it away (see `_evaporation_result_comparisons`).
+    ``nw_offset=1`` (D-STAGE-OFFSET): DECOMP's ``estagio`` is 1-based from the
+    deck's first stage, so the offset is fixed at 1, not derived from the data.
+
+    Nothing is fabricated to fill a gap: ``bus``/``hydro``/``thermal``/
+    ``line`` stay empty whenever the Cobre run has no percentile output (e.g.
+    the deterministic 2-node tree), and the ``nw_hydro_slacks``,
+    ``productivity_detail``, ``fpha_surface``, and ``fpha_spill`` fields stay
+    at their empty defaults, so those sections render their documented "No
+    data" path (``report_builder``'s ``has_newave=False`` branch) rather than
+    a fabricated comparison -- no percentile spread is ever invented.
+
+    Scenario weighting: :func:`_scenario_probabilities` is built exactly once,
+    here, and threaded as the ``probabilities`` keyword into every
+    physical-variable fold (``_read_aligned_frames``,
     ``_line_result_comparisons``, ``_ree_result_comparisons``,
-    ``_evaporation_result_comparisons``, ``_generic_constraint_lhs_decomp``)
-    so a genuine scenario-fan stage is probability-weighted, not plainly
-    averaged, everywhere — see the module docstring's "Scenario averaging"
-    bullet. A deck with no probability source at all degrades every one of
-    those folds to their original unweighted mean.
+    ``_evaporation_result_comparisons``, ``_generic_constraint_lhs_decomp``),
+    so a genuine scenario-fan stage is probability-weighted rather than
+    plainly averaged -- see the module docstring's "Scenario averaging"
+    bullet. A deck with no probability source degrades every fold to its
+    unweighted mean.
 
     Args:
-        decomp_dir: The deck directory (results resolved via the ticket-001
+        decomp_dir: The deck directory (results resolved via the deck's
             union discovery).
         cobre_output_dir: Cobre's output directory.
-        tolerance: Relative tolerance forwarded to the summary builder.
+        tolerance: Relative tolerance (default ``1e-2``) forwarded to the
+            summary builder.
 
     Returns:
         The validated dataset. ``metadata["unmapped"]`` carries the per-level
@@ -3102,17 +2859,20 @@ def build_decomp_dataset(
         dropped.
     """
     from cobre_bridge.comparators.analyze import build_results_dataset
+    from cobre_bridge.decomp.case import DecompCase
 
+    # The single shared deck parse: every parse site below reads
+    # case.dadger/case.id_map rather than re-discovering and re-parsing the
+    # deck.
+    case = DecompCase.from_directory(decomp_dir)
     # Built once, threaded to every physical-variable _scenario_mean call
     # site below (never rebuilt per site -- relato2 parsing is not free).
     probabilities = _scenario_probabilities(decomp_dir)
 
-    aligned = _read_aligned_frames(
-        decomp_dir, cobre_output_dir, probabilities=probabilities
-    )
+    aligned = _read_aligned_frames(case, cobre_output_dir, probabilities=probabilities)
 
     results: list[ResultComparison] = []
-    # ticket-016: captured separately so the derived realized productivity
+    # Captured separately so the derived realized productivity
     # (generation / turbined, per plant/stage) can be appended right after
     # -- see _hydro_productivity_results.
     hydro_results = _result_comparisons(
@@ -3140,9 +2900,11 @@ def build_decomp_dataset(
         )
     )
 
-    # --- ticket-008: Network tab (line rows + line/line_bounds/line_meta) ---
+    # --- Network tab (line rows + line/line_bounds/line_meta) ---
     line_bounds, line_meta = _line_bounds_and_meta(cobre_output_dir)
-    line_id_map = _build_line_id_map(decomp_dir)
+    # The Network/Productivity/REE/evaporation sections below all reuse the
+    # shared case's id map rather than each re-parsing the deck.
+    line_id_map = case.id_map
     line_results, unresolved_lines = _line_result_comparisons(
         decomp_dir,
         cobre_output_dir,
@@ -3152,15 +2914,15 @@ def build_decomp_dataset(
     )
     results.extend(line_results)
 
-    # --- ticket-010: Overview cost metadata (nw_costs / cobre_costs /
+    # --- Overview cost metadata (nw_costs / cobre_costs /
     # nw_sin cost rows / cobre_stage_costs) ---
     nw_costs, nw_cost_rows = _cost_frames(decomp_dir)
     cobre_costs = cobre_readers.read_cobre_cost_breakdown(cobre_output_dir)
     cobre_stage_costs = cobre_readers.read_cobre_stage_costs(cobre_output_dir)
     nw_sin = _union_cost_rows(aligned.nw_sin, nw_cost_rows)
 
-    # --- ticket-013: Performance tab timing metadata (Caveat #2: no
-    # fabricated DECOMP forward/backward split) ---
+    # --- Performance tab timing metadata (no fabricated DECOMP
+    # forward/backward split) ---
     nw_tim_stages = _decomp_tim_stages(decomp_dir)
     nw_tim_iterations = _decomp_tim_iterations(decomp_dir)
     nw_max_stage = _decomp_max_stage(aligned)
@@ -3169,26 +2931,18 @@ def build_decomp_dataset(
     )
     cobre_iteration_timing = cobre_readers.read_cobre_iteration_timing(cobre_output_dir)
 
-    # --- ticket-014: Hydro Operation + Plant Details tab metadata ---
+    # --- Hydro Operation + Plant Details tab metadata ---
     cobre_hydro_meta = _merge_hydro_bus_ids(
         cobre_readers.read_cobre_hydro_metadata(cobre_output_dir),
         cobre_readers.read_cobre_hydro_bus_labels(cobre_output_dir),
     )
 
-    # --- ticket-017: Productivity tab's "Fitted production functions
-    # (FPHA)" section. Reuses ``line_id_map`` (ticket-008) rather than
-    # rebuilding it a third time -- it already carries every hydro code ->
-    # Cobre id mapping this needs, and every fixture built before this
-    # ticket that leaves it ``None`` (no deck to read) keeps working
-    # unchanged, since `_fpha_metrics` treats ``id_map is None`` as "no FPHA
-    # section" rather than raising.
+    # --- Productivity tab's "Fitted production functions (FPHA)" section.
     fpha_metrics = _fpha_metrics(
         decomp_dir, cobre_output_dir, line_id_map, aligned.hydro_names
     )
 
-    # --- ticket-018: REE energy rollup via membership. Reuses ``line_id_map``
-    # (ticket-008) exactly like ``_fpha_metrics`` above -- the same
-    # hydro-code -> Cobre-id mapping, no third ``DecompIdMap`` rebuild.
+    # --- REE energy rollup via membership. ---
     ree_results, unmapped_ree = _ree_result_comparisons(
         decomp_dir,
         aligned.cobre_hydro,
@@ -3198,10 +2952,7 @@ def build_decomp_dataset(
     )
     results.extend(ree_results)
 
-    # --- ticket-020: evaporation comparison (hydro, "evaporation_m3s").
-    # Reuses ``line_id_map`` exactly like ``_fpha_metrics``/
-    # ``_ree_result_comparisons`` above -- the same hydro-code -> Cobre-id
-    # mapping, no fifth ``DecompIdMap`` rebuild. See
+    # --- evaporation comparison (hydro, "evaporation_m3s"). See
     # ``_evaporation_result_comparisons``'s docstring for the hm³ -> m³/s
     # reconciliation and the TRACKED COBRE-GAP WORKAROUND (C11) it surfaces.
     evaporation_results, unmapped_evaporation = _evaporation_result_comparisons(
@@ -3214,7 +2965,7 @@ def build_decomp_dataset(
     )
     results.extend(evaporation_results)
 
-    # --- ticket-019: Constraints tab (gc_* metadata). The cobre-side pieces
+    # --- Constraints tab (gc_* metadata). The cobre-side pieces
     # (constraint/bounds tables, simulation LHS) are source-agnostic and
     # reused verbatim from `constraints_compare`; only the DECOMP-side LHS
     # (`_generic_constraint_lhs_decomp`) is new -- see that function's
@@ -3224,14 +2975,23 @@ def build_decomp_dataset(
         _load_generic_constraints,
         evaluate_lhs_cobre,
     )
+    from cobre_bridge.constraint_expr import load_rho_acum_overrides
 
     cobre_case_dir = case_dir_for(cobre_output_dir)
     gc_constraints = _load_generic_constraints(cobre_case_dir)
     gc_bounds_df = _load_generic_constraint_bounds(cobre_case_dir)
     if gc_constraints:
-        gc_lhs_cb = evaluate_lhs_cobre(gc_constraints, cobre_output_dir)
+        # RHE's ``@rho_acum_h{id}`` resolves against the LP's per-stage
+        # override (same mechanism as VminOP), not the simulation's default
+        # productivity column -- unlike the source-model VminOP path, RHE's
+        # bound is never useful-energy-shifted (dead volume can exceed the
+        # bound here), so only the LHS scaling is corrected.
+        rho_acum_overrides = load_rho_acum_overrides(cobre_case_dir)
+        gc_lhs_cb = evaluate_lhs_cobre(
+            gc_constraints, cobre_output_dir, rho_acum_overrides
+        )
         gc_lhs_nw = _generic_constraint_lhs_decomp(
-            decomp_dir, cobre_output_dir, gc_constraints, probabilities=probabilities
+            case, cobre_output_dir, gc_constraints, probabilities=probabilities
         )
     else:
         gc_lhs_cb = pl.DataFrame()
@@ -3246,7 +3006,7 @@ def build_decomp_dataset(
         nw_sin=nw_sin,
         # D-STAGE-OFFSET: fixed at 1, not derived — see the docstring above.
         nw_offset=1,
-        # ticket-012: Overview tab's Convergence overlay.
+        # Overview tab's Convergence overlay.
         nw_convergence=_decomp_convergence_frame(decomp_dir),
         cobre_convergence=cobre_readers.read_cobre_convergence(cobre_output_dir),
         nw_costs=nw_costs,
@@ -3258,13 +3018,13 @@ def build_decomp_dataset(
         line=cobre_readers.read_cobre_line_percentiles(cobre_output_dir),
         line_bounds=line_bounds,
         line_meta=line_meta,
-        # ticket-013: Performance tab timing metadata.
+        # Performance tab timing metadata.
         nw_tim_stages=nw_tim_stages,
         nw_tim_iterations=nw_tim_iterations,
         nw_max_stage=nw_max_stage,
         cobre_training_seconds=cobre_training_seconds,
         cobre_iteration_timing=cobre_iteration_timing,
-        # ticket-014: Hydro Operation + Plant Details tab metadata. Never
+        # Hydro Operation + Plant Details tab metadata. Never
         # fabricate a percentile spread when the Cobre run has no hydro
         # percentile output (e.g. the deterministic 2-node tree) --
         # ``read_cobre_hydro_percentiles`` already degrades to an empty
@@ -3279,34 +3039,28 @@ def build_decomp_dataset(
         # DECOMP-derived source) so the slack charts render the cobre
         # Mean + p10/p90 band only (report_builder's has_newave=False path).
         nw_hydro_slacks=pl.DataFrame(),
-        # ticket-015: Thermal Operation + Plant Details tab metadata.
-        # Mirrors ticket-014's hydro band exactly -- never fabricate a
-        # percentile spread when the Cobre run has no thermal percentile
-        # output (e.g. the deterministic 2-node tree);
-        # ``read_cobre_thermal_percentiles`` already degrades to an empty
-        # frame in that case, passed through verbatim. The thermal
-        # ``ResultComparison`` rows themselves are untouched -- E1 already
-        # emits them above via ``_result_comparisons``.
+        # Thermal Operation + Plant Details tab metadata. Never fabricate a
+        # percentile spread when the Cobre run has no thermal percentile output
+        # (e.g. the deterministic 2-node tree): ``read_cobre_thermal_percentiles``
+        # degrades to an empty frame, passed through verbatim.
         thermal=cobre_readers.read_cobre_thermal_percentiles(cobre_output_dir),
-        # ticket-016: DECOMP ships no pmo.dat, so the static
-        # point/equivalent/accumulated productivity scatter and the
-        # building-blocks table have no DECOMP counterpart -- stays at the
-        # dataclass empty-frame default (never fabricated) so the Productivity
-        # tab's static section renders its "No productivity data available"
-        # path. The *realized* per-stage productivity is still filled -- via
-        # the ``productivity_mw_per_m3s`` hydro rows appended to ``results``
-        # above (see _hydro_productivity_results), not through this field.
+        # DECOMP ships no pmo.dat, so the static productivity scatter/
+        # building-blocks table have no counterpart -- stays at the empty-frame
+        # default (never fabricated), rendering the "No productivity data
+        # available" path. Realized per-stage productivity is still filled, via
+        # the ``productivity_mw_per_m3s`` rows appended to ``results`` above
+        # (`_hydro_productivity_results`), not this field.
         productivity_detail=pl.DataFrame(),
-        # ticket-017: Productivity tab's Fitted production functions (FPHA)
+        # Productivity tab's Fitted production functions (FPHA)
         # section -- fallback (b), see the [ASSUMPTION] comment above
         # `_fpha_metrics`. ``fpha_surface``/``fpha_spill`` stay at their
         # dataclass ``None`` default (never fabricated): the declared FPHA
         # readers carry no fitted plane coefficients to reconstruct a dense
         # surface from, only per-hydro/stage fit-fidelity statistics.
         fpha_metrics=fpha_metrics,
-        # ticket-019: Constraints tab LHS-vs-bound metadata. ``nw_max_stage``
-        # is unchanged (already set above by ticket-013's `_decomp_max_stage`)
-        # and doubles as this section's stage clamp (D-STAGE-OFFSET).
+        # Constraints tab LHS-vs-bound metadata. ``nw_max_stage``
+        # is unchanged (already set above by `_decomp_max_stage`) and
+        # doubles as this section's stage clamp (D-STAGE-OFFSET).
         gc_constraints=gc_constraints,
         gc_bounds=gc_bounds_df,
         gc_lhs_newave=gc_lhs_nw,

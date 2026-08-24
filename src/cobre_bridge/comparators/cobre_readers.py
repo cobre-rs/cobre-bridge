@@ -3,6 +3,20 @@
 Reads Cobre simulation parquets using Polars lazy scanning and streaming aggregation to
 compute scenario means matching the source model MEDIAS aggregation level.  Also reads
 convergence data and hydro metadata.
+
+Reader-failure contract: an absent OPTIONAL input yields a typed-empty
+frame plus a WARNING log; a present-but-unreadable file, or an absent
+REQUIRED input, raises a typed error (``CobreReadError``, ``ValueError``,
+or ``FileNotFoundError``) — never a silent empty, since an empty frame
+from real-but-broken data fabricates a false zero-vs-zero match
+(``.claude/rules/comments.md`` §4; reads route through this module per
+``.claude/rules/bridge.md`` §5). This module and ``decomp_readers`` both
+raise on present-but-corrupt data and differ only in which inputs they
+treat as required — the source model's ``newave_readers`` instead
+degrades every present-but-unparseable input to a typed-empty frame, a
+genuine behaviour difference (see that module's docstring). Every
+partition and system JSON this module reads is an optional input; only
+a present-but-corrupt parquet or JSON raises.
 """
 
 from __future__ import annotations
@@ -97,14 +111,12 @@ def _weighted_stage_mean(
     hour_sum = pl.col("hours").sum().alias("_total_hours")
     stage_aggs = [pl.col(c).first().alias(c) for c in stage_level_cols]
 
-    # Per scenario+entity+stage: weighted sum across blocks.
     per_scenario = (
         lf.join(bh, on=["stage_id", "block_id"])
         .group_by(["scenario_id", id_col, "stage_id"])
         .agg(weighted_aggs + [hour_sum] + stage_aggs)
     )
 
-    # Compute weighted mean per scenario, then mean across scenarios.
     with_means = per_scenario
     for c in value_cols:
         with_means = with_means.with_columns(
@@ -193,7 +205,7 @@ def read_cobre_hydro_bus_generation(cobre_output_dir: Path) -> pl.LazyFrame:
     hours — weight ``generation_mw`` by hours only where a genuine power
     figure (not an energy total) is required.
 
-    Absence vs. present-but-empty (plan decision B2)
+    Absence vs. present-but-empty
     -------------------------------------------------
     Unlike every other reader in this module, this one does **not** treat a
     missing partition as "nothing to report": the compare layer switches to
@@ -670,6 +682,39 @@ def read_cobre_training_duration(cobre_output_dir: Path) -> float:
     return float(data.get("duration_seconds", 0.0) or 0.0)
 
 
+def read_cobre_training_metadata(cobre_output_dir: Path) -> dict:
+    """Read ``output/training/metadata.json`` under one unified path rule.
+
+    Tries ``case_dir_for(cobre_output_dir) / "output" / "training"``,
+    falling back to ``cobre_output_dir`` then ``cobre_output_dir.parent``
+    (each with a ``training/metadata.json`` suffix) -- the single candidate
+    search every caller now shares, replacing the two divergent searches
+    ``export._read_cobre_version`` and ``dashboard.load_output_metadata``
+    used to run separately, and which could resolve different files.
+    Returns ``{}`` on an absent file, unparseable JSON, or a non-dict
+    payload.
+    """
+    case_dir = case_dir_for(cobre_output_dir)
+    metadata_path = case_dir / "output" / "training" / "metadata.json"
+    if not metadata_path.exists():
+        for candidate in (cobre_output_dir, cobre_output_dir.parent):
+            p = candidate / "training" / "metadata.json"
+            if p.exists():
+                metadata_path = p
+                break
+
+    if not metadata_path.exists():
+        return {}
+
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _LOG.warning("Failed to parse %s", metadata_path)
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
 def read_cobre_line_means(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre line simulation means per (line_id, stage_id).
 
@@ -794,7 +839,7 @@ def read_cobre_hydro_withdrawal(cobre_output_dir: Path) -> pl.DataFrame:
     instead the target lives in ``constraints/hydro_bounds.parquet`` as
     ``water_withdrawal_m3s`` (one value per hydro-stage). Comparison against the source
     model ``VRETIRUH`` therefore matches the *input* target — discrepancies beyond the
-    post-study horizon are expected (see ``hydro.py:1083`` converter note).
+    post-study horizon are expected (see ``converters.hydro.convert_water_withdrawal``).
 
     Returns columns: ``entity_id``, ``stage_id``, ``withdrawal_m3s``.
     Empty frame if the parquet is missing or lacks the column.
@@ -875,6 +920,43 @@ def read_cobre_hydro_per_stage_bounds(cobre_output_dir: Path) -> pl.DataFrame:
     ]
     select_exprs.extend(pl.col(c).cast(pl.Float64) for c in available)
     return df.select(select_exprs).sort("entity_id", "stage_id")
+
+
+#: The columns the converter's ``constraints/line_bounds.parquet`` carries
+#: (``decomp/network.py::convert_lines``'s and ``converters/network.py::
+#: convert_line_bounds``'s shared ``_LINE_BOUNDS_SCHEMA``): one stage-level
+#: base row per (line, stage) with ``block_id`` null, plus per-block
+#: absolute-MW override rows.
+_LINE_BOUNDS_SCHEMA: dict[str, pl.DataType] = {
+    "line_id": pl.Int32,
+    "stage_id": pl.Int32,
+    "block_id": pl.Int32,
+    "direct_mw": pl.Float64,
+    "reverse_mw": pl.Float64,
+}
+
+
+def read_cobre_line_bounds(cobre_output_dir: Path) -> pl.DataFrame:
+    """Read the raw ``constraints/line_bounds.parquet`` frame.
+
+    Returns every row verbatim (including per-block override rows), with
+    the converter's own columns: ``line_id``, ``stage_id``, ``block_id``
+    (nullable -- ``None`` on the stage-level base row), ``direct_mw``,
+    ``reverse_mw``. Absent parquet -> typed-empty frame + WARNING;
+    present-but-corrupt -> :class:`CobreReadError`. Callers own their own
+    ``block_id``-null filtering and any dict/lookup construction (kept in
+    the ANALYZE layer).
+    """
+    empty = pl.DataFrame(schema=_LINE_BOUNDS_SCHEMA)
+    case_dir = case_dir_for(cobre_output_dir)
+    path = case_dir / "constraints" / "line_bounds.parquet"
+    if not path.exists():
+        _LOG.warning("line_bounds.parquet not found at %s", path)
+        return empty
+    try:
+        return pl.read_parquet(path)
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(f"Failed to read line_bounds.parquet: {path}") from exc
 
 
 def read_cobre_thermal_means(cobre_output_dir: Path) -> pl.DataFrame:
@@ -1210,15 +1292,12 @@ def read_cobre_bus_aggregates(
     """
     block_hours = _load_block_hours(cobre_output_dir)
 
-    # --- Bus-level variables (load, deficit, excess) ---
     bus_lf = _scan_simulation_entity(cobre_output_dir, "buses")
     bus_vars = ["load_mw", "deficit_mw", "excess_mw"]
 
-    # --- Thermal generation aggregated by bus ---
     thermal_bus_map = _load_entity_bus_map(cobre_output_dir, "thermals", "thermal_id")
     thermal_lf = _scan_simulation_entity(cobre_output_dir, "thermals")
 
-    # --- NCS generation aggregated by bus ---
     ncs_bus_map = _load_entity_bus_map(
         cobre_output_dir, "non_controllable_sources", "non_controllable_id"
     )
@@ -1239,14 +1318,11 @@ def read_cobre_bus_aggregates(
         if value_col not in available:
             return None
 
-        # Map entity to bus.
         mapping = pl.DataFrame(
             {id_col: list(bus_map.keys()), "bus_id": list(bus_map.values())}
         )
         joined = lf.join(mapping.lazy(), on=id_col)
 
-        # Sum generation across entities per bus within each
-        # (scenario, stage, block) first, then block-hours weight.
         bus_totals = joined.group_by(
             ["scenario_id", "bus_id", "stage_id", "block_id"]
         ).agg(pl.col(value_col).sum())
@@ -1374,7 +1450,7 @@ def read_cobre_bus_aggregates(
 
     # Hydro generation: the partition already carries bus_id, so it is
     # aggregated directly rather than through the map/join loop below —
-    # see AC1/AC5 in ticket-010: absence must raise, not silently drop out
+    # absence must raise, not silently drop out
     # of ``frames`` the way a ``None``-returning entity aggregation would.
     frames.append(_agg_hydro_bus_generation())
     all_vars.append("hydro_gen_mw")
@@ -1405,7 +1481,6 @@ def read_cobre_bus_aggregates(
     if not frames:
         return pl.DataFrame()
 
-    # Join all frames on (scenario_id, bus_id, stage_id).
     merged = frames[0]
     for f in frames[1:]:
         merged = merged.join(
@@ -1415,7 +1490,6 @@ def read_cobre_bus_aggregates(
             coalesce=True,
         )
 
-    # Compute net load = load - NCS per scenario.
     if "load_mw" in merged.columns and "ncs_gen_mw" in merged.columns:
         merged = merged.with_columns(
             (
@@ -1682,7 +1756,6 @@ def read_cobre_convergence(cobre_output_dir: Path) -> pl.DataFrame:
             col_map[col] = "upper_bound_mean"
 
     if "iteration" not in col_map.values():
-        # Use row index as iteration.
         df = df.with_row_index("iteration")
         col_map["iteration"] = "iteration"
 
@@ -1719,7 +1792,7 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
     This reader's job is plant *physics* (productivity, storage, outflow/
     generation bounds) — it does **not** carry a plant-level bus id. Hydros
     no longer carry a plant-level ``bus_id`` in ``system/hydros.json`` under
-    cobre 0.13 (decision B1); the compare layer's plant->bus label is
+    cobre 0.13; the compare layer's plant->bus label is
     re-sourced from the ``simulation/hydro_bus_generation/`` partition via
     :func:`read_cobre_hydro_bus_labels` instead. Removing the key here
     (rather than leaving it ``None``) makes a stale caller expecting it
@@ -1781,15 +1854,15 @@ def read_cobre_hydro_metadata(cobre_output_dir: Path) -> dict[int, dict]:
 def read_cobre_hydro_bus_labels(cobre_output_dir: Path) -> dict[int, frozenset[int]]:
     """Derive the plant -> bus *label* map from the 0.13 hydro_bus_generation partition.
 
-    ``read_cobre_hydro_metadata`` no longer carries a plant-level ``bus_id``
-    (decision B1) — this is the correct re-source for the compare layer's
+    ``read_cobre_hydro_metadata`` no longer carries a plant-level ``bus_id`` —
+    this is the correct re-source for the compare layer's
     plant->bus label: it reads :func:`read_cobre_hydro_bus_generation` and
     collapses it to the distinct ``(hydro_id, bus_id)`` pairs.
 
     Returns ``{hydro_id: frozenset(bus_id, ...)}``. A plant with a single bus
     (every real deck today) maps to a one-element ``frozenset``; a plant
     genuinely present at more than one bus in the partition (only possible
-    once epic 08 lands multi-bus hydro support) keeps every one of its buses
+    once multi-bus hydro support lands) keeps every one of its buses
     here — callers decide how to handle that ambiguity (see
     ``cobre_bridge.comparators.analyze._bus_name_lookups``), this reader does
     not silently pick one.
@@ -1878,6 +1951,31 @@ def _find_system_json(cobre_output_dir: Path, filename: str) -> Path | None:
         if p.exists():
             return p
     return None
+
+
+def read_cobre_lines(cobre_output_dir: Path) -> list[dict]:
+    """Read ``system/lines.json`` and return its ``"lines"`` list.
+
+    Resolves the file via :func:`_find_system_json`'s candidate search
+    (``case_dir_for(cobre_output_dir)`` -> ``cobre_output_dir`` -> its
+    parent), so every caller -- the compare context, the dashboard, the
+    DECOMP corridor-alignment index -- resolves the same file. Returns
+    ``[]`` when the file, or its ``"lines"`` key, is absent -- the
+    graceful-degrade half of this module's reader-failure contract. A
+    present-but-unparseable ``lines.json`` raises :class:`CobreReadError`
+    rather than silently degrading to an empty list, mirroring
+    :func:`_load_entity_bus_map`.
+    """
+    path = _find_system_json(cobre_output_dir, "lines.json")
+    if path is None:
+        _LOG.warning("lines.json not found near %s", cobre_output_dir)
+        return []
+    try:
+        with path.open() as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CobreReadError(f"Failed to parse lines.json: {path}") from exc
+    return data.get("lines", [])
 
 
 def read_cobre_thermal_metadata(cobre_output_dir: Path) -> dict[int, dict]:

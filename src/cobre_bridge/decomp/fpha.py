@@ -7,7 +7,7 @@ window, cobre fits the production-function hyperplanes itself. This module
 builds the DECOMP-side inputs, mirroring :mod:`cobre_bridge.converters.hydro`
 and :mod:`cobre_bridge.converters.tailrace` on the source-model side and reusing
 their shared cores (:func:`~cobre_bridge.converters.tailrace.build_tailrace_table`,
-:func:`~cobre_bridge.converters.hydro._fpha_efficiency`).
+:func:`~cobre_bridge.productivity.fpha_efficiency`).
 
 Eligibility mirrors the source-model rule: a plant with a non-degenerate
 volume→cota polynomial (the forebay curve) and a positive ``ρ_esp``. Ineligible
@@ -27,15 +27,15 @@ from typing import TYPE_CHECKING
 
 import pyarrow as pa
 
-from cobre_bridge.converters.hydro import _fpha_efficiency
 from cobre_bridge.converters.tailrace import build_tailrace_table
 from cobre_bridge.decomp.cadastro import effective_storage_range
-from cobre_bridge.decomp.hydro import _eval_cota_from_coeffs
+from cobre_bridge.productivity import evaluate_cota, fpha_efficiency
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 #: Half-width of the FPHA volume fitting window as a fraction of a plant's
@@ -75,7 +75,7 @@ def read_polinjus(path: Path):  # noqa: ANN201 (idecomp.libs type is optional)
     return UsinasHidreletricas.read(str(path))
 
 
-def convert_tailrace_curves(polinjus, id_map: DecompIdMap) -> pa.Table | None:  # noqa: ANN001
+def convert_tailrace_curves(case: DecompCase, id_map: DecompIdMap) -> pa.Table | None:
     """Build ``system/tailrace_curves.parquet`` from the ``polinjus`` families.
 
     Thin DECOMP wrapper over the shared
@@ -84,6 +84,7 @@ def convert_tailrace_curves(polinjus, id_map: DecompIdMap) -> pa.Table | None:  
     ``…_polinomio_segmento`` frames the source-model side reads. ``None`` when
     the deck has no ``polinjus`` or no segment maps to a converted hydro.
     """
+    polinjus = case.polinjus
     if polinjus is None:
         return None
     families = polinjus.hidreletrica_curvajusante(df=True)
@@ -140,7 +141,7 @@ def turbine_efficiency(effective: EffectiveCadastro, code: int, name: str) -> fl
     ``ρ_esp`` implies an unphysical ``η > 1``).
     """
     rho_esp = effective.value(code, "produtibilidade_especifica", 0)
-    return _fpha_efficiency(rho_esp, name)
+    return fpha_efficiency(rho_esp, name)
 
 
 def convert_hydro_geometry(
@@ -180,8 +181,8 @@ def convert_hydro_geometry(
             grid = [vmin + step * i for i in range(_GEOMETRY_N_POINTS)]
 
         for v in grid:
-            h = max(_eval_cota_from_coeffs(vc_coeffs, v), 0.0)
-            a = max(_eval_cota_from_coeffs(ca_coeffs, h), 0.0)
+            h = max(evaluate_cota(vc_coeffs, v), 0.0)
+            a = max(evaluate_cota(ca_coeffs, h), 0.0)
             hydro_ids.append(hydro_id)
             volumes.append(v)
             heights.append(h)

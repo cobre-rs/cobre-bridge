@@ -1,4 +1,4 @@
-"""Integration tests for the compare bounds and compare results pipelines.
+"""Integration tests for the compare results pipeline.
 
 Tests the full comparison flow using mocked inewave readers and fixture
 data.  Verifies that the pipeline connects correctly from CLI through
@@ -7,55 +7,46 @@ alignment, computation, comparison, and report generation.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pyarrow as pa
 import pytest
+from plotly.offline import get_plotlyjs_version
 
-from cobre_bridge.comparators.bounds import (
-    BoundComparison,
-    _bounds_match,
-    _is_effectively_infinite,
-)
 from cobre_bridge.comparators.results import (
     PercentileData,
     ResultComparison,
     build_results_summary,
 )
-from tests.conftest import make_case
+from cobre_bridge.horizon import is_effectively_infinite
+
+if TYPE_CHECKING:
+    from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.diagnostics import Diagnostic
 
 # -------------------------------------------------------------------
-# Bounds comparison unit tests
+# Horizon bounds-helper unit tests
 # -------------------------------------------------------------------
 
 
-class TestBoundsHelpers:
+class TestHorizonBoundsHelpers:
     def test_is_effectively_infinite_big_m(self) -> None:
-        assert _is_effectively_infinite(99999.0)
-        assert _is_effectively_infinite(99990.0)
-        assert not _is_effectively_infinite(99989.0)
+        assert is_effectively_infinite(99999.0)
+        assert is_effectively_infinite(99990.0)
+        assert not is_effectively_infinite(99989.0)
 
     def test_is_effectively_infinite_ieee(self) -> None:
-        assert _is_effectively_infinite(float("inf"))
-        assert _is_effectively_infinite(float("-inf"))
+        assert is_effectively_infinite(float("inf"))
+        assert is_effectively_infinite(float("-inf"))
 
     def test_is_effectively_infinite_normal(self) -> None:
-        assert not _is_effectively_infinite(0.0)
-        assert not _is_effectively_infinite(1000.0)
-
-    def test_bounds_match_within_tolerance(self) -> None:
-        assert _bounds_match(10.0, 10.0005, 1e-3)
-        assert not _bounds_match(10.0, 10.002, 1e-3)
-
-    def test_bounds_match_both_inf(self) -> None:
-        assert _bounds_match(float("inf"), float("inf"), 1e-3)
-        assert not _bounds_match(float("inf"), float("-inf"), 1e-3)
-
-    def test_bounds_match_one_inf(self) -> None:
-        assert not _bounds_match(float("inf"), 10.0, 1e-3)
+        assert not is_effectively_infinite(0.0)
+        assert not is_effectively_infinite(1000.0)
 
 
 # -------------------------------------------------------------------
@@ -179,64 +170,6 @@ class TestReportFormatting:
 # -------------------------------------------------------------------
 
 
-def _make_bounds_for_colour() -> list[BoundComparison]:
-    """Four bound comparisons across two variables, mixing match/mismatch.
-
-    ``storage_max`` and ``generation_max`` each carry one match and one mismatch,
-    so both variable rows — and the Total — are expected red.
-    """
-    return [
-        BoundComparison(
-            entity_type="hydro",
-            entity_name="ITAIPU",
-            newave_code=10,
-            cobre_id=0,
-            stage=0,
-            variable="storage_max",
-            newave_value=29000.0,
-            cobre_value=29000.0,
-            diff=0.0,
-            match=True,
-        ),
-        BoundComparison(
-            entity_type="hydro",
-            entity_name="TUCURUI",
-            newave_code=20,
-            cobre_id=1,
-            stage=0,
-            variable="storage_max",
-            newave_value=50000.0,
-            cobre_value=49000.0,
-            diff=1000.0,
-            match=False,
-        ),
-        BoundComparison(
-            entity_type="thermal",
-            entity_name="ANGRA",
-            newave_code=30,
-            cobre_id=2,
-            stage=0,
-            variable="generation_max",
-            newave_value=1350.0,
-            cobre_value=1350.0,
-            diff=0.0,
-            match=True,
-        ),
-        BoundComparison(
-            entity_type="thermal",
-            entity_name="CUIABA",
-            newave_code=40,
-            cobre_id=3,
-            stage=1,
-            variable="generation_max",
-            newave_value=500.0,
-            cobre_value=450.0,
-            diff=50.0,
-            match=False,
-        ),
-    ]
-
-
 class _MakeTableSpy:
     """Spy that records every ``make_table`` call and delegates to the real one.
 
@@ -253,11 +186,6 @@ class _MakeTableSpy:
 
         self.records.append(dict(kwargs))
         return make_table(*args, **kwargs)  # type: ignore[arg-type]
-
-
-def _spy_make_table() -> _MakeTableSpy:
-    """Return a fresh :class:`_MakeTableSpy` for a single printer invocation."""
-    return _MakeTableSpy()
 
 
 class TestToleranceRowColouring:
@@ -299,7 +227,7 @@ class TestToleranceRowColouring:
         ]
         dataset = build_results_dataset(results, PercentileData(), 1e-2)
 
-        spy = _spy_make_table()
+        spy = _MakeTableSpy()
         with patch("cobre_bridge.comparators.report.make_table", side_effect=spy):
             print_results_summary_from_dataset(dataset, Path("/nw"), Path("/cobre"))
 
@@ -314,54 +242,6 @@ class TestToleranceRowColouring:
         # gen_diverge sorts before gen_within: red then green.
         assert expected[0] == compare_row_style(within_tol=False)  # gen_diverge
         assert expected[1] == compare_row_style(within_tol=True)  # gen_within
-
-    def test_bounds_row_colour_total_row_red_on_mismatch(self) -> None:
-        from cobre_bridge.comparators.analyze import build_bounds_dataset
-        from cobre_bridge.comparators.report import (
-            print_bounds_summary_from_dataset,
-        )
-        from cobre_bridge.ui.console import compare_row_style
-
-        dataset = build_bounds_dataset(_make_bounds_for_colour())
-
-        spy = _spy_make_table()
-        with patch("cobre_bridge.comparators.report.make_table", side_effect=spy):
-            print_bounds_summary_from_dataset(
-                dataset, Path("/nw"), Path("/cobre"), 1e-3
-            )
-
-        # Two make_table calls: by-entity-type (with Total) then by-variable.
-        type_styles = spy.records[0]["row_styles"]
-        var_styles = spy.records[1]["row_styles"]
-
-        counts = dataset.metadata["summary_counts"]
-        assert isinstance(counts, dict)
-        mismatches_all = counts["mismatches"]
-        by_entity_type = counts["by_entity_type"]
-        by_variable = counts["by_variable"]
-        assert isinstance(by_entity_type, dict)
-        assert isinstance(by_variable, dict)
-
-        # By-type styles: one per type (sorted) + the trailing Total row.
-        expected_type = [
-            compare_row_style(within_tol=by_entity_type[etype][1] == 0)
-            for etype in sorted(by_entity_type)
-        ]
-        expected_type.append(compare_row_style(within_tol=mismatches_all == 0))
-        assert type_styles == expected_type
-
-        # The Total row (last entry) is red: the fixture has mismatches.
-        assert type_styles[-1] == compare_row_style(within_tol=False)
-        assert mismatches_all != 0
-
-        # By-variable styles derived from summary_counts mismatch flags.
-        expected_var = [
-            compare_row_style(within_tol=by_variable[var][1] == 0)
-            for var in sorted(by_variable)
-        ]
-        assert var_styles == expected_var
-        # Both fixture variables have a mismatch -> both red.
-        assert all(s == compare_row_style(within_tol=False) for s in var_styles)
 
 
 # -------------------------------------------------------------------
@@ -379,126 +259,7 @@ def _first_nonempty_line(text: str) -> str:
 
 
 class TestCompareVerdictLine:
-    """The verdict headline leads both compare summary printers (stdout)."""
-
-    def test_verdict_line_leads_bounds_with_worst_clause(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from cobre_bridge.comparators.analyze import build_bounds_dataset
-        from cobre_bridge.comparators.bounds import BoundComparison
-        from cobre_bridge.comparators.report import (
-            print_bounds_summary_from_dataset,
-        )
-
-        # Two variables, both with at least one mismatch -> 0/2 within tol.
-        results = [
-            BoundComparison(
-                entity_type="hydro",
-                entity_name="ITAIPU",
-                newave_code=10,
-                cobre_id=0,
-                stage=0,
-                variable="storage_max",
-                newave_value=29000.0,
-                cobre_value=29000.0,
-                diff=0.0,
-                match=True,
-            ),
-            BoundComparison(
-                entity_type="hydro",
-                entity_name="TUCURUI",
-                newave_code=20,
-                cobre_id=1,
-                stage=0,
-                variable="storage_max",
-                newave_value=50000.0,
-                cobre_value=49000.0,
-                diff=1000.0,
-                match=False,
-            ),
-            BoundComparison(
-                entity_type="thermal",
-                entity_name="ANGRA",
-                newave_code=30,
-                cobre_id=2,
-                stage=0,
-                variable="generation_max",
-                newave_value=1350.0,
-                cobre_value=1350.0,
-                diff=0.0,
-                match=True,
-            ),
-            BoundComparison(
-                entity_type="thermal",
-                entity_name="CUIABA",
-                newave_code=40,
-                cobre_id=3,
-                stage=1,
-                variable="generation_max",
-                newave_value=500.0,
-                cobre_value=450.0,
-                diff=50.0,
-                match=False,
-            ),
-        ]
-        dataset = build_bounds_dataset(results)
-
-        print_bounds_summary_from_dataset(
-            dataset, Path("/fake/nw"), Path("/fake/cobre"), 1e-3
-        )
-
-        first = _first_nonempty_line(capsys.readouterr().out)
-        assert first.startswith("⚠ ")
-        assert "0/2 variables within tol" in first
-        assert "worst:" in first
-
-    def test_verdict_line_all_within_tol_no_worst_clause(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from cobre_bridge.comparators.analyze import build_bounds_dataset
-        from cobre_bridge.comparators.bounds import BoundComparison
-        from cobre_bridge.comparators.report import (
-            print_bounds_summary_from_dataset,
-        )
-
-        # Every comparison matches -> all variables within tol, no worst clause.
-        results = [
-            BoundComparison(
-                entity_type="hydro",
-                entity_name="ITAIPU",
-                newave_code=10,
-                cobre_id=0,
-                stage=0,
-                variable="storage_max",
-                newave_value=29000.0,
-                cobre_value=29000.0,
-                diff=0.0,
-                match=True,
-            ),
-            BoundComparison(
-                entity_type="thermal",
-                entity_name="ANGRA",
-                newave_code=30,
-                cobre_id=1,
-                stage=0,
-                variable="generation_max",
-                newave_value=1350.0,
-                cobre_value=1350.0,
-                diff=0.0,
-                match=True,
-            ),
-        ]
-        dataset = build_bounds_dataset(results)
-        variable_count = dataset.summary.height
-
-        print_bounds_summary_from_dataset(
-            dataset, Path("/fake/nw"), Path("/fake/cobre"), 1e-3
-        )
-
-        first = _first_nonempty_line(capsys.readouterr().out)
-        assert first.startswith("✓ ")
-        assert first == f"✓ {variable_count}/{variable_count} variables within tol"
-        assert "worst:" not in first
+    """The verdict headline leads the compare summary printer (stdout)."""
 
     def test_render_compare_verdict_empty_dataset(
         self, capsys: pytest.CaptureFixture[str]
@@ -550,16 +311,26 @@ class TestCompareVerdictExitCodes:
 
     @staticmethod
     def _patch_compare_context(monkeypatch: pytest.MonkeyPatch) -> None:
+        from tests.conftest import make_nw_files
+
+        # ``.files`` must be a real ``NewaveFiles`` dataclass (not a further
+        # MagicMock attribute) — ``hash_input_files`` reflects over it via
+        # ``dataclasses.fields``, which raises on a non-dataclass. The paths
+        # need not exist: a missing file degrades to a ``None`` hash/size.
         monkeypatch.setattr(
             "cobre_bridge.case.NewaveCase.from_directory",
-            classmethod(lambda cls, _dir: MagicMock(id_map=MagicMock())),
+            classmethod(
+                lambda cls, _dir: MagicMock(
+                    id_map=MagicMock(), files=make_nw_files(Path("nw"))
+                )
+            ),
         )
         monkeypatch.setattr(
             "cobre_bridge.comparators.alignment.build_entity_alignment",
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.cli._load_lines_json",
+            "cobre_bridge.comparators.cobre_readers.read_cobre_lines",
             lambda _dir: [],
         )
 
@@ -605,6 +376,183 @@ class TestCompareVerdictExitCodes:
 
 
 # -------------------------------------------------------------------
+# Compare diagnostics wiring (dx.collect() sink -> render + verdict)
+# -------------------------------------------------------------------
+
+
+def _fake_results_dataset() -> ComparisonDataset:
+    """One-row dataset built through the shared dataset-assembly kernel."""
+    from cobre_bridge.comparators.analyze import build_results_dataset
+
+    results = [
+        ResultComparison(
+            entity_type="hydro",
+            entity_name="ITAIPU",
+            newave_code=10,
+            cobre_id=0,
+            stage=0,
+            variable="generation_mw",
+            newave_value=100.0,
+            cobre_value=110.0,
+            abs_diff=10.0,
+            rel_diff=0.1,
+        ),
+    ]
+    return build_results_dataset(results, PercentileData(), 1e-2)
+
+
+def _fake_decomp_dataset() -> ComparisonDataset:
+    """Adds the ``metadata["unmapped"]`` key ``decomp_dataset_summary`` reads."""
+    dataset = _fake_results_dataset()
+    dataset.metadata["unmapped"] = {"hydro": [], "thermal": [], "bus": []}
+    return dataset
+
+
+def _dropped_plant_diagnostic() -> Diagnostic:
+    from cobre_bridge.diagnostics import Diagnostic, Severity
+
+    return Diagnostic(
+        code="test-dropped-plant",
+        severity=Severity.WARNING,
+        category="Test",
+        title="Dropped test plant",
+        summary="one plant was dropped for diagnostics-wiring coverage",
+    )
+
+
+class TestCompareDiagnosticsWiring:
+    """A ``Severity.WARNING`` emit() during dataset building must reach both
+    the ``--json`` envelope's ``diagnostics`` array and the non-``--json``
+    stderr render, on both compare tracks."""
+
+    @staticmethod
+    def _patch_decomp_case(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Patch ``DecompCase.from_directory`` so the manifest-hashing path
+        (``hash_input_files(decomp_case.files)``) reflects over a real
+        ``DecompFiles`` dataclass instead of failing on the fake deck dir."""
+        from tests.conftest import make_decomp_case
+
+        monkeypatch.setattr(
+            "cobre_bridge.decomp.case.DecompCase.from_directory",
+            classmethod(lambda cls, _dir: make_decomp_case(Path("decomp"))),
+        )
+
+    @staticmethod
+    def _invoke(argv: list[str]) -> Any:
+        from typer.testing import CliRunner
+
+        from cobre_bridge.cli import app
+
+        return CliRunner().invoke(app, argv)
+
+    def test_compare_newave_json_diagnostics_array_is_non_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge import diagnostics as dx
+
+        TestCompareVerdictExitCodes._patch_compare_context(monkeypatch)
+        diagnostic = _dropped_plant_diagnostic()
+
+        def _compare_results_with_diagnostic(**_kwargs: object) -> ComparisonDataset:
+            dx.emit(diagnostic)
+            return _fake_results_dataset()
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.results.compare_results",
+            _compare_results_with_diagnostic,
+        )
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        result = self._invoke(
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir), "--json"]
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["diagnostics"]
+        assert payload["diagnostics"][0]["code"] == diagnostic.code
+
+    def test_compare_decomp_json_diagnostics_array_is_non_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge import diagnostics as dx
+
+        self._patch_decomp_case(monkeypatch)
+        diagnostic = _dropped_plant_diagnostic()
+
+        def _build_decomp_dataset_with_diagnostic(
+            *_args: object, **_kwargs: object
+        ) -> ComparisonDataset:
+            dx.emit(diagnostic)
+            return _fake_decomp_dataset()
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+            _build_decomp_dataset_with_diagnostic,
+        )
+
+        result = self._invoke(
+            ["compare", "decomp", str(tmp_path), str(tmp_path), "--json"]
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["diagnostics"]
+        assert payload["diagnostics"][0]["code"] == diagnostic.code
+
+    def test_compare_newave_non_json_renders_diagnostic_title_on_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge import diagnostics as dx
+
+        TestCompareVerdictExitCodes._patch_compare_context(monkeypatch)
+        diagnostic = _dropped_plant_diagnostic()
+
+        def _compare_results_with_diagnostic(**_kwargs: object) -> ComparisonDataset:
+            dx.emit(diagnostic)
+            return _fake_results_dataset()
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.results.compare_results",
+            _compare_results_with_diagnostic,
+        )
+        cobre_dir = tmp_path / "cobre"
+        cobre_dir.mkdir()
+
+        result = self._invoke(
+            ["compare", "newave", str(tmp_path / "nw"), str(cobre_dir)]
+        )
+
+        assert result.exit_code == 0
+        assert diagnostic.title in result.stderr
+
+    def test_compare_decomp_non_json_renders_diagnostic_title_on_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge import diagnostics as dx
+
+        self._patch_decomp_case(monkeypatch)
+        diagnostic = _dropped_plant_diagnostic()
+
+        def _build_decomp_dataset_with_diagnostic(
+            *_args: object, **_kwargs: object
+        ) -> ComparisonDataset:
+            dx.emit(diagnostic)
+            return _fake_decomp_dataset()
+
+        monkeypatch.setattr(
+            "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+            _build_decomp_dataset_with_diagnostic,
+        )
+
+        result = self._invoke(["compare", "decomp", str(tmp_path), str(tmp_path)])
+
+        assert result.exit_code == 0
+        assert diagnostic.title in result.stderr
+
+
+# -------------------------------------------------------------------
 # HTML report tests
 # -------------------------------------------------------------------
 
@@ -621,7 +569,7 @@ class TestHtmlReport:
         )
         assert "<!DOCTYPE html>" in html
         assert "Test Report" in html
-        assert "plotly-2.35.2.min.js" in html
+        assert f"plotly-{get_plotlyjs_version()}.min.js" in html
         assert "<p>Hello</p>" in html
 
     def test_build_comparison_report_no_crash(self) -> None:
@@ -665,134 +613,11 @@ class TestHtmlReport:
         assert "Convergence" in html
 
 
-# -------------------------------------------------------------------
-# Bounds from inputs tests
-# -------------------------------------------------------------------
-
-
-class TestBoundsFromInputs:
-    """The bounds 'expected' side now delegates to the converters (ARCH-01).
-
-    These verify the delegation + reshape into the comparison dict, not an
-    independent re-derivation (which drifted and caused false positives).
-    """
-
-    def test_compute_hydro_bounds_reshapes_converter_table(
-        self, tmp_path: Path
-    ) -> None:
-        from cobre_bridge.comparators.bounds_from_inputs import compute_hydro_bounds
-
-        table = pa.table(
-            {
-                "hydro_id": pa.array([0, 0], pa.int32()),
-                "stage_id": pa.array([0, 1], pa.int32()),
-                "min_storage_hm3": pa.array([10.0, None], pa.float64()),
-                "max_storage_hm3": pa.array([100.0, 110.0], pa.float64()),
-                "min_turbined_m3s": pa.array([None, None], pa.float64()),
-                "max_turbined_m3s": pa.array([None, None], pa.float64()),
-                "min_outflow_m3s": pa.array([5.0, None], pa.float64()),
-                "min_generation_mw": pa.array([7.0, 7.0], pa.float64()),
-            }
-        )
-        case = make_case(tmp_path)
-        with patch(
-            "cobre_bridge.converters.hydro.convert_storage_bounds",
-            return_value=table,
-        ):
-            result = compute_hydro_bounds(case, MagicMock())
-
-        assert result[(0, 0, "storage_min")] == 10.0
-        assert result[(0, 0, "storage_max")] == 100.0
-        assert result[(0, 1, "storage_max")] == 110.0
-        assert result[(0, 0, "outflow_min")] == 5.0
-        # None cells are skipped; hydro generation (GHMIN) is intentionally
-        # not part of the bounds comparison.
-        assert (0, 1, "storage_min") not in result
-        assert not any(name == "generation_min" for (_, _, name) in result)
-
-    def test_compute_hydro_bounds_empty_when_converter_returns_none(
-        self, tmp_path: Path
-    ) -> None:
-        from cobre_bridge.comparators.bounds_from_inputs import compute_hydro_bounds
-
-        case = make_case(tmp_path)
-        with patch(
-            "cobre_bridge.converters.hydro.convert_storage_bounds", return_value=None
-        ):
-            assert compute_hydro_bounds(case, MagicMock()) == {}
-
-    def test_compute_thermal_bounds_no_expt_no_manutt(self, tmp_path: Path) -> None:
-        """Empty dict when neither expt.dat nor manutt.dat present (path guard)."""
-        from cobre_bridge.comparators.bounds_from_inputs import compute_thermal_bounds
-
-        case = make_case(tmp_path)  # expt/manutt default to None
-        assert compute_thermal_bounds(case, MagicMock()) == {}
-
-    def test_compute_line_bounds_reshapes_converter_table(self, tmp_path: Path) -> None:
-        from cobre_bridge.comparators.bounds_from_inputs import compute_line_bounds
-
-        table = pa.table(
-            {
-                "line_id": pa.array([0], pa.int32()),
-                "stage_id": pa.array([0], pa.int32()),
-                "direct_mw": pa.array([500.0], pa.float64()),
-                "reverse_mw": pa.array([300.0], pa.float64()),
-                "block_id": pa.array([None], pa.int32()),
-            }
-        )
-        case = make_case(tmp_path)
-        with patch(
-            "cobre_bridge.converters.network.convert_line_bounds",
-            return_value=table,
-        ):
-            result = compute_line_bounds(case, MagicMock())
-
-        assert result[(0, 0, "direct_flow_max")] == 500.0
-        assert result[(0, 0, "reverse_flow_max")] == 300.0
-
-    def test_compute_line_bounds_ignores_per_block_override_rows(
-        self, tmp_path: Path
-    ) -> None:
-        """A per-block override row must not shadow the stage-level base row.
-
-        Regression test: before the ``block_id is None`` filter was added,
-        building the result dict by iterating every row (base row then block
-        rows) let the last-seen row for a given (line_id, stage_id) silently
-        overwrite the base capacity — collapsing to a block's absolute MW
-        instead of the line's declared capacity.
-        """
-        from cobre_bridge.comparators.bounds_from_inputs import compute_line_bounds
-
-        table = pa.table(
-            {
-                "line_id": pa.array([0, 0], pa.int32()),
-                "stage_id": pa.array([0, 0], pa.int32()),
-                "direct_mw": pa.array([500.0, 450.0], pa.float64()),
-                "reverse_mw": pa.array([300.0, 270.0], pa.float64()),
-                "block_id": pa.array([None, 0], pa.int32()),
-            }
-        )
-        case = make_case(tmp_path)
-        with patch(
-            "cobre_bridge.converters.network.convert_line_bounds",
-            return_value=table,
-        ):
-            result = compute_line_bounds(case, MagicMock())
-
-        # The base row's capacity (500.0 / 300.0), not the block row's
-        # (450.0 / 270.0), must survive.
-        assert result[(0, 0, "direct_flow_max")] == 500.0
-        assert result[(0, 0, "reverse_flow_max")] == 300.0
-        assert len(result) == 2
-
-
 class TestCompareHydrosProductivity:
     """Derived operational productivity = generation / turbined (m³/s)."""
 
     @staticmethod
     def _run():
-        import polars as pl
-
         from cobre_bridge.comparators.results import _compare_hydros
 
         # stage column min = 9 → offset 9 → stages map to 0 (turb>0) and 1
@@ -857,8 +682,6 @@ class TestOverviewCostCharts:
 
     @staticmethod
     def _data():
-        import polars as pl
-
         # nw_offset will be 0 (min stage == 0). Distinctive values so the
         # substring assertions can't false-match elsewhere in the plotly JSON.
         nw_sin = pl.DataFrame(
@@ -902,8 +725,6 @@ class TestOverviewCostCharts:
         assert "40.0" in html and "-40.0" in html
 
     def test_stage_costs_reader_includes_thermal_cost(self, tmp_path: Path) -> None:
-        import polars as pl
-
         from cobre_bridge.comparators.cobre_readers import read_cobre_stage_costs
 
         d = tmp_path / "simulation" / "costs" / "scenario_id=0000"
@@ -932,8 +753,6 @@ class TestOverviewCostCharts:
     def test_stage_costs_reader_folds_anticipated_into_thermal_total(
         self, tmp_path: Path
     ) -> None:
-        import polars as pl
-
         from cobre_bridge.comparators.cobre_readers import read_cobre_stage_costs
 
         d = tmp_path / "simulation" / "costs" / "scenario_id=0000"
@@ -957,8 +776,6 @@ class TestOverviewCostCharts:
         assert row["thermal_cost_total"] == pytest.approx(15.0)
 
     def test_thermal_cost_chart_includes_anticipated_in_cobre_series(self) -> None:
-        import polars as pl
-
         from cobre_bridge.comparators.charts import thermal_cost_chart
 
         nw_sin = pl.DataFrame(
@@ -1159,7 +976,6 @@ class TestComparisonReportIntegration:
     def _make_results() -> list[ResultComparison]:
         """Build a representative set of comparison results across entity types."""
         return [
-            # Hydro entries — two stages
             ResultComparison(
                 entity_type="hydro",
                 entity_name="PLANT_A",
@@ -1184,7 +1000,6 @@ class TestComparisonReportIntegration:
                 abs_diff=10.0,
                 rel_diff=0.002,
             ),
-            # Thermal entry
             ResultComparison(
                 entity_type="thermal",
                 entity_name="GAS_A",
@@ -1197,7 +1012,6 @@ class TestComparisonReportIntegration:
                 abs_diff=2.0,
                 rel_diff=0.007,
             ),
-            # Bus entry
             ResultComparison(
                 entity_type="bus",
                 entity_name="SE",
@@ -1210,7 +1024,6 @@ class TestComparisonReportIntegration:
                 abs_diff=2.0,
                 rel_diff=0.013,
             ),
-            # Convergence entry
             ResultComparison(
                 entity_type="convergence",
                 entity_name="iteration_1",
@@ -1228,8 +1041,6 @@ class TestComparisonReportIntegration:
     @staticmethod
     def _make_percentile_data() -> PercentileData:
         """Build a PercentileData with minimal non-empty polars DataFrames."""
-        import polars as pl
-
         hydro_df = pl.DataFrame(
             {
                 "entity_id": [0, 0, 0],
@@ -1294,12 +1105,12 @@ class TestCompareResultsReturnsDataset:
 
     @staticmethod
     def _patch_all_readers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import polars as pl
+        import pandas as pd
 
         cr = "cobre_bridge.comparators.cobre_readers."
         nr = "cobre_bridge.comparators.newave_readers."
         empty_pl = pl.DataFrame
-        empty_pd = lambda *a, **k: __import__("pandas").DataFrame()  # noqa: E731
+        empty_pd = lambda *a, **k: pd.DataFrame()  # noqa: E731
 
         # The source-model MEDIAS / nwlistop readers return empty (no result
         # files in the case dir); the MEDIAS block still runs (no saidas/ gate).
@@ -1397,12 +1208,10 @@ class TestCompareResultsReturnsDataset:
 
         assert isinstance(out, ComparisonDataset)
         out.validate()
-        # The render-only carry-overs are present in-memory but absent from
-        # the serialized artifact.
-        assert "results" in out.metadata
+        # The render inputs round-trip through the serialized artifact's
+        # nested render payload; "results" never appears as a top-level key.
+        assert out.render.results == []
         paths = out.to_dir(tmp_path / "artifacts")
-        import json
-
         written = json.loads(paths[2].read_text(encoding="utf-8"))
         assert "results" not in written
         assert "top_divergences" in written
@@ -1419,8 +1228,6 @@ class TestProductivityDetail:
     @staticmethod
     def _write_hydros_json(tmp_path: Path) -> None:
         """Write a tiny ``system/hydros.json`` (building blocks only)."""
-        import json
-
         system = tmp_path / "system"
         system.mkdir(parents=True, exist_ok=True)
         (system / "hydros.json").write_text(
@@ -1515,8 +1322,6 @@ class TestProductivityDetail:
         cobre-bridge *static* values (here close to the pmo side, so the
         scatters cluster on y = x).
         """
-        import polars as pl
-
         from cobre_bridge.comparators.analyze import _PRODUCTIVITY_DETAIL_SCHEMA
 
         return pl.DataFrame(
@@ -1558,13 +1363,9 @@ class TestProductivityDetail:
         from cobre_bridge.productivity import compute_productivity
 
         alignment = EntityAlignment(
-            hydros=[
-                HydroEntity(
-                    newave_code=6, cobre_id=69, name="ALPHA", has_reservoir=True
-                )
-            ]
+            hydros=[HydroEntity(newave_code=6, cobre_id=69, name="ALPHA")]
         )
-        nw_detail = __import__("polars").DataFrame(
+        nw_detail = pl.DataFrame(
             {
                 "plant_name": ["ALPHA"],
                 "altura_min": [0.6926],
@@ -1631,7 +1432,6 @@ class TestProductivityDetail:
         """Daily-regulation ('D') plants compare against volume_referencia, not
         the dead-storage volume_minimo/maximo the converter freezes them off."""
         import pandas as pd
-        import polars as pl
 
         from cobre_bridge.comparators.alignment import (
             EntityAlignment,
@@ -1640,9 +1440,7 @@ class TestProductivityDetail:
         from cobre_bridge.comparators.analyze import build_productivity_detail
 
         alignment = EntityAlignment(
-            hydros=[
-                HydroEntity(newave_code=4, cobre_id=7, name="ROR", has_reservoir=False)
-            ]
+            hydros=[HydroEntity(newave_code=4, cobre_id=7, name="ROR")]
         )
         cadastro = pd.DataFrame(
             {
@@ -1691,8 +1489,6 @@ class TestProductivityDetail:
             assert "y = x" in html
 
     def test_comparison_scatter_empty_and_bad_kind(self) -> None:
-        import polars as pl
-
         from cobre_bridge.comparators.charts import (
             productivity_comparison_scatter,
         )
@@ -1801,8 +1597,6 @@ class TestEvaluateLhsCobre:
 
     def test_evaluates_lhs_from_a_real_simulation_lazyframe(self) -> None:
         """A present simulation (LazyFrame, not None) must evaluate, not raise."""
-        import polars as pl
-
         from cobre_bridge.comparators.constraints_compare import evaluate_lhs_cobre
 
         hydros = pl.DataFrame(
@@ -1927,8 +1721,6 @@ class TestGenericConstraintF3Loaders:
         assert df["bound_upper"].to_list() == [None]
 
     def test_constraints_loader_parses_sense_free_json(self, tmp_path: Path) -> None:
-        import json
-
         from cobre_bridge.comparators.constraints_compare import (
             _load_generic_constraints,
         )
@@ -2079,8 +1871,6 @@ class TestConstraintsChartShapeLabelFromBounds:
     field on the (now sense-free) constraint dict."""
 
     def test_chart_title_uses_shape_derived_from_bounds(self) -> None:
-        import polars as pl
-
         from cobre_bridge.comparators.charts import constraints_comparison_chart
         from cobre_bridge.comparators.constraints_compare import ResolvedBound
 
@@ -2100,8 +1890,6 @@ class TestConstraintsChartShapeLabelFromBounds:
         assert "VminOP_X (\\u003e=)" in html
 
     def test_chart_title_defaults_when_no_bound_data(self) -> None:
-        import polars as pl
-
         from cobre_bridge.comparators.charts import constraints_comparison_chart
 
         constraints = [{"id": 0, "name": "RE_1"}]
@@ -2135,15 +1923,20 @@ class TestNoSenseOrSingleBoundColumnRemainsInComparators:
     `bound` column. Matches only genuine column/dict *access* patterns
     (``.col("bound")``, ``row["bound"]``, ``.get("bound"``) — column *names*
     that merely contain "bound" as a substring (``bound_lower``,
-    ``bound_upper``) and unrelated string literals (e.g. charts.py's
-    ``"legendgroup": "bound"`` trace label) are not matches.
+    ``bound_upper``) and unrelated string literals (e.g. the charts
+    package's ``"legendgroup": "bound"`` trace label) are not matches.
     """
 
     @pytest.mark.parametrize(
         "relative_path",
         [
             "src/cobre_bridge/comparators/constraints_compare.py",
-            "src/cobre_bridge/comparators/charts.py",
+            "src/cobre_bridge/comparators/charts/__init__.py",
+            "src/cobre_bridge/comparators/charts/_shared.py",
+            "src/cobre_bridge/comparators/charts/costs.py",
+            "src/cobre_bridge/comparators/charts/convergence.py",
+            "src/cobre_bridge/comparators/charts/performance.py",
+            "src/cobre_bridge/comparators/charts/spillage.py",
             "src/cobre_bridge/comparators/results.py",
         ],
     )

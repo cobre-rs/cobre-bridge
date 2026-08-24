@@ -44,6 +44,7 @@ from cobre_bridge.decomp.network import _LINE_BOUNDS_SCHEMA
 from cobre_bridge.decomp.pipeline import ConversionReport, DecompFiles
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import _THERMAL_COST_SCHEMA, ThermalBounds
+from tests.conftest import make_decomp_case
 
 # ---------------------------------------------------------------------------
 # resolve_libs_electrical_path -- pure path resolution, no pipeline involved
@@ -416,6 +417,19 @@ def _run_libs_pipeline(
     dadger = _MockDadger()
     hidr = _hidr_frame()
     calendar = _calendar()
+    case = make_decomp_case(
+        files,
+        dadger=dadger,
+        hidr=hidr,
+        id_map=_ID_MAP,
+        calendar=calendar,
+        renovaveis=None,
+        dadgnl=None,
+        polinjus=None,
+        libs_restricao_eletrica=(
+            object() if libs_restricao_eletrica is not None else None
+        ),
+    )
 
     productivity_table = pa.table(
         {"equivalent_productivity_mw_per_m3s": pa.array([0.5, 0.6], type=pa.float64())}
@@ -456,13 +470,8 @@ def _run_libs_pipeline(
     ]
 
     patches: dict[str, object] = {
-        "cobre_bridge.decomp.pipeline.discover_decomp_files": files,
-        "cobre_bridge.decomp.pipeline.Dadger.read": dadger,
+        "cobre_bridge.decomp.pipeline.DecompCase.from_directory": case,
         "cobre_bridge.decomp.pipeline.Vazoes.read": object(),
-        "cobre_bridge.decomp.pipeline.hydro_conv.read_hidr": hidr,
-        "cobre_bridge.decomp.pipeline.DecompIdMap.from_dadger": _ID_MAP,
-        "cobre_bridge.decomp.pipeline"
-        ".temporal_conv.operative_calendar_from_dadger": calendar,
         "cobre_bridge.decomp.pipeline.scenarios_conv.terminal_fan_probabilities": [1.0],
         "cobre_bridge.decomp.pipeline.config_conv.convert_config": {},
         "cobre_bridge.decomp.pipeline.network_conv._bus_deficit_costs": {},
@@ -511,16 +520,6 @@ def _run_libs_pipeline(
     with ExitStack() as stack:
         for target, value in patches.items():
             stack.enter_context(patch(target, return_value=value))
-        # `Restricoes.read` is a local (deferred) import inside
-        # `_convert_decomp_case_impl`, so it must be patched at its origin,
-        # not via a `cobre_bridge.decomp.pipeline` attribute path -- it is
-        # only ever reached when `files.libs_restricao_eletrica` is set, and
-        # `read_libs_electrical` above is independently patched to ignore
-        # its `restricoes` argument, so the sentinel return value here is
-        # never inspected.
-        stack.enter_context(
-            patch("idecomp.libs.restricoes.Restricoes.read", return_value=object())
-        )
         dst = tmp_path / "case"
         report = decomp_pipeline.convert_decomp_case(Path("unused-src"), dst)
     if diagnostics_out is not None:
@@ -671,11 +670,10 @@ class TestRealDeckValidation:
         converted case exits 0.
 
         ``cobre validate`` is a load/schema gate, not a solve -- it does NOT
-        prove LP feasibility (see ticket-013's documented B1 residual: the
-        ``IV`` transshipment bus carries ``carga_ande`` with no deficit
-        curve, so an ANDE shortfall would be an LP infeasibility rather than
-        a priced deficit; benign on this deck per epic-02's own findings,
-        but not exercised by a bare ``validate``)."""
+        prove LP feasibility. ``carga_ande`` nets onto Itaipu's own SE bus
+        (not the ``IV`` transshipment bus, which carries no load), so an
+        ANDE shortfall is absorbed by SE's own deficit curve rather than
+        risking an infeasibility on a bus with none."""
         from cobre_bridge.decomp.pipeline import convert_decomp_case
 
         dst = tmp_path / "decomp-abr-26-lpp-converted"

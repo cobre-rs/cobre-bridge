@@ -6,23 +6,27 @@ Synthetic ``ConstraintTerm``/``ConstraintRecord``/``StageBounds``/
 branch (including the ``bus=`` selector and the fail-loud raises), the
 ``FI``-interchange line resolver (``build_fi_line_map``/``resolve_fi_term``,
 direct/reverse/no-line/unknown-name), the ``_format_expression``
-coefficient-formatting rules, ``big_m_penalty``, the ``_GenericBuilder``
-two-sided/one-sided/empty round-trips, ``emit_re_generics``'s per-record
+coefficient-formatting rules, ``big_m_penalty``, the ``slots_from_record``
+slot-enumeration helper, ``emit_re_generics``'s per-record
 resolve-or-skip-whole-constraint behaviour (mixed hydro+interchange,
 GNL/unknown-thermal, frequency-split, no-line ``FI``, and an all-skipped
 census), and ``emit_rhq_rhv_generics``'s RHQ flow-mix/``QBOM``-station and
-RHV multi-``VARM`` additive-floor/volume-tipo-deferral behaviour.
+RHV multi-``VARM`` additive-floor/volume-tipo-deferral behaviour. The
+``GenericConstraintBuilder`` itself is covered by
+``tests/test_generic_constraint_builder.py``.
 """
 
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from cobre_bridge import diagnostics as dx
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintCensus,
     ConstraintRecord,
@@ -30,9 +34,7 @@ from cobre_bridge.decomp.constraint_registers import (
     StageBounds,
 )
 from cobre_bridge.decomp.constraints import (
-    _GENERIC_BOUNDS_SCHEMA,
     _format_expression,
-    _GenericBuilder,
     _hydro_generation_token,
     _variable_token,
     big_m_penalty,
@@ -40,10 +42,12 @@ from cobre_bridge.decomp.constraints import (
     emit_re_generics,
     emit_rhq_rhv_generics,
     resolve_fi_term,
+    slots_from_record,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
 from cobre_bridge.diagnostics import Severity
+from tests.conftest import make_decomp_case
 
 
 def _stage(index: int, n_blocks: int) -> OperativeStage:
@@ -54,6 +58,10 @@ def _stage(index: int, n_blocks: int) -> OperativeStage:
         season_id=6,
         block_hours=tuple(168.0 / n_blocks for _ in range(n_blocks)),
     )
+
+
+def _case(calendar: list[OperativeStage]) -> DecompCase:
+    return make_decomp_case(Path("unused"), calendar=calendar)
 
 
 @pytest.fixture
@@ -289,7 +297,7 @@ def test_big_m_penalty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _GenericBuilder
+# slots_from_record
 # ---------------------------------------------------------------------------
 
 
@@ -307,126 +315,22 @@ def _hq_record(
     )
 
 
-def test_generic_builder_two_sided_round_trip() -> None:
-    """A genuine band (both sides bounded) is ONE F3 constraint with both
-    endpoints on the same row — no ``<=``/``>=`` id pair (AC1/AC2)."""
+def test_slots_from_record_two_sided_round_trip() -> None:
+    """A genuine band (both sides bounded) yields one slot carrying both
+    endpoints."""
     record = _hq_record(
         constraint_id=3,
         bounds={0: StageBounds(lower=(10.0,), upper=(90.0,))},
     )
     calendar = [_stage(0, 1)]
-    builder = _GenericBuilder(start_id=7)
 
-    builder.add_two_sided(
-        name="HQ_3",
-        description="…",
-        expression="hydro_outflow(0)",
-        big_m=45000.0,
-        record=record,
-        calendar=calendar,
-    )
-    result = builder.result()
-
-    assert result is not None
-    assert len(result.constraints) == 1
-    constraint = result.constraints[0]
-    assert constraint["id"] == 7
-    assert set(constraint) == {"id", "name", "description", "expression", "slack"}
-    assert constraint["slack"] == {"enabled": True, "penalty": 45000.0}
-    assert constraint["expression"] == "hydro_outflow(0)"
-
-    assert result.bounds.schema.equals(_GENERIC_BOUNDS_SCHEMA)
-    rows = result.bounds.to_pylist()
-    assert len(rows) == 1
-    assert rows[0]["constraint_id"] == 7
-    assert rows[0]["stage_id"] == 0
-    assert rows[0]["block_id"] == 0
-    assert rows[0]["bound_lower"] == 10.0
-    assert rows[0]["bound_upper"] == 90.0
+    assert slots_from_record(record, calendar) == [(0, 0, 10.0, 90.0)]
 
 
-def test_generic_builder_upper_only_yields_single_le_constraint() -> None:
-    record = _hq_record(
-        constraint_id=3,
-        bounds={0: StageBounds(lower=(None,), upper=(90.0,))},
-    )
-    calendar = [_stage(0, 1)]
-    builder = _GenericBuilder(start_id=0)
-
-    builder.add_two_sided(
-        name="HQ_3",
-        description="…",
-        expression="hydro_outflow(0)",
-        big_m=45000.0,
-        record=record,
-        calendar=calendar,
-    )
-    result = builder.result()
-
-    assert result is not None
-    assert len(result.constraints) == 1
-    assert result.constraints[0]["id"] == 0
-    assert "sense" not in result.constraints[0]
-    rows = result.bounds.to_pylist()
-    assert len(rows) == 1
-    assert rows[0]["bound_upper"] == 90.0
-    assert rows[0]["bound_lower"] is None
-
-
-def test_generic_builder_lower_only_yields_single_ge_constraint() -> None:
-    record = _hq_record(
-        constraint_id=3,
-        bounds={0: StageBounds(lower=(10.0,), upper=(None,))},
-    )
-    calendar = [_stage(0, 1)]
-    builder = _GenericBuilder(start_id=0)
-
-    builder.add_two_sided(
-        name="HQ_3",
-        description="…",
-        expression="hydro_outflow(0)",
-        big_m=45000.0,
-        record=record,
-        calendar=calendar,
-    )
-    result = builder.result()
-
-    assert result is not None
-    assert len(result.constraints) == 1
-    assert result.constraints[0]["id"] == 0
-    assert "sense" not in result.constraints[0]
-    rows = result.bounds.to_pylist()
-    assert len(rows) == 1
-    assert rows[0]["bound_lower"] == 10.0
-    assert rows[0]["bound_upper"] is None
-
-
-def test_generic_builder_all_unbounded_yields_no_result() -> None:
-    record = _hq_record(
-        constraint_id=3,
-        bounds={0: StageBounds(lower=(None,), upper=(1e21,))},
-    )
-    calendar = [_stage(0, 1)]
-    builder = _GenericBuilder(start_id=0)
-
-    builder.add_two_sided(
-        name="HQ_3",
-        description="…",
-        expression="hydro_outflow(0)",
-        big_m=45000.0,
-        record=record,
-        calendar=calendar,
-    )
-
-    assert builder.result() is None
-
-
-def test_generic_builder_no_calls_yields_none() -> None:
-    assert _GenericBuilder(start_id=0).result() is None
-
-
-def test_generic_builder_per_block_clamp_to_calendar() -> None:
-    """A 5-slot LU-style bounds row on a 1-block stage only emits block 0."""
+def test_slots_from_record_per_block_clamp_to_calendar() -> None:
+    """A 5-slot LU-style bounds row on a 1-block stage only emits block 0 —
+    the per-block clamp is to ``calendar[stage].block_hours``, not the
+    (up-to-5-wide) ``StageBounds`` tuple width."""
     record = _hq_record(
         constraint_id=3,
         bounds={
@@ -437,32 +341,14 @@ def test_generic_builder_per_block_clamp_to_calendar() -> None:
         },
     )
     calendar = [_stage(0, 1)]
-    builder = _GenericBuilder(start_id=0)
 
-    builder.add_two_sided(
-        name="HQ_3",
-        description="…",
-        expression="hydro_outflow(0)",
-        big_m=45000.0,
-        record=record,
-        calendar=calendar,
-    )
-    result = builder.result()
-
-    assert result is not None
-    rows = result.bounds.to_pylist()
-    assert {r["block_id"] for r in rows} == {0}
-    # Only block 0's slot survives the clamp, so exactly one row — carrying
-    # both endpoints, since block 0 is bounded on both sides.
-    assert len(rows) == 1
-    assert rows[0]["bound_lower"] == 1.0
-    assert rows[0]["bound_upper"] == 10.0
+    assert slots_from_record(record, calendar) == [(0, 0, 1.0, 10.0)]
 
 
-def test_generic_builder_bounded_slot_only_beyond_block_count_emits_no_orphan() -> None:
-    """A bounded slot lying only beyond the stage's real block count is clamped
-    away, so no constraint header is emitted — a constraint dict must never be
-    added without a companion bound row (header ⟺ rows coherence)."""
+def test_slots_from_record_bounded_value_beyond_block_count_dropped() -> None:
+    """A bounded value lying only beyond the stage's real block count is
+    clamped away entirely — no slot carries it, so a caller can never build
+    an orphan constraint (one with no companion bound row) from it."""
     record = _hq_record(
         constraint_id=9,
         # block 0 is unbounded; the only bounded value (500.0) sits in slot 1,
@@ -470,22 +356,11 @@ def test_generic_builder_bounded_slot_only_beyond_block_count_emits_no_orphan() 
         bounds={0: StageBounds(lower=(None, None), upper=(None, 500.0))},
     )
     calendar = [_stage(0, 1)]
-    builder = _GenericBuilder(start_id=0)
 
-    builder.add_two_sided(
-        name="HQ_9",
-        description="…",
-        expression="hydro_outflow(0)",
-        big_m=45000.0,
-        record=record,
-        calendar=calendar,
-    )
-
-    # No bounded slot survives the clamp → no constraint, no orphan RHS.
-    assert builder.result() is None
+    assert slots_from_record(record, calendar) == [(0, 0, None, None)]
 
 
-def test_generic_builder_stage_level_emits_null_block_id() -> None:
+def test_slots_from_record_stage_level_emits_null_block_id() -> None:
     record = ConstraintRecord(
         family="HV",
         constraint_id=7,
@@ -496,57 +371,26 @@ def test_generic_builder_stage_level_emits_null_block_id() -> None:
         per_block=False,
     )
     calendar = [_stage(0, 1)]
-    builder = _GenericBuilder(start_id=0)
 
-    builder.add_two_sided(
-        name="HV_7",
-        description="…",
-        expression="hydro_storage(0)",
-        big_m=45000.0,
-        record=record,
-        calendar=calendar,
+    assert slots_from_record(record, calendar) == [(0, None, 25.0, 50.0)]
+
+
+def test_slots_from_record_multi_stage_preserves_bounds_order() -> None:
+    """Slots are enumerated one stage at a time, in ``record.bounds``
+    iteration order."""
+    record = _hq_record(
+        constraint_id=3,
+        bounds={
+            0: StageBounds(lower=(10.0,), upper=(90.0,)),
+            1: StageBounds(lower=(20.0,), upper=(80.0,)),
+        },
     )
-    result = builder.result()
+    calendar = [_stage(0, 1), _stage(1, 1)]
 
-    assert result is not None
-    rows = result.bounds.to_pylist()
-    assert all(r["block_id"] is None for r in rows)
-
-
-def test_generic_builder_ids_thread_across_calls() -> None:
-    """A shared builder assigns strictly increasing ids across records."""
-    builder = _GenericBuilder(start_id=7)
-    record_a = _hq_record(
-        constraint_id=3, bounds={0: StageBounds(lower=(10.0,), upper=(90.0,))}
-    )
-    record_b = _hq_record(
-        constraint_id=4, bounds={0: StageBounds(lower=(None,), upper=(80.0,))}
-    )
-    calendar = [_stage(0, 1)]
-
-    builder.add_two_sided(
-        name="HQ_3",
-        description="…",
-        expression="hydro_outflow(0)",
-        big_m=45000.0,
-        record=record_a,
-        calendar=calendar,
-    )
-    builder.add_two_sided(
-        name="HQ_4",
-        description="…",
-        expression="hydro_outflow(1)",
-        big_m=45000.0,
-        record=record_b,
-        calendar=calendar,
-    )
-    result = builder.result()
-
-    assert result is not None
-    # record_a is genuinely two-sided (one id under F3); record_b is
-    # upper-only (also one id) -> two ids total, not three.
-    ids = sorted(c["id"] for c in result.constraints)
-    assert ids == [7, 8]
+    assert slots_from_record(record, calendar) == [
+        (0, 0, 10.0, 90.0),
+        (1, 0, 20.0, 80.0),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +429,11 @@ def test_emit_re_generics_mixed_hydro_interchange_round_trip(
     calendar = [_stage(0, 1)]
 
     result = emit_re_generics(
-        census, id_map, line_map, big_m=45000.0, calendar=calendar, start_id=0
+        _case(calendar),
+        id_map,
+        census=census,
+        line_map=line_map,
+        big_m=45000.0,
     )
 
     assert result is not None
@@ -618,7 +466,11 @@ def test_emit_re_generics_gnl_thermal_skips_and_warns(id_map: DecompIdMap) -> No
 
     with dx.collect() as collected:
         result = emit_re_generics(
-            census, id_map, {}, big_m=45000.0, calendar=calendar, start_id=0
+            _case(calendar),
+            id_map,
+            census=census,
+            line_map={},
+            big_m=45000.0,
         )
 
     assert result is None
@@ -648,7 +500,11 @@ def test_emit_re_generics_frequency_split_skips_and_warns(
 
     with dx.collect() as collected:
         result = emit_re_generics(
-            census, id_map, {}, big_m=45000.0, calendar=calendar, start_id=0
+            _case(calendar),
+            id_map,
+            census=census,
+            line_map={},
+            big_m=45000.0,
         )
 
     assert result is None
@@ -680,7 +536,11 @@ def test_emit_re_generics_fi_no_line_skips(id_map: DecompIdMap) -> None:
 
     with dx.collect() as collected:
         result = emit_re_generics(
-            census, id_map, {}, big_m=45000.0, calendar=calendar, start_id=0
+            _case(calendar),
+            id_map,
+            census=census,
+            line_map={},
+            big_m=45000.0,
         )
 
     assert result is None
@@ -738,7 +598,11 @@ def test_emit_re_generics_all_records_skipped_returns_none(
 
     with dx.collect() as collected:
         result = emit_re_generics(
-            census, id_map, {}, big_m=45000.0, calendar=calendar, start_id=0
+            _case(calendar),
+            id_map,
+            census=census,
+            line_map={},
+            big_m=45000.0,
         )
 
     assert result is None
@@ -791,13 +655,12 @@ def test_emit_rhq_rhv_generics_rhq_multi_term_round_trip(
     calendar = [_stage(0, 1)]
 
     result = emit_rhq_rhv_generics(
-        census,
+        _case(calendar),
         id_map,
+        census=census,
         pumping_station_ids={},
         effective=unused_effective,
         big_m=45000.0,
-        calendar=calendar,
-        start_id=0,
     )
 
     assert result is not None
@@ -829,13 +692,12 @@ def test_emit_rhq_rhv_generics_rhq_single_qbom_via_pumping_map(
     calendar = [_stage(0, 1)]
 
     result = emit_rhq_rhv_generics(
-        census,
+        _case(calendar),
         id_map,
+        census=census,
         pumping_station_ids={2: 1},
         effective=unused_effective,
         big_m=45000.0,
-        calendar=calendar,
-        start_id=0,
     )
 
     assert result is not None
@@ -861,13 +723,12 @@ def test_emit_rhq_rhv_generics_rhq_qbom_no_station_skips_and_warns(
 
     with dx.collect() as collected:
         result = emit_rhq_rhv_generics(
-            census,
+            _case(calendar),
             id_map,
+            census=census,
             pumping_station_ids={},
             effective=unused_effective,
             big_m=45000.0,
-            calendar=calendar,
-            start_id=0,
         )
 
     assert result is None
@@ -897,13 +758,12 @@ def test_emit_rhq_rhv_generics_rhv_multi_varm_additive_floor() -> None:
     calendar = [_stage(0, 1)]
 
     result = emit_rhq_rhv_generics(
-        census,
+        _case(calendar),
         id_map,
+        census=census,
         pumping_station_ids={},
         effective=effective,
         big_m=45000.0,
-        calendar=calendar,
-        start_id=0,
     )
 
     assert result is not None
@@ -942,13 +802,12 @@ def test_emit_rhq_rhv_generics_rhv_varm_uncadastred_skips_and_warns() -> None:
 
     with dx.collect() as collected:
         result = emit_rhq_rhv_generics(
-            census,
+            _case(calendar),
             id_map,
+            census=census,
             pumping_station_ids={},
             effective=effective,
             big_m=45000.0,
-            calendar=calendar,
-            start_id=0,
         )
 
     assert result is None
@@ -975,13 +834,12 @@ def test_emit_rhq_rhv_generics_rhv_volume_tipo_deferred_skips_and_warns(
 
     with dx.collect() as collected:
         result = emit_rhq_rhv_generics(
-            census,
+            _case(calendar),
             id_map,
+            census=census,
             pumping_station_ids={},
             effective=unused_effective,
             big_m=45000.0,
-            calendar=calendar,
-            start_id=0,
         )
 
     assert result is None

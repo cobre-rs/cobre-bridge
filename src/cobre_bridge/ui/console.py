@@ -39,7 +39,7 @@ from rich.text import Text
 
 from cobre_bridge.diagnostics import Diagnostic, Severity
 from cobre_bridge.preflight import PreflightVerdict
-from cobre_bridge.ui.theme import COPPER_ACCENT
+from cobre_bridge.ui.theme import COPPER_ACCENT, SEVERITY
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -60,8 +60,8 @@ MAX_TABLE_ROWS = 20
 #: Severity → Rich style. Amber/red track the dashboard palette; INFO is muted.
 _SEVERITY_STYLE: dict[Severity, str] = {
     Severity.INFO: "dim",
-    Severity.WARNING: "#F5A623",
-    Severity.ERROR: "bold #DC4C4C",
+    Severity.WARNING: SEVERITY["warning"],
+    Severity.ERROR: f"bold {SEVERITY['error']}",
 }
 
 #: Severity → glyph prefix shown in panel titles.
@@ -72,7 +72,7 @@ _SEVERITY_GLYPH: dict[Severity, str] = {
 }
 
 #: Success style reused for the ✓ summary banner and passing checklist lines.
-_SUCCESS_STYLE = "bold #4A8B6F"
+_SUCCESS_STYLE = f"bold {SEVERITY['ok']}"
 
 #: Verdict → (glyph, style, headline text) for the preflight checklist headline.
 #: Reuses the existing severity glyphs/colours: ⚠/✖ and the amber/red styles
@@ -133,7 +133,7 @@ def render_error(message: str, *, console: Console | None = None) -> None:
     existing stderr substring checks keep matching; colour is added only on a TTY.
     """
     target = console or get_console(stderr=True)
-    target.print(f"Error: {message}", style="bold #DC4C4C", soft_wrap=True)
+    target.print(f"Error: {message}", style=f"bold {SEVERITY['error']}", soft_wrap=True)
 
 
 def make_table(
@@ -213,7 +213,7 @@ def render_compare_verdict(
 ) -> None:
     """Render the one-line compare headline on stdout (green ✓ / amber ⚠ on a TTY).
 
-    Leads ``compare bounds`` / ``compare results`` so the user gets the answer
+    Leads ``compare results`` so the user gets the answer
     first: ``✓ N/M variables within tol`` when every variable is within tolerance,
     or ``⚠ N/M variables within tol — worst: <var> sMAPE <pct>%`` otherwise. An
     empty dataset renders ``⚠ no variables compared`` with no worst clause. The
@@ -248,6 +248,7 @@ def render_checklist(
     result: PreflightResult,
     *,
     console: Console | None = None,
+    diagnostics_console: Console | None = None,
     quiet: bool = False,
 ) -> None:
     """Render a :class:`~cobre_bridge.preflight.PreflightResult` as a ✓/✗ checklist.
@@ -262,8 +263,12 @@ def render_checklist(
     ``✖ <label>`` (red); a non-empty ``detail`` is appended as ``— <detail>`` (dim).
     With *quiet* set, passing ``✓`` lines are suppressed but the headline and failed
     ``✖`` lines are still shown. The diagnostics are then delegated to
-    :func:`render_diagnostics` so warnings/errors render through the same panels (and,
-    when *console* is ``None``, on its default stderr console).
+    :func:`render_diagnostics`, on *diagnostics_console* when given, so warnings/errors
+    render through the same panels on a separate stream/colour setting than the
+    headline; when *diagnostics_console* is ``None`` it falls back to *console* (and
+    when both are ``None``, to :func:`render_diagnostics`'s own default stderr
+    console) — the two-argument split lets a caller keep the stdout(results)/
+    stderr(diagnostics) contract while making both streams ``--no-color``-aware.
     """
     target = console or get_console()
 
@@ -280,7 +285,9 @@ def render_checklist(
             line.append(f" — {check.detail}", style="dim")
         target.print(line, soft_wrap=True)
 
-    render_diagnostics(result.diagnostics, console=console, quiet=quiet)
+    render_diagnostics(
+        result.diagnostics, console=diagnostics_console or console, quiet=quiet
+    )
 
 
 def render_diagnostics(

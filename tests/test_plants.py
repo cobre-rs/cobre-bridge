@@ -1042,13 +1042,10 @@ def test_render_contains_subtab_structure() -> None:
     assert 'style="display:block;"' in html
     assert 'style="display:none;"' in html
 
-    # switchSubTab JS function present exactly once via SUB_TAB_JS
-    assert "function switchSubTab" in html
-    assert html.count("function switchSubTab") == 1
-
-    # PLANT_EXPLORER_JS emitted exactly once
-    assert "function initPlantExplorer" in html
-    assert html.count("function initPlantExplorer") == 1
+    # switchSubTab and initPlantExplorer are declared via REQUIRED_JS and
+    # emitted once by the document shell — not inlined here.
+    assert "function switchSubTab" not in html
+    assert "function initPlantExplorer" not in html
 
     # Button onclick calls
     assert "switchSubTab('plants-hydro', 'plants-explorer')" in html

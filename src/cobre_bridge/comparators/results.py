@@ -59,17 +59,17 @@ class PercentileData:
     nw_offset: int = 0
     nw_max_stage: int | None = None
 
-    # --- Epic 1: line interchange --- Cobre per-(line_id, stage_id) p10/p50/p90 of
+    # --- line interchange --- Cobre per-(line_id, stage_id) p10/p50/p90 of
     # net_flow_mw across scenarios; bound table from constraints/line_bounds.parquet;
     # metadata list straight from system/lines.json["lines"]. The source model side:
     # mean interchange per (line_id, stage_0based) read from int*.out NWLISTOP files and
     # aligned via EntityAlignment.lines.
     line: pl.DataFrame = field(default_factory=pl.DataFrame)
-    line_bounds: pd.DataFrame = field(default_factory=pd.DataFrame)
+    line_bounds: pl.DataFrame = field(default_factory=pl.DataFrame)
     line_meta: list[dict] = field(default_factory=list)
     nw_line_means: pl.DataFrame = field(default_factory=pl.DataFrame)
 
-    # --- Epic 2: per-hydro derived flow variables ---
+    # --- per-hydro derived flow variables ---
     # Cobre per-(hydro_id, stage_id) total_inflow_m3s (incremental +
     # upstream turbined+spilled) and total_outflow_m3s (turbined + spilled).
     # Outflow comes directly from the parquet ``outflow_m3s`` column when
@@ -93,7 +93,7 @@ class PercentileData:
     # :func:`_compute_nw_hydro_slacks`.
     nw_hydro_slacks: pl.DataFrame = field(default_factory=pl.DataFrame)
 
-    # --- Epic 3: system spillage in MWmes ---
+    # --- system spillage in MWmes ---
     # Per-stage stage-mean MW of system spillage ``spillage_m3s × ρ_eq``,
     # split into total / reservoir / run-of-river via the
     # ``max_storage_hm3 > 0`` discriminator.
@@ -1035,6 +1035,7 @@ def compare_results(
         read_cobre_hydro_total_flows,
         read_cobre_hydro_withdrawal,
         read_cobre_iteration_timing,
+        read_cobre_line_bounds,
         read_cobre_line_means,
         read_cobre_line_percentiles,
         read_cobre_lp_max_generation,
@@ -1069,7 +1070,7 @@ def compare_results(
     # Read entity names from both sides.
     nw_hydro_names, nw_thermal_names, nw_bus_names = read_reference_names(case)
     cobre_hydro_meta = read_cobre_hydro_metadata(cobre_output_dir)
-    # ``read_cobre_hydro_metadata`` carries plant physics only (decision B1);
+    # ``read_cobre_hydro_metadata`` carries plant physics only;
     # merge in the plant->bus *label* from the 0.13 hydro_bus_generation
     # partition so ``dataset.metadata["cobre_hydro_meta"]`` -- the single
     # channel report_builder.py already threads into the per-bus hydro chart
@@ -1078,7 +1079,9 @@ def compare_results(
     # all) simply gets no "bus_ids" key, matching the legacy "no bus" skip.
     for hid, bus_ids in read_cobre_hydro_bus_labels(cobre_output_dir).items():
         if hid in cobre_hydro_meta:
-            cobre_hydro_meta[hid]["bus_ids"] = bus_ids
+            # Sorted list, not the reader's frozenset: this lands in the
+            # JSON-serialized metadata side-table, which rejects a frozenset.
+            cobre_hydro_meta[hid]["bus_ids"] = sorted(bus_ids)
     cobre_thermal_meta = read_cobre_thermal_metadata(cobre_output_dir)
     cobre_bus_meta = read_cobre_bus_metadata(cobre_output_dir)
 
@@ -1324,14 +1327,7 @@ def compare_results(
     line_pct = read_cobre_line_percentiles(cobre_output_dir)
 
     # --- Line bounds (per stage) and line metadata for the Network tab ---
-    line_bounds_path = (
-        case_dir_for(cobre_output_dir) / "constraints" / "line_bounds.parquet"
-    )
-    line_bounds = (
-        pd.read_parquet(line_bounds_path)
-        if line_bounds_path.exists()
-        else pd.DataFrame()
-    )
+    line_bounds = read_cobre_line_bounds(cobre_output_dir)
     lines_json_path = case_dir_for(cobre_output_dir) / "system" / "lines.json"
     line_meta: list[dict] = []
     if lines_json_path.exists():
@@ -1479,7 +1475,7 @@ def build_results_summary(
     """Compute aggregate statistics from comparison results.
 
     ``tolerance`` is the relative tolerance used for the per-variable
-    within-tolerance match rate (mirrors ``compare bounds``).
+    within-tolerance match rate.
     """
     summary = ResultsSummary(total=len(results))
 

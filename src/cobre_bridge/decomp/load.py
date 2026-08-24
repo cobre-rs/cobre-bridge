@@ -13,12 +13,13 @@ The emission invariant ``Σ_b factor_b·h_b = H`` (per bus, stage) holds by
 construction and is asserted anyway: a violation means the block data and
 the calendar disagree.
 
-The transhipment (``IV``) bus is absent from ``DP`` by construction, so it
-normally carries zero load; when Itaipu's ``RI`` register declares
-``carga_ande`` (ticket-007), the caller supplies it via the optional
-*extra_bus_loads* parameter on both public entry points below, merged in
-alongside the ``DP`` rows so the ``IV`` bus is treated no differently from
-any other loaded bus.
+When Itaipu's ``RI`` register declares ``carga_ande``, the caller supplies it
+via the optional *extra_bus_loads* parameter on both public entry points
+below, keyed by Itaipu's own SE bus -- where it nets ADDITIVELY onto that
+bus's real ``DP`` demand rather than replacing it
+(:func:`_per_stage_block_loads`). The transhipment (``IV``) bus itself is
+absent from ``DP`` by construction and carries no load of its own; it hosts
+only the 60 Hz Itaipu group's generation.
 """
 
 from __future__ import annotations
@@ -28,13 +29,14 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.converters.stochastic import _LOAD_FACTORS_SCHEMA_URL
+from cobre_bridge import cobre_schemas
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from idecomp.decomp import Dadger
 
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -53,11 +55,12 @@ def _per_stage_block_loads(
     Missing load values (the fictitious subsystem's blank fields) read as
     0.0. Block counts must match the calendar's per-stage block structure.
 
-    *extra_bus_loads* (ticket-007) supplies additional per-(bus, stage)
-    block-load rows for a bus ``DP`` never declares -- the ``IV``
-    transshipment bus's ``carga_ande`` -- merged in after the ``DP`` read so
-    every consumer of this map (both public entry points below) sees the
-    ``IV`` load uniformly.
+    *extra_bus_loads* supplies additional per-(bus, stage) block-load rows --
+    Itaipu's ``carga_ande``, keyed by its own SE bus -- merged in ADDITIVELY
+    after the ``DP`` read: a ``(bus, stage)`` key already present from ``DP``
+    is summed element-wise with the extra values rather than replaced, so
+    SE's real demand is never clobbered by the ANDE addition; a key absent
+    from ``DP`` is inserted as-is.
     """
     dp = dadger.dp(df=True)
     if dp is None or dp.empty:
@@ -85,7 +88,20 @@ def _per_stage_block_loads(
         ]
         loads[(bus, stage_index)] = values
     if extra_bus_loads:
-        loads.update(extra_bus_loads)
+        for key, extra_values in extra_bus_loads.items():
+            existing_values = loads.get(key)
+            if existing_values is None:
+                loads[key] = extra_values
+                continue
+            if len(existing_values) != len(extra_values):
+                raise ValueError(
+                    f"bus {key[0]} stage {key[1]}: extra_bus_loads block "
+                    f"count ({len(extra_values)}) does not match DP's "
+                    f"({len(existing_values)})"
+                )
+            loads[key] = [
+                a + b for a, b in zip(existing_values, extra_values, strict=True)
+            ]
     return loads
 
 
@@ -98,20 +114,22 @@ def _stage_mean_mw(block_loads: Sequence[float], stage: OperativeStage) -> float
 
 
 def convert_load_stats(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
     *,
     extra_bus_loads: Mapping[tuple[int, int], list[float]] | None = None,
 ) -> pa.Table:
     """Build ``load_seasonal_stats`` rows: one per (bus, stage), ``std = 0``.
 
-    Every bus in the id map gets a row for every stage; buses absent from
-    ``DP`` (the transhipment bus) carry zero load unless *extra_bus_loads*
-    (ticket-007 -- see :func:`_per_stage_block_loads`) supplies one.
+    Every bus in the id map gets a row for every stage; a bus absent from
+    ``DP`` entirely (the transhipment bus, in practice) carries zero load.
+    *extra_bus_loads* (see :func:`_per_stage_block_loads`) nets its values
+    additively onto whichever bus it keys -- Itaipu's SE bus, for the
+    ``carga_ande`` load -- so that bus's own ``DP`` demand is preserved.
     """
+    calendar = case.calendar
     loads = _per_stage_block_loads(
-        dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
+        case.dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
     )
 
     bus_ids: list[int] = []
@@ -136,9 +154,8 @@ def convert_load_stats(
 
 
 def convert_load_factors(
-    dadger: Dadger,
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
     *,
     extra_bus_loads: Mapping[tuple[int, int], list[float]] | None = None,
 ) -> dict:
@@ -146,12 +163,13 @@ def convert_load_factors(
 
     Entries exist only for (bus, stage) pairs with load; factors of a zero
     mean are undefined and deliberately absent. *extra_bus_loads*
-    (ticket-007 -- see :func:`_per_stage_block_loads`) feeds the same
+    (see :func:`_per_stage_block_loads`) feeds the same
     ``Σ_b factor_b·h_b = H`` invariant check below as every ``DP``-sourced
     row.
     """
+    calendar = case.calendar
     loads = _per_stage_block_loads(
-        dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
+        case.dadger, id_map, calendar, extra_bus_loads=extra_bus_loads
     )
 
     entries: list[dict] = []
@@ -181,4 +199,7 @@ def convert_load_factors(
             }
         )
 
-    return {"$schema": _LOAD_FACTORS_SCHEMA_URL, "load_factors": entries}
+    return {
+        "$schema": cobre_schemas.schema_url_for("scenarios/load_factors.json"),
+        "load_factors": entries,
+    }

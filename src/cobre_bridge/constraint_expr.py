@@ -16,10 +16,15 @@ neither consumer has to import across the comparator↔UI boundary.
 
 from __future__ import annotations
 
+import json
+import logging
 import re
+from pathlib import Path
 
 import pandas as pd
 import polars as pl
+
+_LOG = logging.getLogger(__name__)
 
 # Matches terms like: [+/-] [coeff *] [@name *] variable_type(id)
 # Examples:
@@ -64,6 +69,53 @@ def resolve_param_to_column(name: str) -> tuple[str, int] | None:
     return None
 
 
+def scales_storage_by_rho_acum(constraint: dict) -> bool:
+    """True when the constraint's LHS scales ``hydro_storage`` by ``@rho_acum_h{id}``.
+
+    Both the source model's VminOP (security-curve) and DECOMP's RHE
+    (stored-energy) constraints take this shape; RE/AGRINT/HQ/HV never
+    reference ``@rho_acum_h{id}``, so this cleanly partitions the set.
+    """
+    for _, param_name, vtype, _ in parse_expression(constraint.get("expression", "")):
+        if (
+            vtype == "hydro_storage"
+            and param_name is not None
+            and param_name.startswith("rho_acum_h")
+        ):
+            return True
+    return False
+
+
+def load_rho_acum_overrides(cobre_case_dir: Path) -> dict[int, dict[int, float]]:
+    """Load per-stage ρ_acum overrides from ``constraints/generic_parameters.json``.
+
+    Returns ``{hydro_id: {stage_id: ρ_acum}}`` for every ``rho_acum_h{id}``
+    entry the writer declared ``kind: "per_stage"`` — the energy-scaled
+    coefficient (MWmonth/hm³) the VminOP/RHE LP actually uses at
+    ``@rho_acum_h{id}`` in place of cobre's ``computed`` default (the point
+    productivity ``accumulated_productivity_mw_per_m3s``). Pass the result as
+    :func:`evaluate_constraint_expressions`'s ``rho_acum_overrides`` so the
+    evaluated LHS matches what the LP actually solved, not the simulation's
+    default productivity column.
+    """
+    path = cobre_case_dir / "constraints" / "generic_parameters.json"
+    out: dict[int, dict[int, float]] = {}
+    if not path.exists():
+        return out
+    try:
+        with path.open() as f:
+            params = json.load(f).get("scalar_parameters", [])
+    except (OSError, json.JSONDecodeError) as exc:
+        _LOG.warning("generic_parameters.json could not be parsed: %s", exc)
+        return out
+    for entry in params:
+        m = re.fullmatch(r"rho_acum_h(\d+)", str(entry.get("name", "")))
+        if m is None or entry.get("kind") != "per_stage":
+            continue
+        out[int(m.group(1))] = {int(s): float(v) for s, v in entry.get("values", [])}
+    return out
+
+
 def parse_expression(expr: str) -> list[tuple[float, str | None, str, int]]:
     """Parse a constraint LHS expression into term tuples.
 
@@ -102,10 +154,53 @@ def parse_expression(expr: str) -> list[tuple[float, str | None, str, int]]:
     return terms
 
 
+def _apply_param_scale(
+    sub: pd.DataFrame,
+    param_name: str | None,
+    entity_id: int,
+    rho_acum_overrides: dict[int, dict[int, float]] | None,
+) -> None:
+    """Scale ``sub["_val"]`` in place by the resolved ``@param_name`` value.
+
+    Mirrors cobre's own ``@name`` resolution at solve time. When the
+    parameter resolves to ``accumulated_productivity_mw_per_m3s`` and
+    *rho_acum_overrides* supplies a per-stage value for *entity_id*, the
+    override wins row-by-row over the simulation's default productivity
+    column — the VminOP/RHE writer always installs a ``kind: "per_stage"``
+    override that the LP uses at solve time (see
+    :func:`load_rho_acum_overrides`), so evaluating against the default
+    column alone puts the LHS on a different scale than its own bound.
+    """
+    if param_name is None:
+        return
+    resolved = resolve_param_to_column(param_name)
+    if resolved is None:
+        # Unknown / unresolved parameter contributes zero so we don't
+        # pollute LHS with stale unscaled values.
+        sub["_val"] = 0.0
+        return
+    col, _ = resolved
+    overrides = rho_acum_overrides.get(entity_id) if rho_acum_overrides else None
+    has_override = col == "accumulated_productivity_mw_per_m3s" and overrides
+    if col not in sub.columns and not has_override:
+        sub["_val"] = 0.0
+        return
+    default = (
+        sub[col].fillna(0.0) if col in sub.columns else pd.Series(0.0, index=sub.index)
+    )
+    if has_override:
+        override_series = sub["stage_id"].map(overrides)
+        scale = override_series.where(override_series.notna(), default)
+    else:
+        scale = default
+    sub["_val"] = sub["_val"] * scale
+
+
 def evaluate_constraint_expressions(
     constraints: list[dict],
     hydros_lf: pl.LazyFrame,
     exchanges_lf: pl.LazyFrame,
+    rho_acum_overrides: dict[int, dict[int, float]] | None = None,
 ) -> pd.DataFrame:
     """Evaluate LHS of all generic constraints from simulation output.
 
@@ -123,6 +218,13 @@ def evaluate_constraint_expressions(
 
     Accepts LazyFrames and only collects the specific entity IDs referenced
     in constraint expressions, keeping memory usage minimal.
+
+    ``rho_acum_overrides`` (``{hydro_id: {stage_id: value}}``, typically from
+    :func:`load_rho_acum_overrides`) overrides the ``@rho_acum_h{id}``
+    resolution per (hydro, stage) instead of the simulation's default
+    ``accumulated_productivity_mw_per_m3s`` column — see
+    :func:`_apply_param_scale`. ``None`` (the default) preserves prior
+    behaviour.
 
     Returns DataFrame with columns:
         constraint_id, scenario_id, stage_id, block_id, lhs_value
@@ -229,14 +331,7 @@ def evaluate_constraint_expressions(
                 if sub.empty:
                     continue
                 sub["_val"] = sub["storage_final_hm3"]
-                if param_name is not None:
-                    resolved = resolve_param_to_column(param_name)
-                    if resolved is not None and resolved[0] in sub.columns:
-                        sub["_val"] = sub["_val"] * sub[resolved[0]].fillna(0.0)
-                    else:
-                        # Unknown / unresolved parameter contributes zero so we
-                        # don't pollute LHS with stale storage values.
-                        sub["_val"] = 0.0
+                _apply_param_scale(sub, param_name, eid, rho_acum_overrides)
                 sub = sub[["scenario_id", "stage_id", "_val"]]
                 merged = base.merge(sub, on=["scenario_id", "stage_id"], how="left")
                 merged["_val"] = merged["_val"].fillna(0.0)
@@ -287,12 +382,7 @@ def evaluate_constraint_expressions(
                         sub["_val"] = sub["net_flow_mw"]
                     join_cols = ["scenario_id", "stage_id", "block_id"]
 
-                if param_name is not None:
-                    resolved = resolve_param_to_column(param_name)
-                    if resolved is not None and resolved[0] in sub.columns:
-                        sub["_val"] = sub["_val"] * sub[resolved[0]].fillna(0.0)
-                    else:
-                        sub["_val"] = 0.0
+                _apply_param_scale(sub, param_name, eid, rho_acum_overrides)
 
                 sub = sub[join_cols + ["_val"]]
                 merged = base.merge(sub, on=join_cols, how="left")

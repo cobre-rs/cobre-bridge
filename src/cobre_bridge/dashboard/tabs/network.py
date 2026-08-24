@@ -18,7 +18,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 
-from cobre_bridge.dashboard.chart_helpers import make_chart_card
+from cobre_bridge.dashboard.chart_helpers import (
+    make_chart_card,
+    stage_hours_weighted_mean,
+)
 from cobre_bridge.dashboard.data import entity_name
 from cobre_bridge.ui.html import (
     chart_grid,
@@ -35,6 +38,7 @@ from cobre_bridge.ui.plotly_helpers import (
     stage_x_dates,
     stage_x_labels,
 )
+from cobre_bridge.ui.theme import BAND_FILL
 
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
@@ -230,7 +234,9 @@ function updateNetworkDetail() {
   var d = NW_DATA[lid]; if(!d) return;
 
   var traces = [
-    _nw_band('P10–P90', d.net_p10, d.net_p90, 'rgba(74,144,184,0.15)'),
+    _nw_band('P10–P90', d.net_p10, d.net_p90, '"""
+        + BAND_FILL
+        + r"""'),
     _nw_line('P50', d.net_p50, '#4A90B8'),
     _nw_line('P10', d.net_p10, '#4A90B8', 1, 'dot'),
     _nw_line('P90', d.net_p90, '#4A90B8', 1, 'dot'),
@@ -414,8 +420,7 @@ def build_bus_balance(
     Net import for a bus = sum of ``net_flow_mw`` for all lines where the
     bus is the **target** minus sum where the bus is the **source**.
     Positive = net importer, negative = net exporter.  All buses in
-    ``line_meta`` are included (no fictitious bus filtering per epic-01
-    design decision).
+    ``line_meta`` are included (no fictitious bus filtering).
 
     Args:
         exchanges_lf: Line flow LazyFrame with ``net_flow_mw`` column.
@@ -435,10 +440,11 @@ def build_bus_balance(
         return "<p>No bus balance data available.</p>"
 
     # Compute block-hours weighted avg per (scenario, stage, line), then
-    # average across stages to get a per-(scenario, line) mean flow.
-    # Keeping scenario_id allows p10/p90 computation across the scenario
-    # distribution for bus balance error bars.
-    per_scen_flow_df = (
+    # stage-hours weight across stages to get a per-(scenario, line) mean
+    # flow — a bare cross-stage .mean() would give a long stage the same
+    # weight as a short one. Keeping scenario_id allows p10/p90 computation
+    # across the scenario distribution for bus balance error bars.
+    per_stage_flow_lf = (
         exchanges_lf.join(bh_df.lazy(), on=["stage_id", "block_id"])
         .group_by(["scenario_id", "stage_id", "line_id"])
         .agg(
@@ -446,9 +452,13 @@ def build_bus_balance(
                 "net_flow_mw"
             )
         )
-        .group_by(["scenario_id", "line_id"])
-        .agg(pl.col("net_flow_mw").mean())
-        .collect(engine="streaming")
+    )
+    stage_hours_df = bh_df.group_by("stage_id").agg(pl.col("_bh").sum().alias("_hours"))
+    per_scen_flow_df = stage_hours_weighted_mean(
+        per_stage_flow_lf,
+        "net_flow_mw",
+        ["scenario_id", "line_id"],
+        stage_hours_df,
     )
 
     if per_scen_flow_df.height == 0:

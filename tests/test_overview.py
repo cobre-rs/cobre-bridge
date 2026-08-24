@@ -13,10 +13,7 @@ import plotly.graph_objects as go
 import polars as pl
 
 import cobre_bridge.dashboard.tabs.overview as overview_mod
-from cobre_bridge.dashboard.chart_helpers import compute_cost_summary
 from cobre_bridge.dashboard.tabs.overview import (
-    _build_cost_table,
-    _chart_cost_bar,
     _chart_training_mini,
     _compute_gen_gwh,
     _format_duration,
@@ -423,100 +420,6 @@ def test_compute_gen_gwh_empty_lazyframe_returns_zero() -> None:
     lf = pl.LazyFrame({"scenario_id": [], "generation_mwh": []})
     result = _compute_gen_gwh(lf)
     assert result == 0.0
-
-
-# ---------------------------------------------------------------------------
-# test_build_cost_table
-# ---------------------------------------------------------------------------
-
-
-def test_build_cost_table_contains_table_and_thermal() -> None:
-    """_build_cost_table must return HTML containing <table and group names."""
-    costs = _make_costs_df()
-    summary = compute_cost_summary(costs, 0.10)
-    html = _build_cost_table(summary)
-
-    assert "<table" in html
-    assert "Thermal" in html
-
-
-def test_build_cost_table_empty_df_returns_placeholder() -> None:
-    """_build_cost_table on an empty DataFrame must return a <p> placeholder."""
-    html = _build_cost_table(pd.DataFrame())
-    assert "<table" not in html
-    assert "No cost data" in html
-
-
-# ---------------------------------------------------------------------------
-# test_chart_cost_bar
-# ---------------------------------------------------------------------------
-
-
-def test_chart_cost_bar_produces_vertical_bar_traces() -> None:
-    """_chart_cost_bar must return a Figure with at least one vertical bar."""
-    costs = _make_costs_df()
-    summary = compute_cost_summary(costs, 0.10)
-    fig = _chart_cost_bar(summary)
-
-    assert isinstance(fig, go.Figure)
-    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
-    assert len(bar_traces) >= 1
-    # Bars are vertical: orientation is None (default) or "v", never "h"
-    for trace in bar_traces:
-        assert trace.orientation != "h"
-
-
-def test_chart_cost_bar_error_bars_p5_p95() -> None:
-    """_chart_cost_bar must set error_y with p5–p95 range on each bar trace.
-
-    Acceptance criterion from ticket-007: given p5=800, mean=1000, p95=1200,
-    the trace must have error_y.array=[200] and error_y.arrayminus=[200].
-    """
-    summary = pd.DataFrame(
-        {
-            "group": ["Thermal"],
-            "mean": [1000.0],
-            "std": [100.0],
-            "p5": [800.0],
-            "p10": [850.0],
-            "p90": [1150.0],
-            "p95": [1200.0],
-            "pct": [100.0],
-        }
-    )
-    fig = _chart_cost_bar(summary)
-
-    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
-    assert len(bar_traces) == 1
-    trace = bar_traces[0]
-    assert trace.error_y is not None
-    assert trace.error_y.visible is True
-    assert trace.error_y.array == (200.0,)
-    assert trace.error_y.arrayminus == (200.0,)
-
-
-def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
-    """_chart_cost_bar must omit error_x when p5 or p95 is NaN."""
-    import math
-
-    summary = pd.DataFrame(
-        {
-            "group": ["Thermal"],
-            "mean": [1000.0],
-            "std": [0.0],
-            "p5": [math.nan],
-            "p10": [math.nan],
-            "p90": [math.nan],
-            "p95": [math.nan],
-            "pct": [100.0],
-        }
-    )
-    fig = _chart_cost_bar(summary)
-
-    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
-    assert len(bar_traces) == 1
-    # error_y must be None when percentiles are NaN
-    assert bar_traces[0].error_y is None or bar_traces[0].error_y.visible is not True
 
 
 # ---------------------------------------------------------------------------

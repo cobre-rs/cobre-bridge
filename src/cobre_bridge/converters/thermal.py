@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.diagnostics import (
@@ -39,11 +40,6 @@ _THERMAL_BOUNDS_SCHEMA = pa.schema(
         pa.field("max_generation_mw", pa.float64()),
         pa.field("cost_per_mwh", pa.float64()),
     ]
-)
-
-_SCHEMA_URL = (
-    "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main"
-    "/schemas/thermals.schema.json"
 )
 
 
@@ -158,7 +154,7 @@ def convert_thermals(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     thermals.sort(key=lambda t: t["id"])
 
     return {
-        "$schema": _SCHEMA_URL,
+        "$schema": cobre_schemas.schema_url_for("system/thermals.json"),
         "thermals": thermals,
     }
 
@@ -740,10 +736,10 @@ def convert_thermal_bounds(
     # exceptions: build each attribute's window union, then revert to its
     # default wherever no window covers the stage.
     #
-    # A plant is in service (POTEF) / under a minimum (GTMIN) for any stage
-    # whose date falls inside at least one window. Open-ended data_fim extends
-    # to the last stage date. Chained schedules (a finite window followed by an
-    # open-ended one) are applied in sequence, not ended at the first window.
+    # A stage is covered if its date falls inside at least one window; open-ended
+    # data_fim extends to the last stage date, and chained schedules (a finite
+    # window followed by an open-ended one) apply in sequence, not ended at the
+    # first window.
     potef_windows: dict[int, list[tuple[date, date]]] = {}
     gtmin_windows: dict[int, list[tuple[date, date]]] = {}
 

@@ -24,10 +24,8 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from cobre_bridge.comparators.constraints_compare import (
-    _is_vminop,
-    apply_vminop_useful_energy,
-)
+from cobre_bridge.comparators.constraints_compare import apply_vminop_useful_energy
+from cobre_bridge.constraint_expr import scales_storage_by_rho_acum
 from cobre_bridge.id_map import NewaveIdMap
 
 _GC_SCHEMA = {
@@ -147,15 +145,15 @@ def _cell(df: pl.DataFrame, cid: int, stage: int, col: str) -> float:
     return float(sub[col][0])
 
 
-def test_is_vminop_partitions_by_rho_acum() -> None:
+def test_scales_storage_by_rho_acum_partitions_by_rho_acum() -> None:
     vminop = _vminop_constraint()
     re_constraint = {
         "id": 1,
         "name": "RE_1",
         "expression": "hydro_generation(0) + hydro_generation(1)",
     }
-    assert _is_vminop(vminop) is True
-    assert _is_vminop(re_constraint) is False
+    assert scales_storage_by_rho_acum(vminop) is True
+    assert scales_storage_by_rho_acum(re_constraint) is False
 
 
 def test_cobre_lhs_is_useful_energy(tmp_path: Path) -> None:

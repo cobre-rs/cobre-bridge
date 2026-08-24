@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from idecomp.decomp import Vazoes
 
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -55,7 +56,7 @@ def _incremental_context(
     id_map: DecompIdMap,
 ) -> tuple[dict[int, str], dict[int, list[int]]]:
     """Per-plant station column and direct operated-upstream stations, off
-    the *effective* (post-``AC NUMJUS``/``NUMPOS``) topology (ticket-014).
+    the *effective* (post-``AC NUMJUS``/``NUMPOS``) topology.
 
     Stage-agnostic by design (one cascade for the whole horizon): both the
     station column and the downstream link are read at stage 0
@@ -237,15 +238,16 @@ def _tree_values(
 
 
 def convert_external_inflows(
+    case: DecompCase,
+    id_map: DecompIdMap,
+    *,
     vazoes: Vazoes,
     effective: EffectiveCadastro,
-    id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
 ) -> pa.Table:
     """``external_inflow_scenarios.parquet``: the tree of per-plant incremental
     inflows, read off each plant's *effective* (post-``AC NUMPOS``) gauge
-    column (ticket-014)."""
-    values = _tree_values(vazoes, effective, id_map, calendar)
+    column."""
+    values = _tree_values(vazoes, effective, id_map, case.calendar)
 
     stage_ids: list[int] = []
     scenario_ids: list[int] = []
@@ -352,8 +354,8 @@ def deterministic_external_scenarios(
 
 
 def convert_inflow_stats_identity(
+    case: DecompCase,
     id_map: DecompIdMap,
-    calendar: Sequence[OperativeStage],
 ) -> pa.Table:
     """Identity stats (μ = 0, σ = 1) — the explicit-inflow convention.
 
@@ -364,7 +366,7 @@ def convert_inflow_stats_identity(
     hydro_ids: list[int] = []
     stage_ids: list[int] = []
     for hydro_id in range(len(id_map.hydro_codes)):
-        for stage in calendar:
+        for stage in case.calendar:
             hydro_ids.append(hydro_id)
             stage_ids.append(stage.index)
     n = len(hydro_ids)

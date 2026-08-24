@@ -1,7 +1,8 @@
 """Modular dashboard package for Cobre simulation results.
 
 Entry point: ``build_dashboard(case_dir, output_path)`` loads data,
-discovers renderable tabs, and writes a self-contained HTML file.
+discovers renderable tabs, and writes the assembled HTML file (it loads
+plotly.js from a CDN, so it is not self-contained offline).
 """
 
 from __future__ import annotations
@@ -10,10 +11,10 @@ import logging
 from pathlib import Path
 
 from cobre_bridge.dashboard.data import DashboardData
-from cobre_bridge.dashboard.tabs import get_renderable_tabs
+from cobre_bridge.dashboard.tabs import collect_required_js, get_renderable_tabs
 from cobre_bridge.ui.css import dashboard_css
 from cobre_bridge.ui.html import build_html
-from cobre_bridge.ui.js import TAB_SWITCH_JS
+from cobre_bridge.ui.js import PLOTLY_TITLE_SHIM_JS, TAB_SWITCH_JS
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ def build_dashboard(case_dir: Path, output_path: Path) -> None:
         tab_contents=tab_contents,
         css=dashboard_css(),
         js=TAB_SWITCH_JS,
+        required_js=PLOTLY_TITLE_SHIM_JS + collect_required_js(data),
     )
 
     logger.info("Writing dashboard to %s", output_path)
