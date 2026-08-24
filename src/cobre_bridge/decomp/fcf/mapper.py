@@ -8,17 +8,17 @@ onto that layout: storage terms join by plant code, inflow-lag
 terms join 1:1 by calendar-month lag slot, and — when the caller supplies a
 :class:`GnlRingPlan` — GNL-anticipated-ring terms join each target's
 *covered* dated ring slot(s) via a chain-rule patamar sum over ``pi_gnl``
-(narrowed to covered post-horizon lanes only). A
-source plant with no match in the target manifest is dropped (D3), never
-folded into a neighbour, and recorded in :class:`MappingResult.dropped` for
-the diagnostics layer to render; a GNL source/target term with no
-live counterpart — including a dated ring slot whose delivery falls before
-:attr:`GnlRingPlan.post_horizon_start` (a non-covered, K=0-lead lane cobre
-will not accept a coefficient on) — is dropped the same way into
-:class:`MappingResult.gnl_dropped`. ``HydroTransitBucket`` slots, and any
-``AnticipatedThermalState`` ring slot with no resolved target (including the
-undated sentinel slot and every non-covered dated slot), are left at an
-explicit coefficient ``0.0``.
+(narrowed to the class-3 signaled, month-anchored lanes cobre's excised ring
+actually carries). A source plant with no match in the target manifest is
+dropped (D3), never folded into a neighbour, and recorded in
+:class:`MappingResult.dropped` for the diagnostics layer to render; a GNL
+source/target term with no live counterpart — including a dated ring slot
+whose delivery falls before :attr:`GnlRingPlan.post_horizon_start` (an
+in-study delivery, priced by the in-study committed window rather than the
+ring) — is dropped the same way into :class:`MappingResult.gnl_dropped`.
+``HydroTransitBucket`` slots, and any ``AnticipatedThermalState`` ring slot
+with no resolved target (including the undated sentinel slot and every
+non-covered dated slot), are left at an explicit coefficient ``0.0``.
 """
 
 from __future__ import annotations
@@ -195,15 +195,16 @@ class GnlRingPlan:
 
     Built by the importer from the deck's own GNL declarations;
     this module never derives it — see the module docstring's deck-free
-    contract. ``post_horizon_start`` is the earliest post-study
-    stage start, as a ``YYYYMMDD`` int, computed by the importer from
+    contract. ``post_horizon_start`` is the ``YYYYMM01`` month-anchor of the
+    earliest post-study stage, computed by the importer from
     ``post_study_stages.json`` — this module stays deck-free and never reads
-    that file itself, only the threaded-in int. A dated ring slot is
-    *covered* (receives the `pi_gnl` coefficient) when
-    ``post_horizon_start is None`` (no filter — the default,
-    so every existing construction keeps placing on all dated slots) or its
-    ``delivery_date >= post_horizon_start``; otherwise it is *non-covered*
-    and dropped (see :func:`_resolve_gnl_targets`).
+    that file itself, only the threaded-in int. Under cobre's excised
+    anticipated ring, a dated ring slot is *covered* (receives the `pi_gnl`
+    coefficient) when ``post_horizon_start is None`` (no filter — the
+    default, so every existing construction keeps placing on all dated
+    slots) or its ``delivery_date >= post_horizon_start`` — i.e. it is one
+    of the class-3 signaled lanes; otherwise it is a non-covered in-study
+    delivery and is dropped (see :func:`_resolve_gnl_targets`).
     """
 
     targets: tuple[GnlThermalTarget, ...]
@@ -451,16 +452,21 @@ def _resolve_gnl_targets(
     records `cuts` carries. Returns `resolved: {ring position -> tuple of
     pi_gnl flat-column indices to sum}` plus every GNL drop.
 
-    A target's dated ring slot(s) split into *covered* (`delivery_date >=
-    gnl_plan.post_horizon_start`, or `post_horizon_start is None` — no
-    filter) and *non-covered* (`delivery_date < post_horizon_start`):
-    only covered slots land in `resolved`; each non-covered slot
-    is dropped into the returned `GnlDroppedTerm`s (reason names the
-    post-study horizon), staying at coefficient `0.0` exactly like the
-    existing GNL drops — never folded onto a neighbour. A target with dated
-    slots that are *all* non-covered still gets the non-covered drop path,
-    never the "no dated ring slot for thermal" reason (that one is reserved
-    for a target with zero dated slots at all).
+    `ring_index` (built from the reloaded terminal manifest) never carries
+    the já-comandada (class-4) window at all — cobre excises it from the
+    ring entirely — so a target's dated slot(s) are exactly the in-study and
+    class-3 signaled deliveries, both month-anchored. They split into
+    *covered* (`delivery_date >= gnl_plan.post_horizon_start`, or
+    `post_horizon_start is None` — no filter) — the class-3 signaled lanes —
+    and *non-covered* (`delivery_date < post_horizon_start`) — an in-study
+    delivery, priced by the in-study committed window rather than the ring:
+    only covered slots land in `resolved`; each non-covered slot is dropped
+    into the returned `GnlDroppedTerm`s (reason names the in-study committed
+    window), staying at coefficient `0.0` exactly like the existing GNL
+    drops — never folded onto a neighbour. A target with dated slots that
+    are *all* non-covered still gets the non-covered drop path, never the
+    "no dated ring slot for thermal" reason (that one is reserved for a
+    target with zero dated slots at all).
 
     Returns `({}, ())` — no GNL mapping at all — when `gnl_plan` is `None`,
     `cuts` has no records, the source deck carries no GNL lag axis
@@ -561,8 +567,9 @@ def _resolve_gnl_targets(
                     nl_lag=target.nl_lag,
                     coefficient=_first_active_gnl_sum(cuts, cols),
                     reason=(
-                        "delivery before post-study horizon (non-covered "
-                        "post-horizon lane)"
+                        "delivery before the post-study horizon (in-study, "
+                        "priced by the in-study committed window, not the "
+                        "anticipated ring)"
                     ),
                 )
             )
@@ -636,17 +643,18 @@ def map_boundary_cuts(
     `post_horizon_start is None` — carries the hours-weighted patamar sum
     `Σ_p pi_gnl[col(s,p,nl_lag)] · coupling_block_hours[p]` (`math.fsum`,
     order-independent); a target with no dated ring slot, a dated slot whose
-    delivery falls before the post-study horizon (a non-covered, K=0-lead lane
-    cobre rejects a coefficient on), or a source submercado with
-    no matching target, is dropped and recorded in `MappingResult.gnl_dropped`,
-    never folded onto a neighbour. `HydroTransitBucket` slots, the sentinel
-    (undated) `AnticipatedThermalState` slot, and every ring slot with no
-    resolved (covered) target are left at an explicit `0.0` regardless of
-    `gnl_plan`; `gnl_plan=None` (the default) leaves the entire ring at
-    `0.0`, byte-for-byte matching this function's pre-GNL behaviour, and never
-    requires `coupling_block_hours` (see the guard below). `intercept` is the
-    source record's `rhs` (never re-derived from alpha/x-hat), scaled to cobre's
-    cost units and then reduced by the `inflow_lag_means` fold below; every
+    delivery falls before the post-study horizon (an in-study delivery,
+    priced by the in-study committed window rather than the ring), or a
+    source submercado with no matching target, is dropped and recorded in
+    `MappingResult.gnl_dropped`, never folded onto a neighbour.
+    `HydroTransitBucket` slots, the sentinel (undated) `AnticipatedThermalState`
+    slot, and every ring slot with no resolved (covered) target are left at
+    an explicit `0.0` regardless of `gnl_plan`; `gnl_plan=None` (the default)
+    leaves the entire ring at `0.0`, byte-for-byte matching this function's
+    pre-GNL behaviour, and never requires `coupling_block_hours` (see the
+    guard below). `intercept` is the source record's `rhs` (never re-derived
+    from alpha/x-hat), scaled to cobre's cost units and then reduced by the
+    `inflow_lag_means` fold below; every
     coefficient is likewise scaled to cobre's cost units per family —
     intercept/storage by ``× cost_unit_hours``, inflow-lag by an additional
     ``× C_M3S2HM3`` for cobre's m³/s inflow-lag state, and GNL by the

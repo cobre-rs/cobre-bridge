@@ -22,7 +22,7 @@ import json
 import logging
 import math
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 from idecomp.decomp import Dadgnl, Mlt, Vazoes
@@ -158,7 +158,8 @@ def _gnl_targets_from(
 
 
 def _post_horizon_start(case_dir: Path) -> int | None:
-    """The earliest post-study stage start, as a ``YYYYMMDD`` int, or ``None``.
+    """The ``YYYYMM01`` month-anchor of the earliest post-study stage start,
+    or ``None``.
 
     Reads ``case_dir / "post_study_stages.json"`` (the
     ``decomp/anticipated.py::GnlEmission.post_study_stages`` payload,
@@ -168,10 +169,18 @@ def _post_horizon_start(case_dir: Path) -> int | None:
     horizon at all"; the mapper's ``GnlRingPlan.post_horizon_start=None``
     disables the covered-lane filter entirely for that case.
 
+    The earliest stage's ``year*10000 + month*100 + 1`` month-anchor mirrors
+    the granularity cobre's excised anticipated ring dates every surviving
+    slot at (its own ``year_month_day_anchor``): the já-comandada (class-4)
+    window is excised from the ring entirely — cobre's ``ring_index`` returns
+    ``None`` for it, so it never reaches the terminal manifest — which under
+    the source model's month-boundary study makes this anchor the first
+    signaled (class-3) month.
+
     A malformed ``start_date`` string is NOT swallowed here: the
-    ``ValueError`` from ``int(...)`` propagates verbatim rather than
-    silently disabling the filter — a corrupt horizon is a real problem,
-    never a "no horizon" case.
+    ``ValueError`` from ``date.fromisoformat`` propagates verbatim rather
+    than silently disabling the filter — a corrupt horizon is a real
+    problem, never a "no horizon" case.
     """
     path = case_dir / "post_study_stages.json"
     if not path.is_file():
@@ -181,7 +190,8 @@ def _post_horizon_start(case_dir: Path) -> int | None:
     stages = doc.get("stages", [])
     if not stages:
         return None
-    return min(int(stage["start_date"].replace("-", "")) for stage in stages)
+    earliest = min(date.fromisoformat(stage["start_date"]) for stage in stages)
+    return earliest.year * 10000 + earliest.month * 100 + 1
 
 
 def _final_stage_block_hours(case_dir: Path) -> list[float]:
@@ -545,14 +555,17 @@ def _emit_import_diagnostics(
         rows = _gnl_deviation_rows(cuts, gnl_plan)
         # "Dropped" is every GNL term that reached no *covered* target: a
         # source submercado with no live thermal at all (`thermal_id is
-        # None`), or a target's dated slot dropped for falling
-        # before the post-study horizon (reason names it) — read straight
+        # None`), or a target's dated slot that fell in-study, priced by
+        # the committed window instead of the ring
+        # (`mapper.py::GnlDroppedTerm.reason` names it) — read straight
         # from `mapping.gnl_dropped`, never recomputing the covered/
-        # uncovered split independently here.
+        # uncovered split independently here. A já-comandada (class-4)
+        # slot is excised from the ring entirely, so it never appears in
+        # `gnl_dropped` and needs no arm of its own.
         dropped_coverage_terms = [
             term
             for term in mapping.gnl_dropped
-            if term.thermal_id is None or "post-study horizon" in term.reason
+            if term.thermal_id is None or "in-study committed window" in term.reason
         ]
         # See `_GNL_DEVIATION_REL_FLOOR`'s docstring for the relative-headline
         # filter. Guard the degenerate case where every group's |Σ| is itself
@@ -586,7 +599,8 @@ def _emit_import_diagnostics(
                     "panel's max |Σ| is excluded from the relative headline); "
                     f"{len(dropped_coverage_terms)} GNL term(s) dropped for "
                     "no covered target (no live thermal in that submercado, "
-                    "or delivery before the post-study horizon)"
+                    "or an in-study delivery priced by the committed window, "
+                    "not the anticipated ring)"
                 ),
                 table=dx.DiagnosticTable(
                     columns=[
@@ -610,6 +624,11 @@ def _patch_policy_boundary(
     writer: CaseWriter, config: dict, *, source_stage: int
 ) -> None:
     """Set ``["policy"]["boundary"]`` in ``config.json``, preserving the rest.
+
+    ``source_stage`` is cobre's own 0-based policy-graph ``graph_stage_id``
+    (the pool cobre's boundary loader resolves ``source_stage`` against) —
+    never the source model's own 1-based calendar-anchored boundary-stage
+    number, a different axis that only coincidentally shares a value.
 
     Mutates the pipeline's own in-memory ``config`` dict (the one already
     written to ``config.json``, ``state_space``/``training``/``simulation``
@@ -710,13 +729,12 @@ def import_boundary_fcf(
         Raised directly when cut files are present but *config* or
         *initial_conditions* is ``None`` (a caller must thread the pipeline's
         own in-memory dicts once the import actually proceeds — see
-        ``convert_decomp_case``'s ``fcf_inputs_out``), or when the bootstrap
-        manifest's ``graph_stage_id`` disagrees with the boundary cut file's
-        own stage. Also propagated verbatim from the cut reader
-        (``fcf/cortes.py``, e.g. a non-individualized deck or a nonzero SAR
-        coefficient), the mapper (``fcf/mapper.py``, e.g. no ``HydroStorage``
-        slots in the target manifest), or the writer (``fcf/writer.py``, e.g.
-        a mapped coefficient vector length mismatch).
+        ``convert_decomp_case``'s ``fcf_inputs_out``). Also propagated
+        verbatim from the cut reader (``fcf/cortes.py``, e.g. a
+        non-individualized deck or a nonzero SAR coefficient), the mapper
+        (``fcf/mapper.py``, e.g. no ``HydroStorage`` slots in the target
+        manifest), or the writer (``fcf/writer.py``, e.g. a mapped
+        coefficient vector length mismatch).
     """
     if case.files.cortesh is None or case.files.cortes is None:
         _LOG.info("boundary FCF skipped — no cut files")
@@ -750,15 +768,6 @@ def import_boundary_fcf(
     # terms onto. The former state_space.inflow_lag_depth override was redundant
     # with that sizing and is rejected by cobre >= 0.14.
     manifest = bootstrap_terminal_manifest(case_dir, work_dir=work_dir)
-    if manifest.graph_stage_id != boundary_stage:
-        raise ValueError(
-            f"the bootstrap's terminal graph_stage_id ({manifest.graph_stage_id}) "
-            f"does not match the boundary cut file's own stage "
-            f"({boundary_stage}); config.json's policy.boundary.source_stage is "
-            "set to the cut file's stage, and the checkpoint's graph_stage_id "
-            "must resolve to that same pool, or a run would load the wrong "
-            "boundary pool at that source_stage"
-        )
     gnl_plan = _build_gnl_ring_plan(case_dir, case.files)
     # Inflow-lag mean fold + recent-observation seed (built together, shipped
     # together — see `_boundary_inflow_context`). The coupling month is the cut
@@ -835,7 +844,12 @@ def import_boundary_fcf(
         inflow_lag_depth=inflow_lag_depth,
     )
 
-    _patch_policy_boundary(writer, config, source_stage=boundary_stage)
+    # cobre resolves `source_stage` against a pool's own `graph_stage_id`
+    # (0-based), never `boundary_stage` (the source model's 1-based
+    # calendar-month count, kept above only for the inflow-lag coupling
+    # fold and the payload's own provenance `stage_id`) — the two axes only
+    # coincidentally share a value.
+    _patch_policy_boundary(writer, config, source_stage=manifest.graph_stage_id)
 
     # Seed the pre-study inflow-lag state and record the mean fold — both gated
     # on the same mlt.dat presence as the fold above, so the raw seed never
