@@ -1003,7 +1003,9 @@ def _load_policy_metadata(case_dir: Path) -> dict:
 
 @dataclasses.dataclass
 class OutputMetadata:
-    """``metadata.json`` from each output subdirectory."""
+    """Per-``output/`` subdirectory metadata: ``training``/``simulation`` from
+    each ``metadata.json``, ``policy`` from the self-describing ``manifest.bin``
+    checkpoint (see :func:`load_output_metadata`)."""
 
     training: dict
     simulation: dict
