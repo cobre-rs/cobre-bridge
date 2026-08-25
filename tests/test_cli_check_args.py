@@ -21,8 +21,8 @@ from rich.console import Console
 from typer.testing import CliRunner, Result
 
 from cobre_bridge.cli import app
-from cobre_bridge.cli.app import _run_check, _run_decomp_check
 from cobre_bridge.cli.args import CheckArgs
+from cobre_bridge.cli.check import _run_check, _run_decomp_check
 from cobre_bridge.core.diagnostics import Diagnostic, Severity
 from cobre_bridge.core.preflight import CheckItem, PreflightResult, PreflightVerdict
 from tests.conftest import _make_fake_newave_dir, _run_cli_subprocess
@@ -43,7 +43,7 @@ def _spy_render_checklist(monkeypatch: pytest.MonkeyPatch) -> dict[str, Console]
     """
     import importlib
 
-    from cobre_bridge.cli.app import render_checklist as original
+    from cobre_bridge.cli.check import render_checklist as original
 
     captured: dict[str, Console] = {}
 
@@ -56,11 +56,11 @@ def _spy_render_checklist(monkeypatch: pytest.MonkeyPatch) -> dict[str, Console]
         captured["diagnostics_console"] = diagnostics_console
         original(*args, **kwargs)
 
-    # `cobre_bridge.cli`'s D5 __init__ re-exports `app` (the Typer instance)
-    # from this same-named submodule, so `monkeypatch.setattr`'s string form
-    # would resolve `cli.app` to that Typer instance, not the module -- pass
-    # the module object directly instead.
-    cli_module = importlib.import_module("cobre_bridge.cli.app")
+    # `render_checklist` is patched on its DEFINING module (mock discipline):
+    # the handler resolves the name off `cli.check`'s own module globals, so a
+    # spy set anywhere else (e.g. `cli.app`, which only re-imports the handler)
+    # never intercepts the call.
+    cli_module = importlib.import_module("cobre_bridge.cli.check")
     monkeypatch.setattr(cli_module, "render_checklist", _spy)
     return captured
 
@@ -353,7 +353,7 @@ class TestCheckCommand:
 
     def test_verdict_to_exit_code_mapping(self) -> None:
         """The 0/1/2 mapping is exactly OK/WARNINGS/WILL_NOT_CONVERT (2 = severe)."""
-        from cobre_bridge.cli.app import _VERDICT_EXIT_CODE
+        from cobre_bridge.cli.check import _VERDICT_EXIT_CODE
         from cobre_bridge.core.preflight import PreflightVerdict
 
         assert _VERDICT_EXIT_CODE == {

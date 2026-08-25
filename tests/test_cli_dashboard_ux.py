@@ -25,8 +25,8 @@ from rich.console import Console
 from typer.testing import CliRunner, Result
 
 from cobre_bridge.cli import app
-from cobre_bridge.cli.app import _run_dashboard
 from cobre_bridge.cli.args import DashboardArgs
+from cobre_bridge.cli.dashboard import _run_dashboard
 
 
 def _invoke(argv: list[str]) -> Result:
@@ -53,7 +53,7 @@ def _stub_build_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub ``build_dashboard`` to write a tiny file at the output path.
 
     ``_run_dashboard`` imports ``build_dashboard`` lazily inside its own body,
-    so the patch target is the defining module, not ``cobre_bridge.cli.app``.
+    so the patch target is the defining module, not ``cobre_bridge.cli.dashboard``.
     """
 
     def _fake_build(_case_dir: Path, output_path: Path) -> None:
@@ -73,7 +73,7 @@ def _spy_print_status(monkeypatch: pytest.MonkeyPatch) -> list[Console]:
     """
     import importlib
 
-    from cobre_bridge.cli.app import print_status as original
+    from cobre_bridge.cli.dashboard import print_status as original
 
     captured: list[Console] = []
 
@@ -83,11 +83,11 @@ def _spy_print_status(monkeypatch: pytest.MonkeyPatch) -> list[Console]:
         captured.append(console)
         original(*args, **kwargs)
 
-    # `cobre_bridge.cli`'s D5 __init__ re-exports `app` (the Typer instance)
-    # from this same-named submodule, so `monkeypatch.setattr`'s string form
-    # would resolve `cli.app` to that Typer instance, not the module -- pass
-    # the module object directly instead.
-    cli_module = importlib.import_module("cobre_bridge.cli.app")
+    # `print_status` is patched on its DEFINING module (mock discipline): the
+    # handler resolves the name off `cli.dashboard`'s own module globals, so a
+    # spy set anywhere else (e.g. `cli.app`, which only re-imports the handler)
+    # never intercepts the call.
+    cli_module = importlib.import_module("cobre_bridge.cli.dashboard")
     monkeypatch.setattr(cli_module, "print_status", _spy)
     return captured
 
@@ -193,7 +193,7 @@ class TestDashboardOpen:
     stubbed (``cobre_bridge.dashboard.build_dashboard``) so it only writes a tiny
     file at the output path — enough for the ``output_path.stat()`` size line to
     succeed without building a real dashboard. ``webbrowser.open`` is patched at
-    its ``cobre_bridge.cli.app`` import site so no actual browser is launched.
+    its ``cobre_bridge.cli.dashboard`` import site so no actual browser is launched.
     """
 
     def _invoke_main(
@@ -247,7 +247,7 @@ class TestDashboardOpen:
         expected_uri = (case_dir / "dashboard.html").resolve().as_uri()
 
         with patch(
-            "cobre_bridge.cli.app.webbrowser.open", return_value=True
+            "cobre_bridge.cli.dashboard.webbrowser.open", return_value=True
         ) as mock_open:
             exit_code, _stdout, _stderr = self._invoke_main(
                 ["dashboard", str(case_dir), "--open"], monkeypatch
@@ -262,7 +262,7 @@ class TestDashboardOpen:
         case_dir = self._make_case_dir(tmp_path)
         self._stub_build_dashboard(monkeypatch)
 
-        with patch("cobre_bridge.cli.app.webbrowser.open") as mock_open:
+        with patch("cobre_bridge.cli.dashboard.webbrowser.open") as mock_open:
             exit_code, _stdout, _stderr = self._invoke_main(
                 ["dashboard", str(case_dir)], monkeypatch
             )
@@ -277,7 +277,7 @@ class TestDashboardOpen:
         self._stub_build_dashboard(monkeypatch)
 
         with patch(
-            "cobre_bridge.cli.app.webbrowser.open",
+            "cobre_bridge.cli.dashboard.webbrowser.open",
             side_effect=webbrowser.Error("no browser"),
         ):
             exit_code, _stdout, stderr = self._invoke_main(
@@ -293,7 +293,7 @@ class TestDashboardOpen:
         case_dir = self._make_case_dir(tmp_path)
         self._stub_build_dashboard(monkeypatch)
 
-        with patch("cobre_bridge.cli.app.webbrowser.open", return_value=False):
+        with patch("cobre_bridge.cli.dashboard.webbrowser.open", return_value=False):
             exit_code, _stdout, stderr = self._invoke_main(
                 ["dashboard", str(case_dir), "--open"], monkeypatch
             )
@@ -419,7 +419,7 @@ class TestDashboardJson:
         case_dir = self._make_case_dir(tmp_path)
         self._stub_build_dashboard(monkeypatch)
 
-        with patch("cobre_bridge.cli.app.webbrowser.open", return_value=False):
+        with patch("cobre_bridge.cli.dashboard.webbrowser.open", return_value=False):
             exit_code, stdout, stderr = self._invoke_main(
                 ["dashboard", str(case_dir), "--json", "--open"], monkeypatch
             )
