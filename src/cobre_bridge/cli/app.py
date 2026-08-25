@@ -14,23 +14,38 @@ from typing import TYPE_CHECKING, Annotated, NoReturn
 import typer
 
 from cobre_bridge import __version__
-from cobre_bridge.cli_args import (
+from cobre_bridge.cli.args import (
     CheckArgs,
     CompareArgs,
     ConvertArgs,
     DashboardArgs,
     _parse_formats,
 )
-from cobre_bridge.cobre.compat import MIN_COBRE_VERSION as MIN_COBRE_VERSION
-from cobre_bridge.cobre_validation import (
-    _partition_validation_warnings as _partition_validation_warnings,
-)
-from cobre_bridge.cobre_validation import _run_cobre_validation
-from cobre_bridge.config_resolution import (
+from cobre_bridge.cli.config import (
     RESULTS_TOLERANCE_DEFAULT,
     load_config,
 )
-from cobre_bridge.conversion_manifest import _write_conversion_manifest
+from cobre_bridge.cli.conversion_manifest import _write_conversion_manifest
+
+# noqa: F401 below -- re-exported so `cli._NULL_HANDLER` keeps resolving for the
+# ``test_configure_logging_levels`` import + the ``cli._configure_logging`` spy sites.
+from cobre_bridge.cli.logging_config import NULL_HANDLER as _NULL_HANDLER  # noqa: F401
+from cobre_bridge.cli.logging_config import configure_logging as _configure_logging
+from cobre_bridge.cli.logging_config import restore_log_file_handler
+from cobre_bridge.cli.validate import (
+    _partition_validation_warnings as _partition_validation_warnings,
+)
+from cobre_bridge.cli.validate import _run_cobre_validation
+from cobre_bridge.cli.verdict import (
+    _convert_status,
+    _convert_verdict_summary,
+    build_verdict,
+    check_summary,
+    compare_summary,
+    dashboard_summary,
+    decomp_dataset_summary,
+)
+from cobre_bridge.cobre.compat import MIN_COBRE_VERSION as MIN_COBRE_VERSION
 from cobre_bridge.core.diagnostics import _write_diagnostics_json
 from cobre_bridge.core.errors import (
     BridgeError,
@@ -40,12 +55,6 @@ from cobre_bridge.core.errors import (
 )
 from cobre_bridge.core.preflight import PreflightVerdict
 from cobre_bridge.decomp.files import discover_decomp_files
-
-# noqa: F401 below -- re-exported so `cli._NULL_HANDLER` keeps resolving for the
-# ``test_configure_logging_levels`` import + the ``cli._configure_logging`` spy sites.
-from cobre_bridge.logging_config import NULL_HANDLER as _NULL_HANDLER  # noqa: F401
-from cobre_bridge.logging_config import configure_logging as _configure_logging
-from cobre_bridge.logging_config import restore_log_file_handler
 from cobre_bridge.ui.console import (
     conversion_progress,
     get_console,
@@ -56,22 +65,13 @@ from cobre_bridge.ui.console import (
     render_diagnostics,
     spinner,
 )
-from cobre_bridge.verdict import (
-    _convert_status,
-    _convert_verdict_summary,
-    build_verdict,
-    check_summary,
-    compare_summary,
-    dashboard_summary,
-    decomp_dataset_summary,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from rich.console import Console
 
-    from cobre_bridge.cli_args import CommonArgs
+    from cobre_bridge.cli.args import CommonArgs
     from cobre_bridge.comparators.alignment import EntityAlignment
     from cobre_bridge.comparators.dataset import ComparisonDataset
     from cobre_bridge.core.conversion import ConversionReport

@@ -1,4 +1,4 @@
-"""Tests for :mod:`cobre_bridge.conversion_manifest`."""
+"""Tests for :mod:`cobre_bridge.cli.conversion_manifest`."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 import cobre_bridge
-from cobre_bridge.conversion_manifest import ConversionManifest
-from cobre_bridge.conversion_manifest import git_sha as conversion_git_sha
+from cobre_bridge.cli.conversion_manifest import ConversionManifest
+from cobre_bridge.cli.conversion_manifest import git_sha as conversion_git_sha
 from cobre_bridge.core.diagnostics import Diagnostic, Severity
 from cobre_bridge.core.provenance import hash_input_files, summarize_diagnostics
 from tests.conftest import make_nw_files

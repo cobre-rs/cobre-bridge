@@ -20,7 +20,7 @@ import pyarrow.parquet as pq
 import pytest
 import typer
 
-from cobre_bridge.cli_args import CompareArgs
+from cobre_bridge.cli.args import CompareArgs
 from cobre_bridge.cobre.readers import (
     CobreReadError,
     _load_entity_bus_map,

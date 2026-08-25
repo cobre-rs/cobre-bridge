@@ -1,4 +1,4 @@
-"""Unit tests for the typed CLI argument dataclasses (``cobre_bridge.cli_args``).
+"""Unit tests for the typed CLI argument dataclasses (``cobre_bridge.cli.args``).
 
 Tier 1 — pure Python, imports no cobre.
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from cobre_bridge.cli_args import (
+from cobre_bridge.cli.args import (
     CheckArgs,
     CommonArgs,
     CompareArgs,
@@ -183,11 +183,11 @@ def test_rich_import_only_inside_type_checking_guard() -> None:
     runtime ``from rich import ...`` placed before or beside the
     ``TYPE_CHECKING`` guard is still caught.
     """
-    import cobre_bridge.cli_args as module
+    import cobre_bridge.cli.args as module
 
     tree = ast.parse(inspect.getsource(module))
     rich_imports = _rich_import_nodes(tree)
-    assert rich_imports, "expected a rich import in cli_args.py"
+    assert rich_imports, "expected a rich import in cli/args.py"
 
     guarded_ids = _type_checking_guarded_node_ids(tree)
     for node in rich_imports:

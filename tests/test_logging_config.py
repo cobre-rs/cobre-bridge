@@ -1,4 +1,4 @@
-"""Tests for logging_config.py."""
+"""Tests for cli/logging_config.py."""
 
 from __future__ import annotations
 

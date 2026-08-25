@@ -153,9 +153,9 @@ class TestCliInProcess:
     def test_convert_verdict_shape(self) -> None:
         """The convert ``summary``+``status`` helpers feed the unified envelope."""
         from cobre_bridge.cli.app import _convert_status, _convert_verdict_summary
+        from cobre_bridge.cli.verdict import build_verdict
         from cobre_bridge.core.conversion import ConversionReport
         from cobre_bridge.core.diagnostics import Diagnostic, Severity
-        from cobre_bridge.verdict import build_verdict
 
         report = ConversionReport(
             hydro_count=10,
@@ -199,8 +199,8 @@ class TestCliInProcess:
     def test_convert_verdict_error_status_on_error_diagnostic(self) -> None:
         """Any ERROR-severity diagnostic flips ``status`` to ``"error"``."""
         from cobre_bridge.cli.app import _convert_status, _convert_verdict_summary
+        from cobre_bridge.cli.verdict import build_verdict
         from cobre_bridge.core.diagnostics import Diagnostic, Severity
-        from cobre_bridge.verdict import build_verdict
 
         error = Diagnostic(
             code="boom-code",
@@ -432,7 +432,7 @@ class TestCliInProcess:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A successful conversion leaves a valid provenance manifest in dst."""
-        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.cli.conversion_manifest import ConversionManifest
         from cobre_bridge.core.conversion import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -482,7 +482,7 @@ class TestCliInProcess:
         constant itself.
         """
         from cobre_bridge.cli import MIN_COBRE_VERSION
-        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.cli.conversion_manifest import ConversionManifest
         from cobre_bridge.core.conversion import ConversionReport
 
         assert MIN_COBRE_VERSION == "0.15.0"
@@ -781,7 +781,7 @@ class TestCliInProcess:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The manifest carries the conversion's diagnostics + their summary."""
-        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.cli.conversion_manifest import ConversionManifest
         from cobre_bridge.core.conversion import ConversionReport
         from cobre_bridge.core.diagnostics import Diagnostic, Severity
 
@@ -858,7 +858,7 @@ class TestCliInProcess:
                 return_value=fake_report,
             ),
             patch(
-                "cobre_bridge.conversion_manifest.ConversionManifest.to_json",
+                "cobre_bridge.cli.conversion_manifest.ConversionManifest.to_json",
                 _raise,
             ),
         ):
@@ -1932,7 +1932,7 @@ class TestCliInProcess:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A successful ``convert decomp`` leaves a valid provenance manifest."""
-        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.cli.conversion_manifest import ConversionManifest
         from cobre_bridge.core.conversion import ConversionReport
 
         src = _make_fake_decomp_dir(tmp_path)
@@ -1971,7 +1971,7 @@ class TestCliInProcess:
     ) -> None:
         """The DECOMP manifest's ``min_cobre_version`` tracks the CLI constant."""
         from cobre_bridge.cli import MIN_COBRE_VERSION
-        from cobre_bridge.conversion_manifest import ConversionManifest
+        from cobre_bridge.cli.conversion_manifest import ConversionManifest
         from cobre_bridge.core.conversion import ConversionReport
 
         src = _make_fake_decomp_dir(tmp_path)

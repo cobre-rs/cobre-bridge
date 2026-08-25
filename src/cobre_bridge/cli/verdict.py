@@ -23,7 +23,7 @@ its payload by supplying a ``summary`` dict, never a new top-level key.
 The envelope itself is deterministic: it carries no timestamp, no git SHA, no
 absolute path. Determinism of the ``summary`` contents is the caller's
 responsibility; provenance (if ever needed) lives in
-:mod:`cobre_bridge.conversion_manifest`, never here.
+:mod:`cobre_bridge.cli.conversion_manifest`, never here.
 
 Version bump policy for :data:`SCHEMA_VERSION`: increment it when a key is
 renamed or removed, or when an existing key's meaning changes — a breaking

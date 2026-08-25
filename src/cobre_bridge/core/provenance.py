@@ -2,7 +2,7 @@
 
 Defines :class:`ProvenanceManifest`, the plain base class supplying
 ``to_json``/``from_json`` for the two provenance-record dataclasses
-(:class:`cobre_bridge.conversion_manifest.ConversionManifest` and
+(:class:`cobre_bridge.cli.conversion_manifest.ConversionManifest` and
 :class:`cobre_bridge.comparators.manifest.ComparisonManifest`), plus the
 input-hashing and diagnostics-summarizing helpers both records use
 (:func:`hash_input_files`, :func:`summarize_diagnostics`). Track-neutral: this

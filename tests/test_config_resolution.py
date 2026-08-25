@@ -1,4 +1,4 @@
-"""Unit tests for the leaf config-resolution layer (``cobre_bridge.config_resolution``).
+"""Unit tests for the leaf config-resolution layer (``cobre_bridge.cli.config``).
 
 Every test isolates discovery from the real environment: the cwd chain is driven
 through ``start=`` (or ``monkeypatch.chdir``) and ``XDG_CONFIG_HOME`` / ``HOME``
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from cobre_bridge.config_resolution import (
+from cobre_bridge.cli.config import (
     BridgeConfig,
     discover_config_path,
     load_config,

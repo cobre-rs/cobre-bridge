@@ -26,7 +26,7 @@ from typer.testing import CliRunner, Result
 
 from cobre_bridge.cli import app
 from cobre_bridge.cli.app import _run_dashboard
-from cobre_bridge.cli_args import DashboardArgs
+from cobre_bridge.cli.args import DashboardArgs
 
 
 def _invoke(argv: list[str]) -> Result:

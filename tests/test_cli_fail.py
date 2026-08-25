@@ -16,9 +16,9 @@ import pytest
 import typer
 
 from cobre_bridge.cli.app import _fail
-from cobre_bridge.cli_args import CompareArgs, ConvertArgs, DashboardArgs
+from cobre_bridge.cli.args import CompareArgs, ConvertArgs, DashboardArgs
+from cobre_bridge.cli.verdict import convert_summary
 from cobre_bridge.core.errors import SourceFileError
-from cobre_bridge.verdict import convert_summary
 
 
 def _convert_args(*, json_output: bool) -> ConvertArgs:

@@ -18,8 +18,8 @@ from unittest.mock import patch
 
 import pytest
 
-from cobre_bridge.cli_args import CompareArgs
-from cobre_bridge.config_resolution import RESULTS_TOLERANCE_DEFAULT, BridgeConfig
+from cobre_bridge.cli.args import CompareArgs
+from cobre_bridge.cli.config import RESULTS_TOLERANCE_DEFAULT, BridgeConfig
 
 # `cobre_bridge.cli`'s D5 __init__ re-exports `app` (the Typer instance) from
 # this same-named submodule, shadowing `cli.app` as a plain `import ... as`
@@ -171,7 +171,7 @@ class TestResolveCompareSettings:
         fmt: list[str] | None,
         out_dir: Path | None,
     ) -> CompareArgs:
-        from cobre_bridge.cli_args import CompareArgs
+        from cobre_bridge.cli.args import CompareArgs
 
         return CompareArgs(
             source_dir=Path("source"),
@@ -211,7 +211,7 @@ class TestResolveCompareSettings:
 
     def test_flag_or_env_value_wins_over_config(self) -> None:
         """A non-None ``args`` value (flag or env) is kept, ignoring config."""
-        from cobre_bridge.config_resolution import BridgeConfig
+        from cobre_bridge.cli.config import BridgeConfig
 
         config = BridgeConfig(
             results_tolerance=5e-4,
@@ -236,7 +236,7 @@ class TestResolveCompareSettings:
 
     def test_config_fills_when_flag_and_env_are_none(self) -> None:
         """With ``args`` all None, the config-file values fill every field."""
-        from cobre_bridge.config_resolution import BridgeConfig
+        from cobre_bridge.cli.config import BridgeConfig
 
         config = BridgeConfig(
             results_tolerance=5e-4,
@@ -256,7 +256,7 @@ class TestResolveCompareSettings:
 
     def test_builtin_default_when_config_empty(self) -> None:
         """An empty config falls through to the built-in tolerance default."""
-        from cobre_bridge.config_resolution import (
+        from cobre_bridge.cli.config import (
             RESULTS_TOLERANCE_DEFAULT,
             BridgeConfig,
         )
@@ -274,7 +274,7 @@ class TestResolveCompareSettings:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Each config-load warning is surfaced on stderr, never on stdout."""
-        from cobre_bridge.config_resolution import BridgeConfig
+        from cobre_bridge.cli.config import BridgeConfig
 
         config = BridgeConfig(
             warnings=("Ignoring malformed config file cobre-bridge.toml: bad",),

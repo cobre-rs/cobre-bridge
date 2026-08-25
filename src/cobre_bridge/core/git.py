@@ -2,7 +2,7 @@
 
 Lives at the package root (rather than inside ``comparators``) because both
 the comparison manifest (:mod:`cobre_bridge.comparators.manifest`) and the
-conversion manifest (:mod:`cobre_bridge.conversion_manifest`) record the git
+conversion manifest (:mod:`cobre_bridge.cli.conversion_manifest`) record the git
 SHA, and neither should depend on the other's private internals. The git
 subprocess runs only when :func:`git_sha` is called — never at import time.
 """

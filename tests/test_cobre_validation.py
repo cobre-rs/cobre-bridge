@@ -1,4 +1,4 @@
-"""Tests for cobre_validation.py."""
+"""Tests for cli/validate.py."""
 
 from __future__ import annotations
 

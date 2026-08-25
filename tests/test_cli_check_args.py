@@ -22,7 +22,7 @@ from typer.testing import CliRunner, Result
 
 from cobre_bridge.cli import app
 from cobre_bridge.cli.app import _run_check, _run_decomp_check
-from cobre_bridge.cli_args import CheckArgs
+from cobre_bridge.cli.args import CheckArgs
 from cobre_bridge.core.diagnostics import Diagnostic, Severity
 from cobre_bridge.core.preflight import CheckItem, PreflightResult, PreflightVerdict
 from tests.conftest import _make_fake_newave_dir, _run_cli_subprocess
@@ -316,8 +316,8 @@ class TestCheckCommand:
 
     def test_check_verdict_shape(self) -> None:
         """The check ``summary`` helper feeds the unified envelope (checks nested)."""
+        from cobre_bridge.cli.verdict import build_verdict, check_summary
         from cobre_bridge.core.preflight import PreflightVerdict
-        from cobre_bridge.verdict import build_verdict, check_summary
 
         result = self._result(PreflightVerdict.WILL_NOT_CONVERT)
         summary = check_summary(

@@ -4,7 +4,7 @@ Defines :class:`ComparisonManifest`, a provenance record emitted alongside
 comparison artifacts so that a divergence-investigation agent can know exactly
 which cases, tolerance, tool versions, and git state produced a given set of
 artifacts, plus which artifacts were emitted and the headline divergences. It
-mirrors :mod:`cobre_bridge.conversion_manifest`; both subclass
+mirrors :mod:`cobre_bridge.cli.conversion_manifest`; both subclass
 :class:`cobre_bridge.core.provenance.ProvenanceManifest` for their shared
 ``to_json``/``from_json`` behaviour.
 
@@ -74,7 +74,7 @@ class ComparisonManifest(ProvenanceManifest):
         them is out of scope for this module. ``input_files`` /
         ``diagnostics_summary`` / ``diagnostics`` default to ``None``, which
         this method normalizes to an empty list/dict, mirroring
-        :meth:`cobre_bridge.conversion_manifest.ConversionManifest.create`.
+        :meth:`cobre_bridge.cli.conversion_manifest.ConversionManifest.create`.
         """
         return cls(
             command=command,

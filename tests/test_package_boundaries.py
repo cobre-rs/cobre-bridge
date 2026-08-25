@@ -247,16 +247,7 @@ def _scan_imports() -> tuple[
 
 
 # Rule C. Shrinks to empty as loose modules move into a package; never widen.
-_PENDING_ROOT_MODULES: frozenset[str] = frozenset(
-    {
-        "cli_args",
-        "cobre_validation",
-        "config_resolution",
-        "conversion_manifest",
-        "logging_config",
-        "verdict",
-    }
-)
+_PENDING_ROOT_MODULES: frozenset[str] = frozenset()
 
 # Rule A. Shrinks to empty as each move corrects its direction; never widen.
 _PENDING_DIRECTION_EDGES: frozenset[tuple[str, str]] = frozenset(
@@ -344,6 +335,13 @@ _TYPE_CHECKING_EDGES: frozenset[tuple[str, str]] = frozenset(
         ("cli.app", "core.diagnostics"),
         ("cli.app", "newave.case"),
         ("cli.app", "newave.id_map"),
+        ("cli.conversion_manifest", "core.conversion"),
+        ("cli.conversion_manifest", "decomp.files"),
+        ("cli.conversion_manifest", "newave.files"),
+        ("cli.verdict", "comparators.dataset"),
+        ("cli.verdict", "comparators.verdict"),
+        ("cli.verdict", "core.conversion"),
+        ("cli.verdict", "core.diagnostics"),
         ("comparators.alignment", "newave.case"),
         ("comparators.alignment", "newave.id_map"),
         ("comparators.constraints_compare", "newave.id_map"),
