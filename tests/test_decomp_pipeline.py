@@ -370,7 +370,7 @@ class TestEmissionCheckWiring:
         verdict via ``cli.app._convert_status`` — the single function both
         pipelines' convert verdicts key off (AC #3), not a bare inspection of
         the diagnostic."""
-        from cobre_bridge.cli.app import _convert_status
+        from cobre_bridge.cli.verdict import _convert_status
         from cobre_bridge.core import diagnostics as dx
         from cobre_bridge.core.emission_checks import check_hydro_bounds_no_raising
 

@@ -313,7 +313,7 @@ _PENDING_DIRECTION_EDGES: frozenset[tuple[str, str]] = frozenset(
 # Rule B. Shrinks to empty as each name is promoted to a public home; never widen.
 _PENDING_PRIVATE_EDGES: frozenset[tuple[str, str, str]] = frozenset(
     {
-        ("cli.app", "core.diagnostics", "_write_diagnostics_json"),
+        ("cli.convert", "core.diagnostics", "_write_diagnostics_json"),
         ("dashboard.tabs.plants", "ui.html", "_sparkline_svg"),
     }
 )
@@ -331,13 +331,13 @@ _TYPE_CHECKING_EDGES: frozenset[tuple[str, str]] = frozenset(
     {
         ("cli.app", "comparators.alignment"),
         ("cli.app", "comparators.dataset"),
-        ("cli.app", "core.conversion"),
-        ("cli.app", "core.diagnostics"),
         ("cli.app", "newave.case"),
         ("cli.app", "newave.id_map"),
         ("cli.conversion_manifest", "core.conversion"),
         ("cli.conversion_manifest", "decomp.files"),
         ("cli.conversion_manifest", "newave.files"),
+        ("cli.convert", "core.conversion"),
+        ("cli.convert", "core.diagnostics"),
         ("cli.verdict", "comparators.dataset"),
         ("cli.verdict", "comparators.verdict"),
         ("cli.verdict", "core.conversion"),

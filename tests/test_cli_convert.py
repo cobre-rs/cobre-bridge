@@ -152,8 +152,11 @@ class TestCliInProcess:
 
     def test_convert_verdict_shape(self) -> None:
         """The convert ``summary``+``status`` helpers feed the unified envelope."""
-        from cobre_bridge.cli.app import _convert_status, _convert_verdict_summary
-        from cobre_bridge.cli.verdict import build_verdict
+        from cobre_bridge.cli.verdict import (
+            _convert_status,
+            _convert_verdict_summary,
+            build_verdict,
+        )
         from cobre_bridge.core.conversion import ConversionReport
         from cobre_bridge.core.diagnostics import Diagnostic, Severity
 
@@ -198,8 +201,11 @@ class TestCliInProcess:
 
     def test_convert_verdict_error_status_on_error_diagnostic(self) -> None:
         """Any ERROR-severity diagnostic flips ``status`` to ``"error"``."""
-        from cobre_bridge.cli.app import _convert_status, _convert_verdict_summary
-        from cobre_bridge.cli.verdict import build_verdict
+        from cobre_bridge.cli.verdict import (
+            _convert_status,
+            _convert_verdict_summary,
+            build_verdict,
+        )
         from cobre_bridge.core.diagnostics import Diagnostic, Severity
 
         error = Diagnostic(
