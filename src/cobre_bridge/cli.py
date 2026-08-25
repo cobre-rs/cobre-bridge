@@ -38,13 +38,13 @@ from cobre_bridge.core.errors import (
     SourceFileError,
     diagnostic_from_exception,
 )
+from cobre_bridge.core.preflight import PreflightVerdict
 
 # noqa: F401 below -- re-exported so `cli._NULL_HANDLER` keeps resolving for the
 # ``test_configure_logging_levels`` import + the ``cli._configure_logging`` spy sites.
 from cobre_bridge.logging_config import NULL_HANDLER as _NULL_HANDLER  # noqa: F401
 from cobre_bridge.logging_config import configure_logging as _configure_logging
 from cobre_bridge.logging_config import restore_log_file_handler
-from cobre_bridge.preflight import PreflightVerdict
 from cobre_bridge.ui.console import (
     conversion_progress,
     get_console,
@@ -70,13 +70,13 @@ if TYPE_CHECKING:
 
     from rich.console import Console
 
-    from cobre_bridge.case import NewaveCase
     from cobre_bridge.cli_args import CommonArgs
     from cobre_bridge.comparators.alignment import EntityAlignment
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.core.conversion import ConversionReport
     from cobre_bridge.core.diagnostics import Diagnostic
-    from cobre_bridge.id_map import NewaveIdMap
-    from cobre_bridge.pipeline import ConversionReport
+    from cobre_bridge.newave.case import NewaveCase
+    from cobre_bridge.newave.id_map import NewaveIdMap
 
 
 def _load_compare_context(
@@ -96,9 +96,9 @@ def _load_compare_context(
     under ``--json`` a verdict envelope) if the source model case directory is
     missing (``FileNotFoundError`` from ``NewaveCase.from_directory``).
     """
-    from cobre_bridge.case import NewaveCase
     from cobre_bridge.cobre.readers import read_cobre_lines
     from cobre_bridge.comparators.alignment import build_entity_alignment
+    from cobre_bridge.newave.case import NewaveCase
 
     try:
         case = NewaveCase.from_directory(newave_dir)
@@ -474,7 +474,7 @@ def _run_check(args: CheckArgs) -> None:
     ``OK`` → 0, ``WARNINGS`` → 1, ``WILL_NOT_CONVERT`` → 2. Writes no files and
     never calls the conversion pipeline.
     """
-    from cobre_bridge.preflight import run_preflight
+    from cobre_bridge.newave.preflight import run_preflight
 
     src: Path = args.src
     result = run_preflight(src)
@@ -536,11 +536,11 @@ def _handle_conversion_pipeline_failure(
 
 def _run_newave_conversion(args: ConvertArgs) -> None:
     """Execute the convert newave subcommand."""
-    from cobre_bridge.newave_files import NewaveFiles
-    from cobre_bridge.pipeline import (
+    from cobre_bridge.core.conversion import clear_dst_contents
+    from cobre_bridge.newave.files import NewaveFiles
+    from cobre_bridge.newave.pipeline import (
         CONVERSION_PHASE_LABELS,
         NEWAVE_CLEARED_ARTIFACTS,
-        clear_dst_contents,
         convert_newave_case,
     )
 

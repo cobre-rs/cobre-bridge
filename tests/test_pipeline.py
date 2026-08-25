@@ -21,7 +21,7 @@ from tests.conftest import (
 
 class TestConversionReport:
     def test_str_format(self) -> None:
-        from cobre_bridge.pipeline import ConversionReport
+        from cobre_bridge.core.conversion import ConversionReport
 
         report = ConversionReport(
             hydro_count=3,
@@ -38,7 +38,7 @@ class TestConversionReport:
         assert "60 stages" in s
 
     def test_default_zeros(self) -> None:
-        from cobre_bridge.pipeline import ConversionReport
+        from cobre_bridge.core.conversion import ConversionReport
 
         report = ConversionReport()
         assert report.hydro_count == 0
@@ -161,7 +161,7 @@ class TestConvertNewaweCasePipeline:
         self, tmp_path: Path
     ) -> None:
         """When convert_production_models returns data, the file is written."""
-        from cobre_bridge.pipeline import convert_newave_case
+        from cobre_bridge.newave.pipeline import convert_newave_case
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
@@ -194,7 +194,7 @@ class TestConvertNewaweCasePipeline:
             # Override the production_models patch (entered last -> exits first).
             stack.enter_context(
                 patch(
-                    "cobre_bridge.pipeline.hydro_conv.convert_production_models",
+                    "cobre_bridge.newave.pipeline.hydro_conv.convert_production_models",
                     return_value=_FAKE_PROD_MODELS,
                 )
             )
@@ -220,14 +220,14 @@ class TestConvertNewaweCasePipeline:
         assert (dst / "system" / "hydro_production_models.json").exists()
 
     def test_missing_required_file_raises(self, tmp_path: Path) -> None:
-        from cobre_bridge.pipeline import convert_newave_case
+        from cobre_bridge.newave.pipeline import convert_newave_case
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
 
         with (
             patch(
-                "cobre_bridge.pipeline.NewaveCase.from_directory",
+                "cobre_bridge.newave.pipeline.NewaveCase.from_directory",
                 side_effect=FileNotFoundError(
                     f"Required NEWAVE file not found in {src}: hidr.dat"
                 ),
@@ -241,7 +241,8 @@ class TestConvertNewaweCasePipeline:
         """``dry_run=True`` writes nothing yet records the would-write paths."""
         import contextlib
 
-        from cobre_bridge.pipeline import ConversionReport, convert_newave_case
+        from cobre_bridge.core.conversion import ConversionReport
+        from cobre_bridge.newave.pipeline import convert_newave_case
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
@@ -303,7 +304,7 @@ class TestEmissionCheckWiring:
 
         from cobre_bridge.cli import _convert_status
         from cobre_bridge.core.diagnostics import Severity
-        from cobre_bridge.pipeline import convert_newave_case
+        from cobre_bridge.newave.pipeline import convert_newave_case
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
@@ -342,13 +343,13 @@ class TestEmissionCheckWiring:
                 stack.enter_context(p)
             stack.enter_context(
                 patch(
-                    "cobre_bridge.pipeline.hydro_conv.convert_hydros",
+                    "cobre_bridge.newave.pipeline.hydro_conv.convert_hydros",
                     return_value=hydros,
                 )
             )
             stack.enter_context(
                 patch(
-                    "cobre_bridge.pipeline.hydro_conv.convert_storage_bounds",
+                    "cobre_bridge.newave.pipeline.hydro_conv.convert_storage_bounds",
                     return_value=over_declared_bounds,
                 )
             )
@@ -394,8 +395,9 @@ class TestConversionWarningCapture:
     """``convert_newave_case`` surfaces converter warnings via ConversionReport."""
 
     def test_captures_and_dedupes_package_warnings(self, tmp_path: Path) -> None:
-        from cobre_bridge import pipeline
-        from cobre_bridge.pipeline import ConversionReport, convert_newave_case
+        from cobre_bridge.core.conversion import ConversionReport
+        from cobre_bridge.newave import pipeline
+        from cobre_bridge.newave.pipeline import convert_newave_case
 
         log = logging.getLogger("cobre_bridge.converters.fake")
 
@@ -422,8 +424,9 @@ class TestConversionWarningCapture:
         ]
 
     def test_no_warnings_when_clean(self, tmp_path: Path) -> None:
-        from cobre_bridge import pipeline
-        from cobre_bridge.pipeline import ConversionReport, convert_newave_case
+        from cobre_bridge.core.conversion import ConversionReport
+        from cobre_bridge.newave import pipeline
+        from cobre_bridge.newave.pipeline import convert_newave_case
 
         with patch.object(
             pipeline,
@@ -435,8 +438,8 @@ class TestConversionWarningCapture:
         assert report.warnings == []
 
     def test_collector_detached_even_on_exception(self, tmp_path: Path) -> None:
-        from cobre_bridge import pipeline
-        from cobre_bridge.pipeline import convert_newave_case
+        from cobre_bridge.newave import pipeline
+        from cobre_bridge.newave.pipeline import convert_newave_case
 
         pkg_logger = logging.getLogger("cobre_bridge")
         handlers_before = list(pkg_logger.handlers)
@@ -458,8 +461,8 @@ class TestConversionWarningCapture:
         """A failure partway through the write phase must not leave a partial,
         valid-looking case behind: the known pipeline outputs are removed so a
         plain (no --force) re-run is not refused as non-empty."""
-        from cobre_bridge import pipeline
-        from cobre_bridge.pipeline import convert_newave_case
+        from cobre_bridge.newave import pipeline
+        from cobre_bridge.newave.pipeline import convert_newave_case
 
         dst = tmp_path / "dst"
 
@@ -495,8 +498,8 @@ class TestConversionWarningCapture:
         """A dry-run failure must never clear ``dst``: it wrote nothing, and
         ``dst`` may be a pre-existing populated directory the user never
         asked to clear."""
-        from cobre_bridge import pipeline
-        from cobre_bridge.pipeline import convert_newave_case
+        from cobre_bridge.newave import pipeline
+        from cobre_bridge.newave.pipeline import convert_newave_case
 
         dst = tmp_path / "dst"
         dst.mkdir()
@@ -525,8 +528,9 @@ class TestConversionWarningCapture:
 
 def test_convert_newave_case_threads_on_phase(tmp_path: Path) -> None:
     """``convert_newave_case`` forwards its ``on_phase`` callback to the impl."""
-    from cobre_bridge import pipeline
-    from cobre_bridge.pipeline import ConversionReport, convert_newave_case
+    from cobre_bridge.core.conversion import ConversionReport
+    from cobre_bridge.newave import pipeline
+    from cobre_bridge.newave.pipeline import convert_newave_case
 
     received: list[str] = []
 

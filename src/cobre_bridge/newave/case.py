@@ -5,7 +5,7 @@ parsing layer on top. Converters used to take ``NewaveFiles`` and each re-parse 
 files they needed, so a single conversion re-read ``dger.dat`` ~26×, ``confhd.dat``
 ~27×, ``hidr.dat`` ~18×, and so on.
 
-:class:`NewaveCase` wraps a :class:`~cobre_bridge.newave_files.NewaveFiles` and
+:class:`NewaveCase` wraps a :class:`~cobre_bridge.newave.files.NewaveFiles` and
 exposes one :func:`functools.cached_property` per input file. The first access
 parses via the matching ``inewave`` reader; every later access is free. Required
 files return the reader; optional files return ``Reader | None`` (``None`` when
@@ -57,13 +57,13 @@ from inewave.newave import (
     VolrefSaz,
 )
 
-from cobre_bridge.newave_files import NewaveFiles
+from cobre_bridge.newave.files import NewaveFiles
 
 if TYPE_CHECKING:
     import pandas as pd
 
-    from cobre_bridge.horizon import StudyHorizon
-    from cobre_bridge.id_map import NewaveIdMap
+    from cobre_bridge.newave.horizon import StudyHorizon
+    from cobre_bridge.newave.id_map import NewaveIdMap
 
 
 @dataclass
@@ -232,7 +232,7 @@ class NewaveCase:
         ``StudyHorizon`` is a frozen dataclass, so the cached instance is safe to
         share across the converters that size their per-stage tables against it.
         """
-        from cobre_bridge.horizon import study_horizon
+        from cobre_bridge.newave.horizon import study_horizon
 
         return study_horizon(self.dger)
 
@@ -249,7 +249,7 @@ class NewaveCase:
         per access (not cached) — it's a cheap filter and callers may hold their own
         view, so a shared cached DataFrame could alias.
         """
-        from cobre_bridge.plants import active_hydros
+        from cobre_bridge.newave.plants import active_hydros
 
         return active_hydros(
             self.confhd.usinas,
@@ -260,7 +260,7 @@ class NewaveCase:
     @property
     def active_hydro_codes(self) -> list[int]:
         """``codigo_usina`` of the active hydros (in confhd declaration order)."""
-        from cobre_bridge.plants import active_hydro_codes
+        from cobre_bridge.newave.plants import active_hydro_codes
 
         return active_hydro_codes(
             self.confhd.usinas,
@@ -281,7 +281,7 @@ class NewaveCase:
         dead-volume filling row is admitted at its confhd declaration position. The
         path-only ``build_id_map`` keeps the ``EX``-only enumeration (``exph=None``).
         """
-        from cobre_bridge.id_map import build_id_map_from_readers
+        from cobre_bridge.newave.id_map import build_id_map_from_readers
 
         return build_id_map_from_readers(
             self.confhd,

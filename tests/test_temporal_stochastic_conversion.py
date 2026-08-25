@@ -15,7 +15,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 
 # ---------------------------------------------------------------------------
@@ -746,7 +746,7 @@ class TestConvertConfig:
         case = make_case(tmp_path, dger=dger, shist=mock_shist, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
-        from cobre_bridge.id_map import NewaveIdMap
+        from cobre_bridge.newave.id_map import NewaveIdMap
 
         result = convert_stages(
             case,
@@ -771,7 +771,7 @@ class TestConvertConfig:
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
         from cobre_bridge.converters.temporal import convert_stages
-        from cobre_bridge.id_map import NewaveIdMap
+        from cobre_bridge.newave.id_map import NewaveIdMap
 
         result = convert_stages(
             case,

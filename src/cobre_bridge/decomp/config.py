@@ -28,12 +28,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.converters.network import (
-    PCORTEOL,
-    PEXC,
-    PINT,
-    hydro_penalty_costs,
-)
+from cobre_bridge.core.penalties import PCORTEOL, PEXC, PINT, hydro_penalty_costs
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

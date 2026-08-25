@@ -26,14 +26,14 @@ from idecomp.decomp.modelos import dadger as _dadger_models
 
 from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity
 from cobre_bridge.core.errors import FieldParseError, diagnostic_from_exception
-from cobre_bridge.decomp import constraint_registers
-from cobre_bridge.decomp.cadastro import APPLIED_AC_CLASSES, UNINGESTABLE_AC_CLASSES
-from cobre_bridge.preflight import (
+from cobre_bridge.core.preflight import (
     CheckItem,
     PreflightResult,
     PreflightVerdict,
     optional_input_advisory,
 )
+from cobre_bridge.decomp import constraint_registers
+from cobre_bridge.decomp.cadastro import APPLIED_AC_CLASSES, UNINGESTABLE_AC_CLASSES
 
 if TYPE_CHECKING:
     from idecomp.decomp import Dadger, Vazoes

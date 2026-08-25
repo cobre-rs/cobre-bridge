@@ -10,7 +10,7 @@ import pytest
 
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core.diagnostics import Severity
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import (
     _hydro_case,
     _make_hidr_cadastro,
@@ -769,7 +769,7 @@ class TestBuildMirrorUnitGroup:
 
     def test_returns_exactly_seven_keys(self) -> None:
         """The returned dict has exactly the seven ``RawUnitGroup`` keys."""
-        from cobre_bridge.converters.hydro import build_mirror_unit_group
+        from cobre_bridge.core.hydro_units import build_mirror_unit_group
 
         group = build_mirror_unit_group(
             name="PLANT",
@@ -792,7 +792,7 @@ class TestBuildMirrorUnitGroup:
 
     def test_id_is_zero_and_name_unchanged(self) -> None:
         """``id`` is always 0; ``name`` passes through verbatim."""
-        from cobre_bridge.converters.hydro import build_mirror_unit_group
+        from cobre_bridge.core.hydro_units import build_mirror_unit_group
 
         group = build_mirror_unit_group(
             name="M. DE MORAES",
@@ -808,7 +808,7 @@ class TestBuildMirrorUnitGroup:
 
     def test_bounds_pass_through_verbatim(self) -> None:
         """All four bounds are returned unchanged, including a 0.0 minimum."""
-        from cobre_bridge.converters.hydro import build_mirror_unit_group
+        from cobre_bridge.core.hydro_units import build_mirror_unit_group
 
         group = build_mirror_unit_group(
             name="PLANT",
@@ -828,7 +828,7 @@ class TestBuildMirrorUnitGroup:
         """Nested under a plant, ``sum(group maxima) == plant maximum`` holds
         for both ``max_turbined_m3s`` and ``max_generation_mw`` — the cobre
         rule-41 invariant a single mirror group satisfies by construction."""
-        from cobre_bridge.converters.hydro import build_mirror_unit_group
+        from cobre_bridge.core.hydro_units import build_mirror_unit_group
 
         plant_max_generation_mw = 1400.0
         plant_max_turbined_m3s = 980.3
@@ -857,7 +857,7 @@ class TestBuildMirrorUnitGroup:
 
     def test_keyword_only_signature_enforced(self) -> None:
         """A positional call raises ``TypeError``."""
-        from cobre_bridge.converters.hydro import build_mirror_unit_group
+        from cobre_bridge.core.hydro_units import build_mirror_unit_group
 
         with pytest.raises(TypeError):
             build_mirror_unit_group("PLANT", 2, 0.0, 100.0, 0.0, 50.0)

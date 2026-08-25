@@ -46,7 +46,6 @@ import matplotlib.pyplot as plt
 import polars as pl
 from matplotlib.figure import Figure
 
-from cobre_bridge.case import NewaveCase
 from cobre_bridge.cli import _load_lines_json
 from cobre_bridge.comparators.alignment import build_entity_alignment
 from cobre_bridge.comparators.results import (
@@ -54,6 +53,7 @@ from cobre_bridge.comparators.results import (
     ResultComparison,
     compare_results,
 )
+from cobre_bridge.newave.case import NewaveCase
 
 # --- Palette (consistent with the comparison HTML, ui/theme.py) -------------
 C_NEWAVE = "#F5A623"  # amber — the published reference

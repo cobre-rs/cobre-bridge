@@ -6,7 +6,7 @@ specific productivity ``ρ_esp`` and turbine efficiency, and a volume fitting
 window, cobre fits the production-function hyperplanes itself. This module
 builds the DECOMP-side inputs, mirroring :mod:`cobre_bridge.converters.hydro`
 and :mod:`cobre_bridge.converters.tailrace` on the source-model side and reusing
-their shared cores (:func:`~cobre_bridge.converters.tailrace.build_tailrace_table`,
+their shared cores (:func:`~cobre_bridge.core.tailrace.build_tailrace_table`,
 :func:`~cobre_bridge.core.productivity.fpha_efficiency`).
 
 Eligibility mirrors the source-model rule: a plant with a non-degenerate
@@ -27,8 +27,8 @@ from typing import TYPE_CHECKING
 
 import pyarrow as pa
 
-from cobre_bridge.converters.tailrace import build_tailrace_table
 from cobre_bridge.core.productivity import evaluate_cota, fpha_efficiency
+from cobre_bridge.core.tailrace import build_tailrace_table
 from cobre_bridge.decomp.cadastro import effective_storage_range
 
 if TYPE_CHECKING:
@@ -79,7 +79,7 @@ def convert_tailrace_curves(case: DecompCase, id_map: DecompIdMap) -> pa.Table |
     """Build ``system/tailrace_curves.parquet`` from the ``polinjus`` families.
 
     Thin DECOMP wrapper over the shared
-    :func:`~cobre_bridge.converters.tailrace.build_tailrace_table` core — the
+    :func:`~cobre_bridge.core.tailrace.build_tailrace_table` core — the
     ``polinjus`` object exposes the identical ``hidreletrica_curvajusante`` /
     ``…_polinomio_segmento`` frames the source-model side reads. ``None`` when
     the deck has no ``polinjus`` or no segment maps to a converted hydro.

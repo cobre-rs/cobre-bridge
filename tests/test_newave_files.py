@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from cobre_bridge.core.errors import SourceFileError
-from cobre_bridge.newave_files import NewaveFiles, _resolve_required
+from cobre_bridge.newave.files import NewaveFiles, _resolve_required
 
 
 def test_missing_caso_raises_source_file_error(tmp_path: Path) -> None:

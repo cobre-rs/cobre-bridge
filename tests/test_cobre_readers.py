@@ -322,7 +322,7 @@ class TestCliExitCodeTwoOnCobreReadError:
                 return_value=[],
             ),
             patch(
-                "cobre_bridge.case.NewaveCase.from_directory",
+                "cobre_bridge.newave.case.NewaveCase.from_directory",
                 return_value=MagicMock(),
             ),
             patch(

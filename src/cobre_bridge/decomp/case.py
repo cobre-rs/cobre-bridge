@@ -9,7 +9,7 @@ hand-threaded positionally, so a conversion's own orchestrator re-derived
 
 :class:`DecompCase` wraps a :class:`~cobre_bridge.decomp.pipeline.DecompFiles`
 and exposes one :func:`functools.cached_property` per input file, mirroring
-:class:`~cobre_bridge.case.NewaveCase` on the source-model track. The first
+:class:`~cobre_bridge.newave.case.NewaveCase` on the source-model track. The first
 access parses via the matching reader; every later access is free. Required
 files return the reader (or, for ``hidr``, the registry ``DataFrame``);
 optional files return ``Reader | None`` (``None`` when the file is absent),

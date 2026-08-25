@@ -11,7 +11,7 @@ import pytest
 
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core.diagnostics import Severity
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import (
     _hydro_case,
     _make_cfuga_rec,
@@ -895,7 +895,7 @@ class TestMergeHydroBoundsMaxGenColumn:
 
     def test_storage_side_max_generation_column_survives_full_join(self) -> None:
         """A storage-only max_generation_mw column appears in the merged table."""
-        from cobre_bridge.pipeline import _merge_hydro_bounds
+        from cobre_bridge.newave.pipeline import _merge_hydro_bounds
 
         withdrawal = pa.table(
             {

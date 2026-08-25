@@ -30,9 +30,9 @@ if TYPE_CHECKING:
 
     from rich.console import Console
 
+    from cobre_bridge.core.conversion import ConversionReport
     from cobre_bridge.decomp.pipeline import DecompFiles
-    from cobre_bridge.newave_files import NewaveFiles
-    from cobre_bridge.pipeline import ConversionReport
+    from cobre_bridge.newave.files import NewaveFiles
 
 
 @dataclass

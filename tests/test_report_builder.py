@@ -233,7 +233,7 @@ def _patch_compare_context(monkeypatch: pytest.MonkeyPatch) -> None:
     # ``dataclasses.fields``, which raises on a non-dataclass. The paths
     # need not exist: a missing file degrades to a ``None`` hash/size.
     monkeypatch.setattr(
-        "cobre_bridge.case.NewaveCase.from_directory",
+        "cobre_bridge.newave.case.NewaveCase.from_directory",
         classmethod(
             lambda cls, _dir: MagicMock(
                 id_map=MagicMock(), files=make_nw_files(Path("nw"))

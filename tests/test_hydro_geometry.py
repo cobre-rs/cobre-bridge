@@ -8,7 +8,7 @@ import pytest
 
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core.diagnostics import Severity
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 
 # The title/summary/remediation/notes strings geometry.py emits reach a
 # pip-installed user with no repo checkout — none may leak a repo-internal

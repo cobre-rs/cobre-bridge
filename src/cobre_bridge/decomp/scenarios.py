@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.converters.inflow_windows import (
+from cobre_bridge.core.inflow_windows import (
     format_observation_windows,
     month_window,
     previous_months,

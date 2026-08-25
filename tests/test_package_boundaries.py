@@ -253,20 +253,12 @@ def _scan_imports() -> tuple[
 # Rule C. Shrinks to empty as loose modules move into a package; never widen.
 _PENDING_ROOT_MODULES: frozenset[str] = frozenset(
     {
-        "case",
         "cli",
         "cli_args",
         "cobre_validation",
         "config_resolution",
         "conversion_manifest",
-        "filling",
-        "horizon",
-        "id_map",
         "logging_config",
-        "newave_files",
-        "pipeline",
-        "plants",
-        "preflight",
         "verdict",
     }
 )
@@ -329,13 +321,6 @@ _PENDING_DIRECTION_EDGES: frozenset[tuple[str, str]] = frozenset(
         ("dashboard.tabs.stochastic", "ui.plotly_helpers"),
         ("dashboard.tabs.training", "ui.html"),
         ("dashboard.tabs.training", "ui.plotly_helpers"),
-        ("decomp.config", "newave.converters.network"),
-        ("decomp.fcf.mapper", "newave.converters.network"),
-        ("decomp.fpha", "newave.converters.tailrace"),
-        ("decomp.hydro", "newave.converters.hydro"),
-        ("decomp.scalar_parameters", "newave.converters.scalar_parameters"),
-        ("decomp.scenarios", "newave.converters.inflow_windows"),
-        ("decomp.temporal", "newave.converters.temporal"),
     }
 )
 
@@ -357,12 +342,20 @@ _PENDING_SHADOWED_MODULES: frozenset[str] = frozenset(
 # fails this and so does a stale one, so touching one is a conscious act.
 _TYPE_CHECKING_EDGES: frozenset[tuple[str, str]] = frozenset(
     {
+        ("comparators.alignment", "newave.case"),
+        ("comparators.alignment", "newave.id_map"),
+        ("comparators.constraints_compare", "newave.id_map"),
         ("comparators.decomp_results", "decomp.case"),
         ("comparators.decomp_results", "decomp.constraint_registers"),
         ("comparators.decomp_results", "decomp.id_map"),
+        ("comparators.results", "newave.case"),
+        ("comparators.results", "newave.id_map"),
         ("core.provenance", "decomp.pipeline"),
+        ("core.provenance", "newave.files"),
         ("decomp.constraints", "core.generic_constraint_builder"),
         ("ui.console", "comparators.verdict"),
+        ("ui.console", "core.conversion"),
+        ("ui.console", "core.preflight"),
     }
 )
 

@@ -11,9 +11,9 @@ import logging
 
 import pandas as pd
 
-from cobre_bridge.case import NewaveCase
 from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
-from cobre_bridge.horizon import POST_STUDY_YEAR
+from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.horizon import POST_STUDY_YEAR
 
 _LOG = logging.getLogger(__name__)
 

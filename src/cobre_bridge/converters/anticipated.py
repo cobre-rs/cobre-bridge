@@ -56,7 +56,7 @@ import pandas as pd
 from inewave.newave import Dger, Patamar
 
 if TYPE_CHECKING:
-    from cobre_bridge.case import NewaveCase
+    from cobre_bridge.newave.case import NewaveCase
 
 _LOG = logging.getLogger(__name__)
 

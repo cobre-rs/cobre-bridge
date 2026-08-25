@@ -23,7 +23,7 @@ from typer.testing import CliRunner, Result
 from cobre_bridge.cli import _run_check, _run_decomp_check, app
 from cobre_bridge.cli_args import CheckArgs
 from cobre_bridge.core.diagnostics import Diagnostic, Severity
-from cobre_bridge.preflight import CheckItem, PreflightResult, PreflightVerdict
+from cobre_bridge.core.preflight import CheckItem, PreflightResult, PreflightVerdict
 from tests.conftest import _make_fake_newave_dir, _run_cli_subprocess
 
 
@@ -105,7 +105,8 @@ class TestCheckNewaveJsonShape:
         self, tmp_path: Path
     ) -> None:
         with patch(
-            "cobre_bridge.preflight.run_preflight", return_value=_warnings_result()
+            "cobre_bridge.newave.preflight.run_preflight",
+            return_value=_warnings_result(),
         ):
             result = _invoke(["check", "newave", str(tmp_path / "case"), "--json"])
 
@@ -134,7 +135,8 @@ class TestCheckNewaveNoColor:
         captured = _spy_render_checklist(monkeypatch)
 
         with patch(
-            "cobre_bridge.preflight.run_preflight", return_value=_warnings_result()
+            "cobre_bridge.newave.preflight.run_preflight",
+            return_value=_warnings_result(),
         ):
             result = _invoke(["check", "newave", str(tmp_path / "case"), "--no-color"])
 
@@ -250,7 +252,7 @@ class TestCheckCommand:
         renderer (never recomputed from the checks/diagnostics here).
         """
         from cobre_bridge.core.diagnostics import Diagnostic, Severity
-        from cobre_bridge.preflight import (
+        from cobre_bridge.core.preflight import (
             CheckItem,
             PreflightResult,
             PreflightVerdict,
@@ -307,7 +309,7 @@ class TestCheckCommand:
 
     def test_check_verdict_shape(self) -> None:
         """The check ``summary`` helper feeds the unified envelope (checks nested)."""
-        from cobre_bridge.preflight import PreflightVerdict
+        from cobre_bridge.core.preflight import PreflightVerdict
         from cobre_bridge.verdict import build_verdict, check_summary
 
         result = self._result(PreflightVerdict.WILL_NOT_CONVERT)
@@ -345,7 +347,7 @@ class TestCheckCommand:
     def test_verdict_to_exit_code_mapping(self) -> None:
         """The 0/1/2 mapping is exactly OK/WARNINGS/WILL_NOT_CONVERT (2 = severe)."""
         from cobre_bridge.cli import _VERDICT_EXIT_CODE
-        from cobre_bridge.preflight import PreflightVerdict
+        from cobre_bridge.core.preflight import PreflightVerdict
 
         assert _VERDICT_EXIT_CODE == {
             PreflightVerdict.OK: 0,
@@ -358,10 +360,10 @@ class TestCheckCommand:
     def test_check_ok_exits_0(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cobre_bridge.preflight import PreflightVerdict
+        from cobre_bridge.core.preflight import PreflightVerdict
 
         result = self._result(PreflightVerdict.OK)
-        with patch("cobre_bridge.preflight.run_preflight", return_value=result):
+        with patch("cobre_bridge.newave.preflight.run_preflight", return_value=result):
             code, stdout, _ = self._invoke_main(
                 ["check", "newave", str(tmp_path / "case")],
                 monkeypatch,
@@ -373,10 +375,10 @@ class TestCheckCommand:
     def test_check_warnings_exits_1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cobre_bridge.preflight import PreflightVerdict
+        from cobre_bridge.core.preflight import PreflightVerdict
 
         result = self._result(PreflightVerdict.WARNINGS)
-        with patch("cobre_bridge.preflight.run_preflight", return_value=result):
+        with patch("cobre_bridge.newave.preflight.run_preflight", return_value=result):
             code, stdout, _ = self._invoke_main(
                 ["check", "newave", str(tmp_path / "case")],
                 monkeypatch,
@@ -388,10 +390,10 @@ class TestCheckCommand:
     def test_check_will_not_convert_exits_2(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cobre_bridge.preflight import PreflightVerdict
+        from cobre_bridge.core.preflight import PreflightVerdict
 
         result = self._result(PreflightVerdict.WILL_NOT_CONVERT)
-        with patch("cobre_bridge.preflight.run_preflight", return_value=result):
+        with patch("cobre_bridge.newave.preflight.run_preflight", return_value=result):
             code, stdout, _ = self._invoke_main(
                 ["check", "newave", str(tmp_path / "case")],
                 monkeypatch,
@@ -404,10 +406,10 @@ class TestCheckCommand:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``--json`` on a WILL_NOT_CONVERT result emits JSON to stdout; exit 2."""
-        from cobre_bridge.preflight import PreflightVerdict
+        from cobre_bridge.core.preflight import PreflightVerdict
 
         result = self._result(PreflightVerdict.WILL_NOT_CONVERT)
-        with patch("cobre_bridge.preflight.run_preflight", return_value=result):
+        with patch("cobre_bridge.newave.preflight.run_preflight", return_value=result):
             code, stdout, stderr = self._invoke_main(
                 ["check", "newave", str(tmp_path / "case"), "--json"],
                 monkeypatch,
@@ -436,13 +438,13 @@ class TestCheckCommand:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``check`` must not write anything under the source directory."""
-        from cobre_bridge.preflight import PreflightVerdict
+        from cobre_bridge.core.preflight import PreflightVerdict
 
         src = _make_fake_newave_dir(tmp_path)
         before = sorted(p.name for p in src.iterdir())
 
         result = self._result(PreflightVerdict.OK)
-        with patch("cobre_bridge.preflight.run_preflight", return_value=result):
+        with patch("cobre_bridge.newave.preflight.run_preflight", return_value=result):
             code, _, _ = self._invoke_main(
                 ["check", "newave", str(src)],
                 monkeypatch,

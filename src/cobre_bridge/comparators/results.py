@@ -17,13 +17,13 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import polars as pl
 
-from cobre_bridge.case import NewaveCase
 from cobre_bridge.cobre.case_io import case_dir_for
 from cobre_bridge.comparators.alignment import EntityAlignment
-from cobre_bridge.id_map import NewaveIdMap
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.newave.case import NewaveCase
+    from cobre_bridge.newave.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
 

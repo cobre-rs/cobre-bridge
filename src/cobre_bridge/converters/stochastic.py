@@ -18,11 +18,11 @@ import pandas as pd
 import pyarrow as pa
 from inewave.newave import Cadic, Dger, Vazoes
 
-from cobre_bridge import plants
-from cobre_bridge.case import NewaveCase
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.horizon import POST_STUDY_YEAR, study_horizon
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave import plants
+from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.horizon import POST_STUDY_YEAR, study_horizon
+from cobre_bridge.newave.id_map import NewaveIdMap
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ def _build_upstream_postos(
         The full ``Confhd.usinas`` cascade.
     filling_codes:
         Codes of admitted ``NE``-with-filling plants
-        (:func:`cobre_bridge.plants.filling_hydro_codes`).  Such a plant
+        (:func:`cobre_bridge.newave.plants.filling_hydro_codes`).  Such a plant
         *receives* inflow during filling and operation, so its posto enters
         the map as a real node rather than being walked through: an upstream
         plant forms a posto edge **to** the filling plant instead of stepping
@@ -133,7 +133,7 @@ def _case_filling_codes(case: NewaveCase) -> set[int]:
     """Return the admitted ``NE``-with-filling codes for *case*.
 
     Reads the filling set from ``case`` exactly once via
-    :func:`cobre_bridge.plants.filling_hydro_codes`, tolerating an absent
+    :func:`cobre_bridge.newave.plants.filling_hydro_codes`, tolerating an absent
     ``exph.dat`` (``case.exph is None`` → empty set).  The result is passed
     to :func:`_build_upstream_postos` so admitted filling postos enter the
     inflow map as real nodes.
@@ -580,7 +580,7 @@ def _derive_study_stage_months(dger: Dger) -> list[int]:
     -------
     list[int]
         Calendar month (1-12) for each stage.  Length equals
-        :attr:`~cobre_bridge.horizon.StudyHorizon.total_stages`.
+        :attr:`~cobre_bridge.newave.horizon.StudyHorizon.total_stages`.
     """
     horizon = study_horizon(dger)
     start_month = horizon.start_month

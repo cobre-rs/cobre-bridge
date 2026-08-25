@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
+from cobre_bridge.newave.files import NewaveFiles
+from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import (
     _hydro_case,
     _make_confhd_df,
@@ -284,7 +284,7 @@ class TestBuildIdMap:
         mock_ree.rees = None
         mock_ree_cls.read.return_value = mock_ree
 
-        from cobre_bridge.id_map import build_id_map
+        from cobre_bridge.newave.id_map import build_id_map
 
         id_map = build_id_map(_make_nw_files(tmp_path))
 
@@ -357,7 +357,7 @@ class TestBuildIdMap:
         mock_ree.rees = None
         mock_ree_cls.read.return_value = mock_ree
 
-        from cobre_bridge.id_map import build_id_map
+        from cobre_bridge.newave.id_map import build_id_map
 
         id_map = build_id_map(_make_nw_files(tmp_path))
         assert len(id_map.all_hydro_codes) == n_real
@@ -397,7 +397,7 @@ class TestBuildIdMap:
         mock_ree.rees = None
         mock_ree_cls.read.return_value = mock_ree
 
-        from cobre_bridge.id_map import build_id_map
+        from cobre_bridge.newave.id_map import build_id_map
 
         id_map = build_id_map(_make_nw_files(tmp_path))
 

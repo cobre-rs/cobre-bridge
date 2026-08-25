@@ -13,7 +13,7 @@ from cobre_bridge.comparators.html_report import (
     COLOR_NEWAVE,
 )
 from cobre_bridge.comparators.results import ResultComparison
-from cobre_bridge.horizon import is_effectively_infinite
+from cobre_bridge.core.tolerances import is_effectively_infinite
 from cobre_bridge.ui.plotly_helpers import facet_grid
 from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
 

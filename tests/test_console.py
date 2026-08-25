@@ -6,9 +6,9 @@ import io
 
 from rich.console import Console
 
+from cobre_bridge.core.conversion import ConversionReport
 from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity
-from cobre_bridge.pipeline import ConversionReport
-from cobre_bridge.preflight import CheckItem, PreflightResult, PreflightVerdict
+from cobre_bridge.core.preflight import CheckItem, PreflightResult, PreflightVerdict
 from cobre_bridge.ui.console import (
     _SUCCESS_STYLE,
     MAX_TABLE_ROWS,

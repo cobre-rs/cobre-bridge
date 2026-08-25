@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from cobre_bridge.case import NewaveCase
-from cobre_bridge.id_map import NewaveIdMap
+if TYPE_CHECKING:
+    from cobre_bridge.newave.case import NewaveCase
+    from cobre_bridge.newave.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
 

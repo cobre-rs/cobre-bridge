@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     from rich.console import Console
 
-    from cobre_bridge.pipeline import ConversionReport
+    from cobre_bridge.core.conversion import ConversionReport
 
 _MODULE_LOGGER = logging.getLogger(__name__)
 

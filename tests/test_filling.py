@@ -1,10 +1,10 @@
-"""Unit tests for the stage-math and ζ pure helpers in ``cobre_bridge.filling``."""
+"""Unit tests for the stage-math and ζ pure helpers in ``cobre_bridge.newave.filling``."""
 
 from __future__ import annotations
 
 from datetime import date
 
-from cobre_bridge.filling import (
+from cobre_bridge.newave.filling import (
     filling_completion_date,
     filling_min_rate_m3s,
     filling_schedule,

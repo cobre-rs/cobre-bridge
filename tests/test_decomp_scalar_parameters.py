@@ -2,7 +2,7 @@
 epic-05).
 
 Tier-1: pure Python, no ``example/`` deck, no ``import cobre``. Exercises the
-thin delegation to ``converters.scalar_parameters.build_scalar_parameters``
+thin delegation to ``cobre.scalar_parameters.build_scalar_parameters``
 and the ``constraints/generic_parameters.json`` write round-trip.
 """
 
@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from cobre_bridge.cobre.case_writer import CaseWriter
-from cobre_bridge.converters.scalar_parameters import (
+from cobre_bridge.cobre.scalar_parameters import (
     build_scalar_parameters,
 )
 from cobre_bridge.decomp.scalar_parameters import (

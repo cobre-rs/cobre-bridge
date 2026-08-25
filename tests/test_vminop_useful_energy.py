@@ -26,7 +26,7 @@ import pyarrow.parquet as pq
 
 from cobre_bridge.cobre.constraint_expr import scales_storage_by_rho_acum
 from cobre_bridge.comparators.constraints_compare import apply_vminop_useful_energy
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 
 _GC_SCHEMA = {
     "constraint_id": pl.Int32,

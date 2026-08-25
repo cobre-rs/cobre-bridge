@@ -10,7 +10,7 @@ import pytest
 
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core.diagnostics import Severity
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import (
     _make_cfuga_rec,
     _make_confhd_df,
@@ -847,7 +847,7 @@ class TestProductivitySinMeans:
         # Drop the conftest default hidr so accessing ``case.hidr`` triggers the
         # patched ``Hidr.read`` (this test exercises the read-error fallback).
         case.__dict__.pop("hidr", None)
-        with patch("cobre_bridge.case.Hidr") as mh:
+        with patch("cobre_bridge.newave.case.Hidr") as mh:
             mh.read.side_effect = OSError("no file")
             assert compute_max_prodtacum_sin(case) is None
 

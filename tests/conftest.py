@@ -1,8 +1,8 @@
 """Shared test helpers for building the source model case inputs without real file I/O.
 
-``make_nw_files`` constructs a :class:`~cobre_bridge.newave_files.NewaveFiles`
+``make_nw_files`` constructs a :class:`~cobre_bridge.newave.files.NewaveFiles`
 with paths under a tmp dir (no filesystem access). ``make_case`` wraps it in a
-:class:`~cobre_bridge.case.NewaveCase` and pre-fills the requested cached reader
+:class:`~cobre_bridge.newave.case.NewaveCase` and pre-fills the requested cached reader
 slots, so a converter under test reads the supplied mock objects instead of
 parsing files. ``make_decomp_files``/``make_decomp_case`` are the DECOMP-track
 twins, wrapping a :class:`~cobre_bridge.decomp.case.DecompCase`.
@@ -36,19 +36,19 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
-from cobre_bridge.case import NewaveCase
 from cobre_bridge.comparators.dataset import (
     SUMMARY_SCHEMA,
     TIDY_SCHEMA,
     ComparisonDataset,
 )
 from cobre_bridge.comparators.decomp_results import _AlignedDecompFrames
-from cobre_bridge.converters.hydro import build_mirror_unit_group
+from cobre_bridge.core.hydro_units import build_mirror_unit_group
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.pipeline import DecompFiles
-from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.newave_files import NewaveFiles
+from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.files import NewaveFiles
+from cobre_bridge.newave.id_map import NewaveIdMap
 
 # Shared skip marker for tier-2 tests that need `cobre-python` (`import
 # cobre`). It is a core dev dependency (installed via `.[dev]`), so it is
@@ -303,7 +303,7 @@ def hydro_with_group(
 
     Matches the shape every converter now emits (cobre decisions 13/14 →
     §7.6, §7.8, via
-    :func:`cobre_bridge.converters.hydro.build_mirror_unit_group`): no
+    :func:`cobre_bridge.core.hydro_units.build_mirror_unit_group`): no
     top-level ``bus_id`` and a single seven-field mirror ``unit_groups``
     entry whose four bounds equal this dict's own ``generation`` envelope
     (cobre rule 41's mirror invariant).
@@ -1444,115 +1444,115 @@ def _all_converter_patches(fake_id_map: MagicMock) -> list:  # type: ignore[type
     fake_case.id_map = fake_id_map
     return [
         patch(
-            "cobre_bridge.pipeline.NewaveCase.from_directory",
+            "cobre_bridge.newave.pipeline.NewaveCase.from_directory",
             return_value=fake_case,
         ),
         patch(
-            "cobre_bridge.pipeline.hydro_conv.convert_hydros",
+            "cobre_bridge.newave.pipeline.hydro_conv.convert_hydros",
             return_value=_FAKE_HYDROS,
         ),
         patch(
-            "cobre_bridge.pipeline.thermal_conv.convert_thermals",
+            "cobre_bridge.newave.pipeline.thermal_conv.convert_thermals",
             return_value=_FAKE_THERMALS,
         ),
         patch(
-            "cobre_bridge.pipeline.network_conv.convert_buses",
+            "cobre_bridge.newave.pipeline.network_conv.convert_buses",
             return_value=_FAKE_BUSES,
         ),
         patch(
-            "cobre_bridge.pipeline.network_conv.convert_lines",
+            "cobre_bridge.newave.pipeline.network_conv.convert_lines",
             return_value=_FAKE_LINES,
         ),
         patch(
-            "cobre_bridge.pipeline.network_conv.convert_penalties",
+            "cobre_bridge.newave.pipeline.network_conv.convert_penalties",
             return_value=_FAKE_PENALTIES,
         ),
         patch(
-            "cobre_bridge.pipeline.temporal_conv.convert_stages",
+            "cobre_bridge.newave.pipeline.temporal_conv.convert_stages",
             return_value=_FAKE_STAGES,
         ),
         patch(
-            "cobre_bridge.pipeline.temporal_conv.convert_config",
+            "cobre_bridge.newave.pipeline.temporal_conv.convert_config",
             return_value=_FAKE_CONFIG,
         ),
         patch(
-            "cobre_bridge.pipeline.ic_conv.convert_initial_conditions",
+            "cobre_bridge.newave.pipeline.ic_conv.convert_initial_conditions",
             return_value=_FAKE_IC,
         ),
         patch(
-            "cobre_bridge.pipeline.stochastic_conv.convert_inflow_stats",
+            "cobre_bridge.newave.pipeline.stochastic_conv.convert_inflow_stats",
             return_value=_FAKE_INFLOW_TABLE,
         ),
         patch(
-            "cobre_bridge.pipeline.stochastic_conv.convert_load_stats",
+            "cobre_bridge.newave.pipeline.stochastic_conv.convert_load_stats",
             return_value=_FAKE_LOAD_TABLE,
         ),
         patch(
-            "cobre_bridge.pipeline.inflow_windows.convert_recent_observation_windows",
+            "cobre_bridge.newave.pipeline.inflow_windows.convert_recent_observation_windows",
             return_value=[],
         ),
         patch(
-            "cobre_bridge.pipeline.inflow_windows.convert_inflow_history_windows",
+            "cobre_bridge.newave.pipeline.inflow_windows.convert_inflow_history_windows",
             return_value=_FAKE_INFLOW_TABLE,
         ),
         patch(
-            "cobre_bridge.pipeline.hydro_conv.read_cadastro",
+            "cobre_bridge.newave.pipeline.hydro_conv.read_cadastro",
             return_value=MagicMock(),
         ),
         patch(
-            "cobre_bridge.pipeline.hydro_conv.generate_hydro_geometry",
+            "cobre_bridge.newave.pipeline.hydro_conv.generate_hydro_geometry",
             return_value=_FAKE_INFLOW_TABLE,  # reuse any small pa.Table
         ),
         patch(
-            "cobre_bridge.pipeline.constraints_conv.convert_vminop_constraints",
+            "cobre_bridge.newave.pipeline.constraints_conv.convert_vminop_constraints",
             return_value=None,
         ),
         patch(
-            "cobre_bridge.pipeline.constraints_conv.convert_electric_constraints",
+            "cobre_bridge.newave.pipeline.constraints_conv.convert_electric_constraints",
             return_value=None,
         ),
         patch(
-            "cobre_bridge.pipeline.constraints_conv.convert_agrint_constraints",
+            "cobre_bridge.newave.pipeline.constraints_conv.convert_agrint_constraints",
             return_value=None,
         ),
         patch(
-            "cobre_bridge.pipeline.stochastic_conv.convert_load_factors",
+            "cobre_bridge.newave.pipeline.stochastic_conv.convert_load_factors",
             return_value=_FAKE_LOAD_FACTORS,
         ),
         patch(
-            "cobre_bridge.pipeline.network_conv.convert_line_bounds",
+            "cobre_bridge.newave.pipeline.network_conv.convert_line_bounds",
             return_value=_FAKE_LINE_BOUNDS_TABLE,
         ),
         patch(
-            "cobre_bridge.pipeline.network_conv.convert_non_controllable_sources",
+            "cobre_bridge.newave.pipeline.network_conv.convert_non_controllable_sources",
             return_value=_FAKE_NCS,
         ),
         patch(
-            "cobre_bridge.pipeline.network_conv.convert_ncs_factors",
+            "cobre_bridge.newave.pipeline.network_conv.convert_ncs_factors",
             return_value=_FAKE_NCS_FACTORS,
         ),
         patch(
-            "cobre_bridge.pipeline.network_conv.convert_ncs_stats",
+            "cobre_bridge.newave.pipeline.network_conv.convert_ncs_stats",
             return_value=_FAKE_NCS_BOUNDS_TABLE,
         ),
         patch(
-            "cobre_bridge.pipeline.hydro_conv.convert_production_models",
+            "cobre_bridge.newave.pipeline.hydro_conv.convert_production_models",
             return_value={"production_models": []},
         ),
         patch(
-            "cobre_bridge.pipeline.hydro_conv.compute_base_productivities",
+            "cobre_bridge.newave.pipeline.hydro_conv.compute_base_productivities",
             return_value={},
         ),
         patch(
-            "cobre_bridge.pipeline.hydro_conv.convert_hydro_energy_productivity",
+            "cobre_bridge.newave.pipeline.hydro_conv.convert_hydro_energy_productivity",
             return_value=_FAKE_HYDRO_ENERGY_PRODUCTIVITY_TABLE,
         ),
         patch(
-            "cobre_bridge.pipeline.thermal_conv.convert_thermal_bounds",
+            "cobre_bridge.newave.pipeline.thermal_conv.convert_thermal_bounds",
             return_value=None,
         ),
         patch(
-            "cobre_bridge.pipeline.hydro_conv.convert_storage_bounds",
+            "cobre_bridge.newave.pipeline.hydro_conv.convert_storage_bounds",
             return_value=None,
         ),
     ]
@@ -1562,7 +1562,7 @@ def _run_with_all_mocks(src: Path, dst: Path) -> object:
     """Run convert_newave_case with all converters replaced by canned fakes."""
     import contextlib
 
-    from cobre_bridge.pipeline import convert_newave_case
+    from cobre_bridge.newave.pipeline import convert_newave_case
 
     fake_id_map = MagicMock()
     with contextlib.ExitStack() as stack:

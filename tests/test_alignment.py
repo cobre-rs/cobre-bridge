@@ -17,7 +17,7 @@ from cobre_bridge.comparators.alignment import (
     build_entity_alignment,
     read_reference_names,
 )
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case
 
 

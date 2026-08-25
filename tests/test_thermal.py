@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import (
     _make_term_df,
     _thermal_readers,

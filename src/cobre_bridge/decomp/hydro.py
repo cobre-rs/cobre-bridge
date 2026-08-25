@@ -94,7 +94,7 @@ from idecomp.decomp.modelos.dadger import ACALTEFE
 from inewave.newave import Hidr
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.converters.hydro import build_mirror_unit_group
+from cobre_bridge.core.hydro_units import build_mirror_unit_group
 from cobre_bridge.core.productivity import (
     KTURB_BY_TIPO_TURBINA,
     equivalent_productivity_from_coeffs,

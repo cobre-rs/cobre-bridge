@@ -30,9 +30,6 @@ from cobre_bridge.converters.hydro.bounds import (
     convert_water_withdrawal as convert_water_withdrawal,
 )
 from cobre_bridge.converters.hydro.entity import (
-    build_mirror_unit_group as build_mirror_unit_group,
-)
-from cobre_bridge.converters.hydro.entity import (
     convert_hydros as convert_hydros,
 )
 from cobre_bridge.converters.hydro.geometry import (

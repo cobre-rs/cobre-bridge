@@ -36,7 +36,7 @@ from cobre_bridge.comparators.constraints_compare import (
     per_stage_bounds,
 )
 from cobre_bridge.comparators.newave_readers import read_medias_hydro
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 
 _COBRE_INPUT_DIR = (
     Path(__file__).parent / "fixtures" / "constraints_compare" / "cobre_input"

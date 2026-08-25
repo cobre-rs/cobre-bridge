@@ -15,7 +15,7 @@ rules:
 - the final stage carries its own calendar month's season.
 
 Season ids follow the shared 0-based convention (Jan=0 … Dec=11) via
-:func:`cobre_bridge.converters.temporal.monthly_season_definitions`.
+:func:`cobre_bridge.core.season_calendar.monthly_season_definitions`.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.converters.temporal import block_names, monthly_season_definitions
+from cobre_bridge.core.season_calendar import block_names, monthly_season_definitions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

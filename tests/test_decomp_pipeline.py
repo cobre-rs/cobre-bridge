@@ -1576,8 +1576,8 @@ class TestDryRun:
     ) -> None:
         """The DECOMP set clears the shared artifacts plus its own root-level
         ``post_study_stages.json`` and ``boundary/`` tree (CONV-10)."""
+        from cobre_bridge.core.conversion import clear_dst_contents
         from cobre_bridge.decomp.pipeline import DECOMP_CLEARED_ARTIFACTS
-        from cobre_bridge.pipeline import clear_dst_contents
 
         dst = tmp_path / "dst"
         dst.mkdir()
@@ -1603,7 +1603,8 @@ class TestDryRun:
     ) -> None:
         """Regression pinning CONV-10: the NEWAVE set does not name
         DECOMP-only artifacts, so they survive a NEWAVE-set clear."""
-        from cobre_bridge.pipeline import NEWAVE_CLEARED_ARTIFACTS, clear_dst_contents
+        from cobre_bridge.core.conversion import clear_dst_contents
+        from cobre_bridge.newave.pipeline import NEWAVE_CLEARED_ARTIFACTS
 
         dst = tmp_path / "dst"
         dst.mkdir()

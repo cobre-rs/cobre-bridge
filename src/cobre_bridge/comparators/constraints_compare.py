@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import pandas as pd
 import polars as pl
@@ -35,7 +35,9 @@ from cobre_bridge.cobre.constraint_expr import (
 from cobre_bridge.cobre.readers import scan_simulation_entity
 from cobre_bridge.comparators.alignment import EntityAlignment
 from cobre_bridge.core.generic_constraint_format import shape_from_bounds
-from cobre_bridge.id_map import NewaveIdMap
+
+if TYPE_CHECKING:
+    from cobre_bridge.newave.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
 

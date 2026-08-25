@@ -16,7 +16,6 @@ from collections.abc import Callable
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.hydro.geometry import _read_volref_saz
 from cobre_bridge.converters.hydro.overrides import (
     _apply_permanent_overrides,
@@ -37,11 +36,12 @@ from cobre_bridge.core.productivity import (
     evaluate_cota,
     mean_cota,
 )
-from cobre_bridge.filling import filling_schedule, online_machines
-from cobre_bridge.filling import stage_id as filling_stage_id
-from cobre_bridge.horizon import seasonal_step_function
-from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.plants import fictitious_codes, filling_hydro_codes
+from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.filling import filling_schedule, online_machines
+from cobre_bridge.newave.filling import stage_id as filling_stage_id
+from cobre_bridge.newave.horizon import seasonal_step_function
+from cobre_bridge.newave.id_map import NewaveIdMap
+from cobre_bridge.newave.plants import fictitious_codes, filling_hydro_codes
 
 _LOG = logging.getLogger(__name__)
 
@@ -696,7 +696,7 @@ def convert_storage_bounds(
         *,
         seasonalize: bool,
     ) -> dict[int, float]:
-        """Thin adapter over :func:`cobre_bridge.horizon.seasonal_step_function`.
+        """Thin adapter over :func:`cobre_bridge.newave.horizon.seasonal_step_function`.
 
         Maps MODIF override dicts to ``(year, month, value)`` change-points. The
         forward-fill, big-M clearing, and seasonalize-vs-freeze post-study logic

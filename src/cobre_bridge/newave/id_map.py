@@ -11,12 +11,12 @@ import logging
 from typing import TYPE_CHECKING
 
 from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
-from cobre_bridge.plants import active_hydro_codes, fictitious_codes
+from cobre_bridge.newave.plants import active_hydro_codes, fictitious_codes
 
 if TYPE_CHECKING:
     from inewave.newave import Confhd, Conft, Exph, Hidr, Ree, Sistema
 
-    from cobre_bridge.newave_files import NewaveFiles
+    from cobre_bridge.newave.files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
 

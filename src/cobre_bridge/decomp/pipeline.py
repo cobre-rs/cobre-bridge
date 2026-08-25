@@ -27,6 +27,11 @@ from cobre_bridge.cobre.case_writer import CaseWriter
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core import emission_checks
 from cobre_bridge.core.bound_merge import merge_bound_tables
+from cobre_bridge.core.conversion import (
+    ClearedArtifacts,
+    ConversionReport,
+    clear_dst_contents,
+)
 from cobre_bridge.core.errors import SourceFileError
 from cobre_bridge.core.generic_constraint_builder import ConstraintIdAllocator
 from cobre_bridge.decomp import anticipated as anticipated_conv
@@ -57,11 +62,6 @@ from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.scalar_parameters import (
     build_decomp_scalar_parameters,
     write_scalar_parameters,
-)
-from cobre_bridge.pipeline import (
-    ClearedArtifacts,
-    ConversionReport,
-    clear_dst_contents,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -1638,7 +1638,7 @@ def _emit_and_write(
     :class:`ConstraintIdAllocator`, write the generic-constraint artifacts and
     scalar parameters, emit the detection diagnostics and the travel-time
     deferral warning, and return the
-    :class:`~cobre_bridge.pipeline.ConversionReport` built from
+    :class:`~cobre_bridge.core.conversion.ConversionReport` built from
     ``writer.would_write``.
     """
     case = artifacts.case
@@ -1940,14 +1940,15 @@ def convert_decomp_case(
     sink and a package-logger ``dx.WarningCollector`` so every structured
     ``dx.emit`` finding *and* every residual ``logger.warning`` string is
     captured, then returns them as one de-duplicated
-    :class:`~cobre_bridge.pipeline.ConversionReport`.
+    :class:`~cobre_bridge.core.conversion.ConversionReport`.
 
     Parameters
     ----------
     dry_run:
         When ``True``, run the full in-memory conversion but write nothing to
         *dst* (no files, no subdirectories). The would-write paths are still
-        recorded in :attr:`~cobre_bridge.pipeline.ConversionReport.would_write_paths`.
+        recorded in
+        :attr:`~cobre_bridge.core.conversion.ConversionReport.would_write_paths`.
     fcf_inputs_out:
         Optional :class:`FcfInputs` out-parameter. When given, its
         ``config``/``initial_conditions`` fields are assigned the same

@@ -15,7 +15,6 @@ import logging
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.case import NewaveCase
 from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.converters.hydro.geometry import (
     _read_volref_saz,
@@ -34,7 +33,8 @@ from cobre_bridge.core.productivity import (
     integrated_productivity,
     stored_energy_productivity,
 )
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
 

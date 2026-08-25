@@ -14,11 +14,13 @@ from cobre_bridge.converters.inflow_windows import (
     INFLOW_HISTORY_WINDOW_SCHEMA,
     convert_inflow_history_windows,
     convert_recent_observation_windows,
+)
+from cobre_bridge.core.inflow_windows import (
     format_observation_windows,
     month_window,
     previous_months,
 )
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 
 # ---------------------------------------------------------------------------

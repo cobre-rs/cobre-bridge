@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cobre_bridge.pipeline import convert_newave_case
+from cobre_bridge.newave.pipeline import convert_newave_case
 from tests.conftest import requires_cobre_python
 
 

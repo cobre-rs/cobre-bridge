@@ -114,7 +114,7 @@ def resolve_cascade(
         One entry per real existing plant in ``confhd_df``.
     """
     if fictitious is None:
-        from cobre_bridge.plants import fictitious_codes
+        from cobre_bridge.newave.plants import fictitious_codes
 
         fictitious = fictitious_codes(confhd_df, cadastro)
 

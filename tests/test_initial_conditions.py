@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import (
     _make_confhd_df,
     _make_hidr_cadastro,

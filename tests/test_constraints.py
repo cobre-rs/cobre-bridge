@@ -9,7 +9,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from cobre_bridge.case import NewaveCase
+from cobre_bridge.cobre.scalar_parameters import build_scalar_parameters
 from cobre_bridge.converters.constraints import (
     _curve_seasonalizes,
     _ElectricTermSkip,
@@ -23,8 +23,6 @@ from cobre_bridge.converters.constraints import (
     convert_electric_constraints,
     convert_vminop_constraints,
 )
-from cobre_bridge.converters.network import C_M3S2HM3
-from cobre_bridge.converters.scalar_parameters import build_scalar_parameters
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core.diagnostics import Severity, finalize_diagnostics
 from cobre_bridge.core.generic_constraint_builder import (
@@ -32,7 +30,9 @@ from cobre_bridge.core.generic_constraint_builder import (
     ConstraintIdAllocator,
 )
 from cobre_bridge.core.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.core.units import C_M3S2HM3
+from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 
 # The remediation/summary/title/notes strings constraints.py emits reach a

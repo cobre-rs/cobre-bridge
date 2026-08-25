@@ -27,7 +27,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from cobre_bridge.converters.network import C_M3S2HM3
+from cobre_bridge.core.units import C_M3S2HM3
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -72,7 +72,7 @@ if TYPE_CHECKING:
 # Hm³, but cobre's *inflow-lag* state variable is a raw flow rate in **m³/s**
 # (the same physical quantity as the ``z_inflow`` column, stored unscaled in the
 # state vector). Converting ``R$/Hm³ → R$/(m³/s)`` multiplies by the fixed
-# Hm³-per-(m³/s) month factor :data:`~cobre_bridge.converters.network.C_M3S2HM3`
+# Hm³-per-(m³/s) month factor :data:`~cobre_bridge.core.units.C_M3S2HM3`
 # (``= 2.628``, the source's monthly inflow-volume convention, per the SDDP
 # review): a 1 m³/s recent inflow represents 2.628 Hm³ of monthly volume, so it
 # carries 2.628× the R$/Hm³ water value. Storage must NOT take this factor and

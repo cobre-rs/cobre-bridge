@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from cobre_bridge.converters.network import C_M3S2HM3, MONTH_HOURS
+from cobre_bridge.core.units import C_M3S2HM3, MONTH_HOURS
 from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
 from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
 from cobre_bridge.decomp.fcf.mapper import (

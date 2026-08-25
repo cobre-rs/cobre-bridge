@@ -19,7 +19,7 @@ import pyarrow as pa
 import pytest
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import _all_converter_patches, _make_fake_newave_dir, make_case
 
 _CANONICAL_PREFIX = (
@@ -126,7 +126,7 @@ def test_generic_constraints_json_emit_matches_registry(tmp_path) -> None:
     — the minimum needed to reach the merge and get a non-empty file."""
     from cobre_bridge.converters.constraints import VminopResult
     from cobre_bridge.core.generic_constraint_builder import GENERIC_BOUNDS_SCHEMA
-    from cobre_bridge.pipeline import convert_newave_case
+    from cobre_bridge.newave.pipeline import convert_newave_case
 
     src = _make_fake_newave_dir(tmp_path)
     dst = tmp_path / "cobre_case"
@@ -156,7 +156,7 @@ def test_generic_constraints_json_emit_matches_registry(tmp_path) -> None:
         # pipeline's merge actually runs and writes the file.
         stack.enter_context(
             patch(
-                "cobre_bridge.pipeline.constraints_conv.convert_vminop_constraints",
+                "cobre_bridge.newave.pipeline.constraints_conv.convert_vminop_constraints",
                 return_value=fake_vminop,
             )
         )

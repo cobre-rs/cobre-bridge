@@ -65,7 +65,7 @@ class TestHm3ToM3s:
 
     def test_matches_the_fixed_monthly_factor_at_730_hours(self) -> None:
         """1 m³/s sustained over a 730h month deposits exactly
-        ``converters.network.C_M3S2HM3`` (2.628 hm³); converting that volume
+        ``core.units.C_M3S2HM3`` (2.628 hm³); converting that volume
         back at 730h must recover 1.0 m³/s exactly."""
         assert _hm3_to_m3s(2.628, 730.0) == pytest.approx(1.0)
 
@@ -79,7 +79,7 @@ class TestHm3ToM3s:
 
     def test_hour_factor_matches_the_converter_side_monthly_constant(self) -> None:
         """`_HM3_TO_M3S_HOUR_FACTOR * 730` reproduces
-        ``converters.network.C_M3S2HM3`` (2.628) -- the same physical
+        ``core.units.C_M3S2HM3`` (2.628) -- the same physical
         relationship, generalized from the fixed monthly constant to any
         stage's own hours."""
         assert _HM3_TO_M3S_HOUR_FACTOR * 730.0 == pytest.approx(2.628)

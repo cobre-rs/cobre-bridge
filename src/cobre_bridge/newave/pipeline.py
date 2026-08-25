@@ -6,14 +6,12 @@ Reads a source-model case directory and writes a complete Cobre case directory.
 from __future__ import annotations
 
 import logging
-import shutil
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import pyarrow as pa
 
-from cobre_bridge.case import NewaveCase
+from cobre_bridge.cobre import scalar_parameters as scalar_params_conv
 from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.cobre.case_writer import CaseWriter
 from cobre_bridge.converters import constraints as constraints_conv
@@ -21,7 +19,6 @@ from cobre_bridge.converters import hydro as hydro_conv
 from cobre_bridge.converters import inflow_windows
 from cobre_bridge.converters import initial_conditions as ic_conv
 from cobre_bridge.converters import network as network_conv
-from cobre_bridge.converters import scalar_parameters as scalar_params_conv
 from cobre_bridge.converters import stochastic as stochastic_conv
 from cobre_bridge.converters import tailrace as tailrace_conv
 from cobre_bridge.converters import temporal as temporal_conv
@@ -29,7 +26,13 @@ from cobre_bridge.converters import thermal as thermal_conv
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core import emission_checks
 from cobre_bridge.core.bound_merge import merge_bound_tables
+from cobre_bridge.core.conversion import (
+    ClearedArtifacts,
+    ConversionReport,
+    clear_dst_contents,
+)
 from cobre_bridge.core.generic_constraint_builder import ConstraintIdAllocator
+from cobre_bridge.newave.case import NewaveCase
 
 logger = logging.getLogger(__name__)
 
@@ -44,36 +47,6 @@ CONVERSION_PHASE_LABELS: tuple[str, ...] = (
     "Writing JSON",
     "Writing Parquet",
 )
-
-
-@dataclass
-class ConversionReport:
-    """Summary of a completed the source-model-to-Cobre conversion."""
-
-    hydro_count: int = 0
-    thermal_count: int = 0
-    bus_count: int = 0
-    line_count: int = 0
-    stage_count: int = 0
-    #: Structured findings (rich tables, severities, remediation) for the CLI to
-    #: render. Populated by :func:`convert_newave_case`.
-    diagnostics: list[dx.Diagnostic] = field(default_factory=list)
-    #: Flat WARNING-severity summary strings, kept for backward-compatible consumers
-    #: (derived from :attr:`diagnostics`).
-    warnings: list[str] = field(default_factory=list)
-    #: Absolute output paths the conversion produced (real run) or would produce
-    #: (dry run), in write order. Optional Parquet tables that were skipped are
-    #: absent. Populated by :func:`_convert_newave_case_impl`.
-    would_write_paths: list[str] = field(default_factory=list)
-
-    def __str__(self) -> str:
-        return (
-            f"Converted: {self.hydro_count} hydros, "
-            f"{self.thermal_count} thermals, "
-            f"{self.bus_count} buses, "
-            f"{self.line_count} lines, "
-            f"{self.stage_count} stages"
-        )
 
 
 def _compute_prod_media_sin_safe(case: NewaveCase) -> float | None:
@@ -586,15 +559,6 @@ def _convert_newave_case_impl(
     return report
 
 
-@dataclass(frozen=True)
-class ClearedArtifacts:
-    """A conversion track's on-disk output set, for --force pre-clear and
-    failure rollback: subdirectories removed as a tree, files unlinked."""
-
-    subdirs: tuple[str, ...]
-    files: tuple[str, ...]
-
-
 NEWAVE_CLEARED_ARTIFACTS = ClearedArtifacts(
     subdirs=("system", "scenarios", "constraints"),
     files=(
@@ -605,21 +569,3 @@ NEWAVE_CLEARED_ARTIFACTS = ClearedArtifacts(
         "conversion_manifest.json",
     ),
 )
-
-
-def clear_dst_contents(dst: Path, artifacts: ClearedArtifacts) -> None:
-    """Remove *artifacts*' known output subdirectories and top-level files from dst.
-
-    Only the specific files/subdirectories named by *artifacts* are removed.
-    This avoids accidentally deleting unrelated files in the destination
-    directory.
-    """
-    for subdir in artifacts.subdirs:
-        target = dst / subdir
-        if target.exists():
-            shutil.rmtree(target)
-
-    for filename in artifacts.files:
-        path = dst / filename
-        if path.exists():
-            path.unlink()

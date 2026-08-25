@@ -79,18 +79,20 @@ class TestVerbosityAndLogFile:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``--log-file`` writes the full DEBUG trace; the handler is gone after."""
-        from cobre_bridge.pipeline import ConversionReport
+        from cobre_bridge.core.conversion import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "dst"
         log_path = tmp_path / "run.log"
 
         def _fake_convert(*_args: object, **_kwargs: object) -> ConversionReport:
-            logging.getLogger("cobre_bridge.pipeline").debug("converting widgets")
+            logging.getLogger("cobre_bridge.newave.pipeline").debug(
+                "converting widgets"
+            )
             return ConversionReport(hydro_count=1, stage_count=12)
 
         with patch(
-            "cobre_bridge.pipeline.convert_newave_case",
+            "cobre_bridge.newave.pipeline.convert_newave_case",
             side_effect=_fake_convert,
         ):
             code, _stdout, _stderr = self._invoke_main(
@@ -101,7 +103,7 @@ class TestVerbosityAndLogFile:
         assert code == 0
         assert log_path.exists()
         contents = log_path.read_text(encoding="utf-8")
-        assert "DEBUG cobre_bridge.pipeline: converting widgets" in contents
+        assert "DEBUG cobre_bridge.newave.pipeline: converting widgets" in contents
         # The FileHandler was removed + closed in main()'s finally.
         assert self._file_handlers() == []
 
@@ -109,13 +111,13 @@ class TestVerbosityAndLogFile:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Two ``--log-file`` runs leave zero ``FileHandler``s (no leak)."""
-        from cobre_bridge.pipeline import ConversionReport
+        from cobre_bridge.core.conversion import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
         report = ConversionReport(hydro_count=1, stage_count=12)
 
         with patch(
-            "cobre_bridge.pipeline.convert_newave_case",
+            "cobre_bridge.newave.pipeline.convert_newave_case",
             return_value=report,
         ):
             for run in ("a", "b"):
@@ -143,7 +145,7 @@ class TestVerbosityAndLogFile:
         ``verbose=False`` (progress NOT suppressed) and returns ``True``.
         """
         from cobre_bridge import ui
-        from cobre_bridge.pipeline import ConversionReport
+        from cobre_bridge.core.conversion import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "dst"
@@ -161,7 +163,9 @@ class TestVerbosityAndLogFile:
             return result
 
         with (
-            patch("cobre_bridge.pipeline.convert_newave_case", return_value=report),
+            patch(
+                "cobre_bridge.newave.pipeline.convert_newave_case", return_value=report
+            ),
             patch.object(ui.console, "_progress_enabled", _spy),
         ):
             code, _stdout, _stderr = self._invoke_main(
@@ -229,14 +233,14 @@ class TestVerbosityAndLogFile:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Smoke: ``-vv`` is accepted on the real CLI and exits cleanly (code 0)."""
-        from cobre_bridge.pipeline import ConversionReport
+        from cobre_bridge.core.conversion import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "dst"
         report = ConversionReport(hydro_count=1, stage_count=12)
 
         with patch(
-            "cobre_bridge.pipeline.convert_newave_case",
+            "cobre_bridge.newave.pipeline.convert_newave_case",
             return_value=report,
         ):
             code, stdout, _stderr = self._invoke_main(

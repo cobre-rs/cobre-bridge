@@ -2174,7 +2174,7 @@ def _cobre_stage_hours(cobre_output_dir: Path) -> dict[int, float]:
 
 
 #: hm³ -> m³/s conversion factor per hour of stage duration -- the inverse of
-#: `converters.network.C_M3S2HM3` (``hours * 3600 / 1e6``), generalized to the
+#: `core.units.C_M3S2HM3` (``hours * 3600 / 1e6``), generalized to the
 #: stage's own ``hours`` instead of the fixed ``MONTH_HOURS`` (730) that
 #: constant assumes.
 _HM3_TO_M3S_HOUR_FACTOR: float = 3600.0 / 1e6
@@ -2186,7 +2186,7 @@ def _hm3_to_m3s(volume_hm3: float, stage_hours: float) -> float:
     ``m3s = hm3 * 1e6 / (stage_hours * 3600)`` -- volume/time with the hm³ ->
     m³ and hour -> second unit changes folded into
     :data:`_HM3_TO_M3S_HOUR_FACTOR`, the same physical relationship
-    `converters.network.C_M3S2HM3` expresses in the opposite direction.
+    `core.units.C_M3S2HM3` expresses in the opposite direction.
     """
     return volume_hm3 / (stage_hours * _HM3_TO_M3S_HOUR_FACTOR)
 

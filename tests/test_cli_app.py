@@ -42,12 +42,14 @@ class TestTyperApp:
         assert self._invoke(["compare"]).exit_code == 2
 
     def test_convert_newave_happy_path(self, tmp_path: Path) -> None:
-        from cobre_bridge.pipeline import ConversionReport
+        from cobre_bridge.core.conversion import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "out"
         report = ConversionReport(hydro_count=7, stage_count=12)
-        with patch("cobre_bridge.pipeline.convert_newave_case", return_value=report):
+        with patch(
+            "cobre_bridge.newave.pipeline.convert_newave_case", return_value=report
+        ):
             result = self._invoke(["convert", "newave", str(src), str(dst)])
         assert result.exit_code == 0
         assert "7 hydros" in result.stdout

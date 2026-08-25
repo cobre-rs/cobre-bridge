@@ -23,8 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from cobre_bridge.converters.network import MONTH_HOURS
 from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.units import MONTH_HOURS
 from cobre_bridge.decomp.anticipated import GnlCommitmentModel, GnlThermal
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.fcf.bootstrap import bootstrap_terminal_manifest

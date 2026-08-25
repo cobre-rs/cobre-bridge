@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from cobre_bridge.converters.tailrace import convert_tailrace_curves
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.id_map import NewaveIdMap
 
 
 class _FakePolinjus:

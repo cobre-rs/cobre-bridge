@@ -16,7 +16,6 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.case import NewaveCase
 from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.core.diagnostics import (
@@ -26,8 +25,9 @@ from cobre_bridge.core.diagnostics import (
     emit,
     format_stage_ranges,
 )
-from cobre_bridge.horizon import build_stage_dates, historical_start_date
-from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.horizon import build_stage_dates, historical_start_date
+from cobre_bridge.newave.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
 

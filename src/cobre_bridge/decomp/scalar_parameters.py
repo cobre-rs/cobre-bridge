@@ -13,7 +13,7 @@ the LP's LHS silently drifts from the RHS.
 
 This module owns building and writing that declaration file for the DECOMP
 case. It delegates entry-building to the model-agnostic
-:func:`cobre_bridge.converters.scalar_parameters.build_scalar_parameters` —
+:func:`cobre_bridge.cobre.scalar_parameters.build_scalar_parameters` —
 the same reuse posture as ``decomp/productivity.py``.
 
 Override contract (produced by the RHE generic emitter, consumed here):
@@ -31,7 +31,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from cobre_bridge.cobre.case_writer import CaseWriter
-from cobre_bridge.converters.scalar_parameters import (
+from cobre_bridge.cobre.scalar_parameters import (
     build_scalar_parameters,
     rho_acum_name,  # re-exported for the RHE emitter's @-sigil expression
 )
@@ -57,7 +57,7 @@ def build_decomp_scalar_parameters(
     """Return the ``generic_parameters.json`` dict for a DECOMP case.
 
     Thin delegation to
-    :func:`cobre_bridge.converters.scalar_parameters.build_scalar_parameters`
+    :func:`cobre_bridge.cobre.scalar_parameters.build_scalar_parameters`
     — *hydro_ids* and *rho_acum_per_stage_overrides* pass straight through,
     the entry-building logic is not reimplemented here.
 

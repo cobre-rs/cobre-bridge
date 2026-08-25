@@ -21,29 +21,16 @@ The source model conventions encoded here:
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date
 
 from inewave.newave import Dger
 
+from cobre_bridge.core.tolerances import BIG_M
+
 # The source model tags post-study (static final period) seasonal data with year 9999.
 POST_STUDY_YEAR = 9999
-
-# The source model bound records use 99999 as a "big-M" sentinel meaning "no limit".
-# Compare with >= this threshold to catch the family of 9999x sentinels.
-BIG_M = 99990.0
-
-
-def is_effectively_infinite(value: float) -> bool:
-    """Return True if *value* represents an unbounded bound.
-
-    Catches both IEEE infinity and the source model's big-M sentinel (``abs(value) >=
-    BIG_M`` — the 99999 family meaning "no limit"). Shared with the chart layer so
-    the "is this bound unbounded?" test has one definition.
-    """
-    return math.isinf(value) or abs(value) >= BIG_M
 
 
 @dataclass(frozen=True)

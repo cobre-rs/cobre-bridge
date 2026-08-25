@@ -70,7 +70,7 @@ class TestCompareDatasetWiring:
         # ``dataclasses.fields``, which raises on a non-dataclass. The paths
         # need not exist: a missing file degrades to a ``None`` hash/size.
         monkeypatch.setattr(
-            "cobre_bridge.case.NewaveCase.from_directory",
+            "cobre_bridge.newave.case.NewaveCase.from_directory",
             classmethod(
                 lambda cls, _dir: MagicMock(
                     id_map=MagicMock(), files=make_nw_files(Path("nw"))
@@ -152,7 +152,7 @@ class TestCompareDatasetWiring:
             raise FileNotFoundError("caso.dat not found")
 
         monkeypatch.setattr(
-            "cobre_bridge.case.NewaveCase.from_directory",
+            "cobre_bridge.newave.case.NewaveCase.from_directory",
             classmethod(_raise_missing),
         )
         cobre_dir = tmp_path / "cobre"
@@ -396,7 +396,7 @@ class TestCompareJson:
         # ``dataclasses.fields``, which raises on a non-dataclass. The paths
         # need not exist: a missing file degrades to a ``None`` hash/size.
         monkeypatch.setattr(
-            "cobre_bridge.case.NewaveCase.from_directory",
+            "cobre_bridge.newave.case.NewaveCase.from_directory",
             classmethod(
                 lambda cls, _dir: MagicMock(
                     id_map=MagicMock(), files=make_nw_files(Path("nw"))
@@ -609,7 +609,7 @@ class TestCompareConfigEnvPrecedence:
         # ``dataclasses.fields``, which raises on a non-dataclass. The paths
         # need not exist: a missing file degrades to a ``None`` hash/size.
         monkeypatch.setattr(
-            "cobre_bridge.case.NewaveCase.from_directory",
+            "cobre_bridge.newave.case.NewaveCase.from_directory",
             classmethod(
                 lambda cls, _dir: MagicMock(
                     id_map=MagicMock(), files=make_nw_files(Path("nw"))

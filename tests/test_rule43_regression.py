@@ -196,7 +196,7 @@ class TestNewaveRule43NoRaising:
         if not deck.exists():
             pytest.skip(f"{deck} not present (example/ is local-only, gitignored)")
 
-        from cobre_bridge.pipeline import convert_newave_case
+        from cobre_bridge.newave.pipeline import convert_newave_case
 
         dst = tmp_path / deck.name
         convert_newave_case(deck, dst)

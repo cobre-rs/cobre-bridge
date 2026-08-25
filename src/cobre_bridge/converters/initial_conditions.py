@@ -7,13 +7,13 @@ from datetime import date
 
 import pandas as pd
 
-from cobre_bridge.case import NewaveCase
 from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.converters.hydro import read_cadastro
 from cobre_bridge.converters.thermal import thermal_generation_bounds
-from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.plants import filling_hydro_codes
+from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.id_map import NewaveIdMap
+from cobre_bridge.newave.plants import filling_hydro_codes
 
 _LOG = logging.getLogger(__name__)
 
@@ -25,8 +25,8 @@ def _filling_row(exph_df: pd.DataFrame, code: int) -> pd.Series:
     the filling schedule lives on the first ``exph`` row per plant, identified by
     a non-null ``data_inicio_enchimento`` (unit rows carry ``NaT`` there). Callers
     must only invoke this for a ``code`` already admitted by
-    :func:`cobre_bridge.plants.filling_hydro_codes`, which guarantees the predicate
-    selects at least one row (so ``.iloc[0]`` never raises).
+    :func:`cobre_bridge.newave.plants.filling_hydro_codes`, which guarantees the
+    predicate selects at least one row (so ``.iloc[0]`` never raises).
     """
     return exph_df.loc[
         (exph_df["codigo_usina"] == code) & exph_df["data_inicio_enchimento"].notna()

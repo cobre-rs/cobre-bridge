@@ -49,8 +49,8 @@ if TYPE_CHECKING:
 
     from cobre_bridge.comparators.dataset import ComparisonDataset
     from cobre_bridge.comparators.verdict import CompareVerdict
+    from cobre_bridge.core.conversion import ConversionReport
     from cobre_bridge.core.diagnostics import Diagnostic
-    from cobre_bridge.pipeline import ConversionReport
 
 # Bump only on a breaking change: a key rename/removal or a meaning change.
 # Adding a NEW optional key under ``summary`` is backward-compatible — do NOT bump.

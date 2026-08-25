@@ -23,7 +23,7 @@ from cobre_bridge.comparators.results import (
     ResultComparison,
     build_results_summary,
 )
-from cobre_bridge.horizon import is_effectively_infinite
+from cobre_bridge.core.tolerances import is_effectively_infinite
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
@@ -318,7 +318,7 @@ class TestCompareVerdictExitCodes:
         # ``dataclasses.fields``, which raises on a non-dataclass. The paths
         # need not exist: a missing file degrades to a ``None`` hash/size.
         monkeypatch.setattr(
-            "cobre_bridge.case.NewaveCase.from_directory",
+            "cobre_bridge.newave.case.NewaveCase.from_directory",
             classmethod(
                 lambda cls, _dir: MagicMock(
                     id_map=MagicMock(), files=make_nw_files(Path("nw"))
