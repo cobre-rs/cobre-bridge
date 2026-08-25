@@ -163,7 +163,6 @@ def _resolve_compare_settings(args: CompareArgs) -> CompareArgs:
     """
     cfg = load_config()
 
-    # Tolerance: flag/env, else the config value, else the built-in default.
     if args.tolerance is not None:
         resolved_tolerance = args.tolerance
     elif cfg.results_tolerance is not None:
