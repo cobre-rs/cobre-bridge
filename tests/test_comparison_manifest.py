@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 import cobre_bridge
-from cobre_bridge._git import git_sha
 from cobre_bridge.comparators.manifest import ComparisonManifest
+from cobre_bridge.core.git import git_sha
 
 
 def _in_git_checkout() -> bool:

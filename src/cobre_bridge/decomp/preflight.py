@@ -24,10 +24,10 @@ from typing import TYPE_CHECKING, cast
 import pandas as pd
 from idecomp.decomp.modelos import dadger as _dadger_models
 
+from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity
+from cobre_bridge.core.errors import FieldParseError, diagnostic_from_exception
 from cobre_bridge.decomp import constraint_registers
 from cobre_bridge.decomp.cadastro import APPLIED_AC_CLASSES, UNINGESTABLE_AC_CLASSES
-from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
-from cobre_bridge.errors import FieldParseError, diagnostic_from_exception
 from cobre_bridge.preflight import (
     CheckItem,
     PreflightResult,

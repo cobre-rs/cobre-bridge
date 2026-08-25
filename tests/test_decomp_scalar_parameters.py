@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cobre_bridge.case_writer import CaseWriter
+from cobre_bridge.cobre.case_writer import CaseWriter
 from cobre_bridge.converters.scalar_parameters import (
     build_scalar_parameters,
 )

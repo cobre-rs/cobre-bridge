@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
 
 if TYPE_CHECKING:
+    from cobre_bridge.core.diagnostics import Diagnostic
     from cobre_bridge.decomp.pipeline import DecompFiles
-    from cobre_bridge.diagnostics import Diagnostic
     from cobre_bridge.newave_files import NewaveFiles
 
 _HASH_CHUNK_BYTES = 8192

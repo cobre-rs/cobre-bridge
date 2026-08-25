@@ -19,9 +19,9 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING
 
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.cadastro import effective_storage_range
-from cobre_bridge.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

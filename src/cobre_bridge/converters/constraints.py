@@ -25,8 +25,8 @@ from typing import Any, Literal, NamedTuple
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.converters.hydro import (
     _apply_permanent_overrides,
     compute_per_stage_own_integrated_productivities,
@@ -34,15 +34,18 @@ from cobre_bridge.converters.hydro import (
 from cobre_bridge.converters.network import C_M3S2HM3, MONTH_HOURS
 from cobre_bridge.converters.scalar_parameters import rho_acum_name
 from cobre_bridge.converters.temporal import _month_hours
-from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
-from cobre_bridge.generic_constraint_builder import (
+from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
+from cobre_bridge.core.generic_constraint_builder import (
     ConstraintIdAllocator,
     GenericConstraintBuilder,
     GenericConstraintResult,
 )
+from cobre_bridge.core.productivity import (
+    compute_productivity,
+    stored_energy_productivity,
+)
 from cobre_bridge.id_map import NewaveIdMap
 from cobre_bridge.plants import active_hydros
-from cobre_bridge.productivity import compute_productivity, stored_energy_productivity
 
 _LOG = logging.getLogger(__name__)
 

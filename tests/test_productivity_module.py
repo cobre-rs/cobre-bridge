@@ -7,7 +7,7 @@ import logging
 import pandas as pd
 import pytest
 
-from cobre_bridge.productivity import (
+from cobre_bridge.core.productivity import (
     KTURB_BY_TIPO_TURBINA,
     compute_productivity,
     equivalent_productivity,
@@ -86,7 +86,7 @@ def test_equivalent_vs_integrated_agree_on_linear_polynomial() -> None:
 def test_equivalent_productivity_from_coeffs_all_zero_guard_warns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    with caplog.at_level(logging.WARNING, logger="cobre_bridge.productivity"):
+    with caplog.at_level(logging.WARNING, logger="cobre_bridge.core.productivity"):
         result = equivalent_productivity_from_coeffs(
             [0.0, 0.0, 0.0, 0.0, 0.0],
             volume_min_hm3=0.0,
@@ -168,7 +168,7 @@ class TestFphaEfficiency:
     def test_clamp_warns_naming_the_plant(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.productivity"):
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge.core.productivity"):
             fpha_efficiency(0.9, "CLAMPED PLANT")
         assert any("CLAMPED PLANT" in record.getMessage() for record in caplog.records)
 

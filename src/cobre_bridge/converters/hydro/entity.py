@@ -10,8 +10,8 @@ import math
 
 import pandas as pd
 
-from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.converters.hydro.bounds import (
     _compute_max_turbined_head_corrected,
     _compute_max_turbined_rated,
@@ -23,7 +23,9 @@ from cobre_bridge.converters.hydro.geometry import (
     fpha_eligible_codes,
 )
 from cobre_bridge.converters.hydro.overrides import _apply_permanent_overrides
-from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
+from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
+from cobre_bridge.core.pandas_utils import is_na
+from cobre_bridge.core.productivity import fpha_efficiency
 from cobre_bridge.filling import (
     filling_completion_date,
     filling_min_rate_m3s,
@@ -32,9 +34,7 @@ from cobre_bridge.filling import (
 from cobre_bridge.filling import stage_id as filling_stage_id
 from cobre_bridge.horizon import build_stage_dates, historical_start_date
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.pandas_utils import is_na
 from cobre_bridge.plants import filling_hydro_codes
-from cobre_bridge.productivity import fpha_efficiency
 
 _LOG = logging.getLogger(__name__)
 

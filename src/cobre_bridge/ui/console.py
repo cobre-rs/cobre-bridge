@@ -1,9 +1,10 @@
 """Rich terminal rendering for the cobre-bridge CLI.
 
-The single place that turns plain data — :class:`~cobre_bridge.diagnostics.Diagnostic`
-objects, a :class:`~cobre_bridge.pipeline.ConversionReport`, comparator summary
-tables — into styled terminal output. Keeping all Rich usage here means the rest of
-the package stays presentation-free and the styling (copper-accented palette from
+The single place that turns plain data —
+:class:`~cobre_bridge.core.diagnostics.Diagnostic` objects, a
+:class:`~cobre_bridge.pipeline.ConversionReport`, comparator summary tables — into
+styled terminal output. Keeping all Rich usage here means the rest of the package stays
+presentation-free and the styling (copper-accented palette from
 :mod:`cobre_bridge.ui.theme`, severity colours, table boxes) is consistent across
 commands.
 
@@ -37,7 +38,7 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-from cobre_bridge.diagnostics import Diagnostic, Severity
+from cobre_bridge.core.diagnostics import Diagnostic, Severity
 from cobre_bridge.preflight import PreflightVerdict
 from cobre_bridge.ui.theme import COPPER_ACCENT, SEVERITY
 

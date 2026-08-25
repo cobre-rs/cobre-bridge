@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
+from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
 from cobre_bridge.plants import active_hydro_codes, fictitious_codes
 
 if TYPE_CHECKING:

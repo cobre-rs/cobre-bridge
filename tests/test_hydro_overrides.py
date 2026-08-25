@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from cobre_bridge import diagnostics as dx
-from cobre_bridge.diagnostics import Severity, finalize_diagnostics
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity, finalize_diagnostics
 from tests.conftest import (
     _make_hidr_cadastro,
     _make_penalid_df,

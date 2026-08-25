@@ -29,19 +29,19 @@ from cobre_bridge.converters.hydro.productivity import (
     _per_stage_productivities,
     _total_study_stages,
 )
-from cobre_bridge.diagnostics import Diagnostic, Severity, emit
-from cobre_bridge.filling import filling_schedule, online_machines
-from cobre_bridge.filling import stage_id as filling_stage_id
-from cobre_bridge.horizon import seasonal_step_function
-from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.pandas_utils import is_na
-from cobre_bridge.plants import fictitious_codes, filling_hydro_codes
-from cobre_bridge.productivity import (
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.pandas_utils import is_na
+from cobre_bridge.core.productivity import (
     KTURB_BY_TIPO_TURBINA,
     apply_hydraulic_loss,
     evaluate_cota,
     mean_cota,
 )
+from cobre_bridge.filling import filling_schedule, online_machines
+from cobre_bridge.filling import stage_id as filling_stage_id
+from cobre_bridge.horizon import seasonal_step_function
+from cobre_bridge.id_map import NewaveIdMap
+from cobre_bridge.plants import fictitious_codes, filling_hydro_codes
 
 _LOG = logging.getLogger(__name__)
 

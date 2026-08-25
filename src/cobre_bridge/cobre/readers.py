@@ -27,13 +27,13 @@ from pathlib import Path
 
 import polars as pl
 
-from cobre_bridge.cobre_io import (
+from cobre_bridge.cobre.case_io import (
     case_dir_for,
     resolve_hydro_productivities,
 )
-from cobre_bridge.cost_categories import COBRE_COST_COMPONENT_COLUMNS
-from cobre_bridge.diagnostics import Diagnostic, Severity, emit
-from cobre_bridge.errors import CobrePartitionMissingError
+from cobre_bridge.cobre.cost_categories import COBRE_COST_COMPONENT_COLUMNS
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.errors import CobrePartitionMissingError
 
 _LOG = logging.getLogger(__name__)
 
@@ -129,7 +129,7 @@ def _weighted_stage_mean(
     return with_means.drop(drop_cols).group_by(id_col, "stage_id").agg(final_aggs)
 
 
-def _scan_simulation_entity(
+def scan_simulation_entity(
     cobre_output_dir: Path,
     entity: str,
 ) -> pl.LazyFrame | None:
@@ -253,11 +253,11 @@ def read_cobre_hydro_bus_generation(cobre_output_dir: Path) -> pl.LazyFrame:
         )
         return pl.LazyFrame(schema=_HYDRO_BUS_GENERATION_SCHEMA)
 
-    lf = _scan_simulation_entity(cobre_output_dir, "hydro_bus_generation")
+    lf = scan_simulation_entity(cobre_output_dir, "hydro_bus_generation")
     if lf is None:
         # sim_dir.is_dir() was already confirmed above, so this is
         # unreachable in practice; kept only to stay type-safe against
-        # _scan_simulation_entity's ``LazyFrame | None`` return.
+        # scan_simulation_entity's ``LazyFrame | None`` return.
         return pl.LazyFrame(schema=_HYDRO_BUS_GENERATION_SCHEMA)
 
     return lf.select(
@@ -311,7 +311,7 @@ def read_cobre_hydro_means(cobre_output_dir: Path) -> pl.DataFrame:
         }
     )
 
-    lf = _scan_simulation_entity(cobre_output_dir, "hydros")
+    lf = scan_simulation_entity(cobre_output_dir, "hydros")
     if lf is None:
         return empty
 
@@ -536,7 +536,7 @@ def read_cobre_spillage_energy(cobre_output_dir: Path) -> pl.DataFrame:
             "rorov_mw": pl.Float64,
         }
     )
-    lf = _scan_simulation_entity(cobre_output_dir, "hydros")
+    lf = scan_simulation_entity(cobre_output_dir, "hydros")
     if lf is None:
         return empty
 
@@ -728,7 +728,7 @@ def read_cobre_line_means(cobre_output_dir: Path) -> pl.DataFrame:
             "net_flow_mw": pl.Float64,
         }
     )
-    lf = _scan_simulation_entity(cobre_output_dir, "exchanges")
+    lf = scan_simulation_entity(cobre_output_dir, "exchanges")
     if lf is None:
         return empty
     available = set(lf.collect_schema().names())
@@ -767,7 +767,7 @@ def read_cobre_line_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
     Returns columns ``entity_id``, ``stage_id``, ``net_flow_mw_p10``,
     ``net_flow_mw_p50``, ``net_flow_mw_p90``.
     """
-    lf = _scan_simulation_entity(cobre_output_dir, "exchanges")
+    lf = scan_simulation_entity(cobre_output_dir, "exchanges")
     if lf is None:
         return pl.DataFrame()
     available = set(lf.collect_schema().names())
@@ -975,7 +975,7 @@ def read_cobre_thermal_means(cobre_output_dir: Path) -> pl.DataFrame:
         }
     )
 
-    lf = _scan_simulation_entity(cobre_output_dir, "thermals")
+    lf = scan_simulation_entity(cobre_output_dir, "thermals")
     if lf is None:
         return empty
 
@@ -1031,7 +1031,7 @@ def read_cobre_bus_means(cobre_output_dir: Path) -> pl.DataFrame:
         }
     )
 
-    lf = _scan_simulation_entity(cobre_output_dir, "buses")
+    lf = scan_simulation_entity(cobre_output_dir, "buses")
     if lf is None:
         return empty
 
@@ -1147,7 +1147,7 @@ def read_cobre_hydro_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
     Returns DataFrame with columns: entity_id, stage_id, and for each
     hydro variable: ``{var}_p10``, ``{var}_p50``, ``{var}_p90``.
     """
-    lf = _scan_simulation_entity(cobre_output_dir, "hydros")
+    lf = scan_simulation_entity(cobre_output_dir, "hydros")
     if lf is None:
         return pl.DataFrame()
 
@@ -1198,7 +1198,7 @@ def read_cobre_hydro_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
 
 def read_cobre_thermal_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre thermal p10/p50/p90 per (entity_id, stage_id)."""
-    lf = _scan_simulation_entity(cobre_output_dir, "thermals")
+    lf = scan_simulation_entity(cobre_output_dir, "thermals")
     if lf is None:
         return pl.DataFrame()
 
@@ -1222,7 +1222,7 @@ def read_cobre_thermal_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
 
 def read_cobre_bus_percentiles(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre bus p10/p50/p90 per (entity_id, stage_id)."""
-    lf = _scan_simulation_entity(cobre_output_dir, "buses")
+    lf = scan_simulation_entity(cobre_output_dir, "buses")
     if lf is None:
         return pl.DataFrame()
 
@@ -1284,7 +1284,7 @@ def read_cobre_bus_aggregates(
     ``system/hydros.json``, so unlike thermal/NCS there is no plant→bus map
     for hydro; a missing partition is a real operational state (the output
     predates cobre 0.13), not "no hydro generation", and propagates
-    :class:`~cobre_bridge.errors.CobrePartitionMissingError` to the caller
+    :class:`~cobre_bridge.core.errors.CobrePartitionMissingError` to the caller
     rather than degrading to zero.
 
     Returns DataFrame with columns: bus_id, stage_id, and for each
@@ -1292,16 +1292,16 @@ def read_cobre_bus_aggregates(
     """
     block_hours = _load_block_hours(cobre_output_dir)
 
-    bus_lf = _scan_simulation_entity(cobre_output_dir, "buses")
+    bus_lf = scan_simulation_entity(cobre_output_dir, "buses")
     bus_vars = ["load_mw", "deficit_mw", "excess_mw"]
 
     thermal_bus_map = _load_entity_bus_map(cobre_output_dir, "thermals", "thermal_id")
-    thermal_lf = _scan_simulation_entity(cobre_output_dir, "thermals")
+    thermal_lf = scan_simulation_entity(cobre_output_dir, "thermals")
 
     ncs_bus_map = _load_entity_bus_map(
         cobre_output_dir, "non_controllable_sources", "non_controllable_id"
     )
-    ncs_lf = _scan_simulation_entity(cobre_output_dir, "non_controllables")
+    ncs_lf = scan_simulation_entity(cobre_output_dir, "non_controllables")
 
     def _agg_entity_by_bus(
         lf: pl.LazyFrame | None,
@@ -1535,7 +1535,7 @@ def read_cobre_cost_breakdown(
         the cost breakdown comparable to the source model, which usually reports a
         shorter horizon than Cobre.
     """
-    lf = _scan_simulation_entity(cobre_output_dir, "costs")
+    lf = scan_simulation_entity(cobre_output_dir, "costs")
     if lf is None:
         return {}
 
@@ -1617,7 +1617,7 @@ def read_cobre_stage_costs(cobre_output_dir: Path) -> pl.DataFrame:
         schema={"stage_id": pl.Int64, **{c: pl.Float64 for c in _OUT_COLS}}
     )
 
-    lf = _scan_simulation_entity(cobre_output_dir, "costs")
+    lf = scan_simulation_entity(cobre_output_dir, "costs")
     if lf is None:
         return empty
 
@@ -1870,7 +1870,7 @@ def read_cobre_hydro_bus_labels(cobre_output_dir: Path) -> dict[int, frozenset[i
     Absence vs. present-but-empty mirrors :func:`read_cobre_hydro_bus_generation`
     exactly (this function adds no aggregation of its own, so it inherits that
     contract unchanged): a missing ``simulation/hydro_bus_generation/``
-    directory raises :class:`~cobre_bridge.errors.CobrePartitionMissingError`;
+    directory raises :class:`~cobre_bridge.core.errors.CobrePartitionMissingError`;
     a present-but-empty partition (already diagnosed by the underlying
     reader) yields an empty dict here.
     """

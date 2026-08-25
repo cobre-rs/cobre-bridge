@@ -28,8 +28,8 @@ from typing import TYPE_CHECKING
 from idecomp.decomp import Dadgnl, Mlt, Vazoes
 from inewave.newave import Cortesh
 
-from cobre_bridge import diagnostics as dx
-from cobre_bridge.case_writer import CaseWriter
+from cobre_bridge.cobre.case_writer import CaseWriter
+from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.decomp.anticipated import read_gnl_model
 from cobre_bridge.decomp.cadastro import build_effective_cadastro
 from cobre_bridge.decomp.fcf.bootstrap import (
@@ -490,7 +490,7 @@ def _emit_import_diagnostics(
     dated-slot drops); ``gnl_plan=None`` (the default) gates it off
     entirely, so 2-arg callers are unchanged.
 
-    Pure side effect via :func:`cobre_bridge.diagnostics.emit`: reads
+    Pure side effect via :func:`cobre_bridge.core.diagnostics.emit`: reads
     ``cuts``/``mapping``/``gnl_plan`` but does not alter any of them, so it
     can run before the checkpoint is written without changing the checkpoint
     bytes or the importer's return value. Mirrors ``decomp/pipeline.py``'s

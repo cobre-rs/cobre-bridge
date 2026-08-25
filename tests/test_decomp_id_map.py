@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+from cobre_bridge.core.errors import FieldParseError, diagnostic_from_exception
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.errors import FieldParseError, diagnostic_from_exception
 
 
 class _NoSbDadger:

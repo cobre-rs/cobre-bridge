@@ -6,8 +6,8 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from cobre_bridge import diagnostics as dx
-from cobre_bridge.diagnostics import Severity
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity
 from cobre_bridge.id_map import NewaveIdMap
 
 # The title/summary/remediation/notes strings geometry.py emits reach a

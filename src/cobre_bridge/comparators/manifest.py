@@ -5,7 +5,7 @@ comparison artifacts so that a divergence-investigation agent can know exactly
 which cases, tolerance, tool versions, and git state produced a given set of
 artifacts, plus which artifacts were emitted and the headline divergences. It
 mirrors :mod:`cobre_bridge.conversion_manifest`; both subclass
-:class:`cobre_bridge.provenance_manifest.ProvenanceManifest` for their shared
+:class:`cobre_bridge.core.provenance.ProvenanceManifest` for their shared
 ``to_json``/``from_json`` behaviour.
 
 :func:`cobre_bridge.comparators.export.write_artifacts` is the sole caller;
@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import ClassVar
 
 import cobre_bridge
-from cobre_bridge._git import git_sha
-from cobre_bridge.provenance_manifest import ProvenanceManifest
+from cobre_bridge.core.git import git_sha
+from cobre_bridge.core.provenance import ProvenanceManifest
 
 
 @dataclass
@@ -69,7 +69,7 @@ class ComparisonManifest(ProvenanceManifest):
 
         ``bridge_version`` is taken from :data:`cobre_bridge.__version__`,
         ``timestamp`` from :func:`datetime.now` in UTC (ISO 8601), and
-        ``git_sha`` from :func:`cobre_bridge._git.git_sha`. ``cobre_version`` /
+        ``git_sha`` from :func:`cobre_bridge.core.git.git_sha`. ``cobre_version`` /
         ``newave_version`` remain caller-supplied (default ``None``); deriving
         them is out of scope for this module. ``input_files`` /
         ``diagnostics_summary`` / ``diagnostics`` default to ``None``, which

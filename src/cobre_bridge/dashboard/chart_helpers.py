@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import plotly.graph_objects as go
 
-from cobre_bridge.cost_categories import AGGREGATE_COST_COLUMNS, COST_PARTITION_COLUMNS
+from cobre_bridge.cobre.cost_categories import (
+    AGGREGATE_COST_COLUMNS,
+    COST_PARTITION_COLUMNS,
+)
 from cobre_bridge.ui.html import wrap_chart
 from cobre_bridge.ui.plotly_helpers import (
     LEGEND_DEFAULTS as _LEGEND,

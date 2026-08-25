@@ -82,7 +82,7 @@ class TestCompareDatasetWiring:
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.cobre_readers.read_cobre_lines",
+            "cobre_bridge.cobre.readers.read_cobre_lines",
             lambda _dir: [],
         )
         # ``compare_results`` now returns the canonical ``ComparisonDataset``;
@@ -408,7 +408,7 @@ class TestCompareJson:
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.cobre_readers.read_cobre_lines",
+            "cobre_bridge.cobre.readers.read_cobre_lines",
             lambda _dir: [],
         )
 
@@ -479,7 +479,7 @@ class TestCompareJson:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A CobreReadError exits 2 with stderr only — no stdout JSON."""
-        from cobre_bridge.comparators.cobre_readers import CobreReadError
+        from cobre_bridge.cobre.readers import CobreReadError
 
         self._patch_common(monkeypatch)
 
@@ -518,7 +518,7 @@ class TestCompareJson:
         output dir (simulation/hydros/ present, simulation/
         hydro_bus_generation/ absent), so the exception message is
         production-generated, not hand-typed."""
-        from cobre_bridge.comparators.cobre_readers import read_cobre_bus_aggregates
+        from cobre_bridge.cobre.readers import read_cobre_bus_aggregates
 
         self._patch_common(monkeypatch)
 
@@ -621,7 +621,7 @@ class TestCompareConfigEnvPrecedence:
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.cobre_readers.read_cobre_lines",
+            "cobre_bridge.cobre.readers.read_cobre_lines",
             lambda _dir: [],
         )
 

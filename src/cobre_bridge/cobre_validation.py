@@ -1,9 +1,9 @@
 """Adapter for validating a converted case with the installed cobre-python.
 
 Shared by every ``convert *`` command's ``--validate`` gate; calls the version
-policy through the :mod:`cobre_bridge.cobre_compat` module object (rather than
+policy through the :mod:`cobre_bridge.cobre.compat` module object (rather than
 importing its functions/constant by name) so a test's
-``patch("cobre_bridge.cobre_compat._installed_cobre_python_version", ...)``
+``patch("cobre_bridge.cobre.compat._installed_cobre_python_version", ...)``
 reaches the same object this module looks up at call time.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cobre_bridge import cobre_compat
+from cobre_bridge.cobre import compat as cobre_compat
 from cobre_bridge.ui.console import print_status, render_error
 
 if TYPE_CHECKING:
@@ -70,7 +70,7 @@ def _run_cobre_validation(
     """Validate *dst* with the installed cobre-python and render the outcome.
 
     Shared by every ``convert *`` command's ``--validate`` gate: the
-    :data:`~cobre_bridge.cobre_compat.MIN_COBRE_VERSION` skip, the
+    :data:`~cobre_bridge.cobre.compat.MIN_COBRE_VERSION` skip, the
     ``cobre.io.validate`` call, warning/error rendering (warnings are first
     partitioned through :func:`_partition_validation_warnings` against
     *whitelist_substrings* — ``convert newave`` passes an empty tuple, the

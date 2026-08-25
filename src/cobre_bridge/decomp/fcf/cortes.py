@@ -106,7 +106,7 @@ class CutFamilySummary:
     A header triage over the active cuts: which plants carry a nonzero
     storage or inflow-lag coefficient, which GNL slots are live, and the
     RHS coefficient scale. Plain data — no logging, no
-    :class:`~cobre_bridge.diagnostics.Diagnostic` — so it stays reusable
+    :class:`~cobre_bridge.core.diagnostics.Diagnostic` — so it stays reusable
     both as a self-check and as diagnostic input.
     """
 

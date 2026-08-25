@@ -9,7 +9,7 @@ lumped ``excess_cost`` into "Other").
 
 from __future__ import annotations
 
-from cobre_bridge.cost_categories import (
+from cobre_bridge.cobre.cost_categories import (
     AGGREGATE_COST_COLUMNS,
     COBRE_COST_COMPONENT_COLUMNS,
     COST_PARTITION_COLUMNS,

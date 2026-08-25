@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge import cobre_schemas
+from cobre_bridge.cobre import schemas as cobre_schemas
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

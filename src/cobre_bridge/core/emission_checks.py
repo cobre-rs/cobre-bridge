@@ -5,7 +5,7 @@ directory. This module inspects those in-memory artifacts — the ``hydros.json`
 document, the ``thermals.json`` document, the ``stages.json`` document, and the
 ``*_bounds`` Parquet tables — for the cobre 0.13 rules the bridge is most
 likely to violate silently, and reports a match as an ``ERROR``
-:class:`~cobre_bridge.diagnostics.Diagnostic` through the sink the pipeline
+:class:`~cobre_bridge.core.diagnostics.Diagnostic` through the sink the pipeline
 already runs converters inside. A failure here therefore surfaces with
 bridge-side context (entity, stage, column, declared vs. offending value) in
 milliseconds, instead of at ``cobre validate``/``cobre run`` load time.
@@ -45,7 +45,7 @@ from typing import NamedTuple
 
 import pyarrow as pa
 
-from cobre_bridge.diagnostics import (
+from cobre_bridge.core.diagnostics import (
     Diagnostic,
     DiagnosticTable,
     Severity,
@@ -53,7 +53,7 @@ from cobre_bridge.diagnostics import (
     emit,
     format_stage_ranges,
 )
-from cobre_bridge.tolerances import relative_tolerance
+from cobre_bridge.core.tolerances import relative_tolerance
 
 _LOG = logging.getLogger(__name__)
 

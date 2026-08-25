@@ -24,8 +24,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
-from cobre_bridge.diagnostics import Diagnostic, Severity
-from cobre_bridge.errors import diagnostic_from_exception
+from cobre_bridge.core.diagnostics import Diagnostic, Severity
+from cobre_bridge.core.errors import diagnostic_from_exception
 from cobre_bridge.newave_files import NewaveFiles
 
 if TYPE_CHECKING:

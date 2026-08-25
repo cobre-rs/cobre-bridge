@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from cobre_bridge.cobre_compat import (
+from cobre_bridge.cobre.compat import (
     MIN_COBRE_VERSION,
     _cobre_python_supports_output,
     _installed_cobre_python_version,

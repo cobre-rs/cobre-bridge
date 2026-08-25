@@ -25,16 +25,16 @@ from typing import NamedTuple
 import pandas as pd
 import polars as pl
 
-from cobre_bridge.comparators.alignment import EntityAlignment
-from cobre_bridge.comparators.cobre_readers import _scan_simulation_entity
-from cobre_bridge.constraint_expr import (
+from cobre_bridge.cobre.constraint_expr import (
     evaluate_constraint_expressions,
     load_rho_acum_overrides,
     parse_expression,
     resolve_param_to_column,
     scales_storage_by_rho_acum,
 )
-from cobre_bridge.generic_constraint_format import shape_from_bounds
+from cobre_bridge.cobre.readers import scan_simulation_entity
+from cobre_bridge.comparators.alignment import EntityAlignment
+from cobre_bridge.core.generic_constraint_format import shape_from_bounds
 from cobre_bridge.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ def _load_generic_constraints(cobre_input_dir: Path) -> list[dict]:
 
     The F3 objects are sense-free (no ``sense`` key); direction is derived
     from the companion bounds table's endpoints when a label is needed (see
-    :func:`per_stage_bounds` / :func:`cobre_bridge.generic_constraint_format.
+    :func:`per_stage_bounds` / :func:`cobre_bridge.core.generic_constraint_format.
     shape_from_bounds`). Returns an empty list when the file is missing or
     malformed.
     """
@@ -305,16 +305,16 @@ def evaluate_lhs_cobre(
     """Evaluate each constraint's LHS from Cobre simulation outputs.
 
     Uses the shared
-    :func:`cobre_bridge.constraint_expr.evaluate_constraint_expressions`
+    :func:`cobre_bridge.cobre.constraint_expr.evaluate_constraint_expressions`
     (which returns one row per (constraint, scenario, stage, block)) and
     collapses to mean across scenarios and blocks per (constraint, stage).
 
-    ``rho_acum_overrides`` (typically :func:`cobre_bridge.constraint_expr.
+    ``rho_acum_overrides`` (typically :func:`cobre_bridge.cobre.constraint_expr.
     load_rho_acum_overrides` against the converted case dir) is forwarded
     verbatim so a ``@rho_acum_h{id}``-scaled constraint (VminOP, RHE)
     resolves against the LP's actual per-stage coefficient rather than the
     simulation's default point-productivity column — see
-    :func:`cobre_bridge.constraint_expr.evaluate_constraint_expressions`.
+    :func:`cobre_bridge.cobre.constraint_expr.evaluate_constraint_expressions`.
 
     Returns
     -------
@@ -347,11 +347,11 @@ def evaluate_lhs_cobre(
         }
     )
 
-    hydros_lf = _scan_simulation_entity(cobre_output_dir, "hydros")
+    hydros_lf = scan_simulation_entity(cobre_output_dir, "hydros")
     if hydros_lf is None:
         # No hydro simulation → no operation data to evaluate the LHS against.
         return empty
-    exchanges_lf = _scan_simulation_entity(cobre_output_dir, "exchanges")
+    exchanges_lf = scan_simulation_entity(cobre_output_dir, "exchanges")
     if exchanges_lf is None:
         exchanges_lf = pl.LazyFrame()
 
@@ -384,7 +384,7 @@ class ResolvedBound(NamedTuple):
     the number the numeric comparison and the chart plot, identical to what
     the pre-F3 single ``bound`` column held. ``shape`` is the direction label
     (``">="``/``"<="``/``"=="``/``"range"``) from
-    :func:`~cobre_bridge.generic_constraint_format.shape_from_bounds`, for
+    :func:`~cobre_bridge.core.generic_constraint_format.shape_from_bounds`, for
     display only.
     """
 
@@ -537,7 +537,7 @@ def apply_vminop_useful_energy(
 
     rho = load_rho_acum_overrides(cobre_case_dir)
     vmin = _load_hydro_min_storage(cobre_case_dir)
-    hydros_lf = _scan_simulation_entity(cobre_output_dir, "hydros")
+    hydros_lf = scan_simulation_entity(cobre_output_dir, "hydros")
     if not rho or not vmin or hydros_lf is None:
         _LOG.warning(
             "VminOP useful-energy rewrite skipped (missing ρ_acum/Vmin/sim data)."

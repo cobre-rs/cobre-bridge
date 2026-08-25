@@ -9,7 +9,6 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from cobre_bridge import diagnostics as dx
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.constraints import (
     _curve_seasonalizes,
@@ -26,12 +25,13 @@ from cobre_bridge.converters.constraints import (
 )
 from cobre_bridge.converters.network import C_M3S2HM3
 from cobre_bridge.converters.scalar_parameters import build_scalar_parameters
-from cobre_bridge.diagnostics import Severity, finalize_diagnostics
-from cobre_bridge.generic_constraint_builder import (
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity, finalize_diagnostics
+from cobre_bridge.core.generic_constraint_builder import (
     GENERIC_BOUNDS_SCHEMA,
     ConstraintIdAllocator,
 )
-from cobre_bridge.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
+from cobre_bridge.core.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
 from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 

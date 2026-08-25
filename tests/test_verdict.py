@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from cobre_bridge.comparators.verdict import CompareVerdict
-from cobre_bridge.diagnostics import Diagnostic, Severity
+from cobre_bridge.core.diagnostics import Diagnostic, Severity
 from cobre_bridge.verdict import (
     SCHEMA_VERSION,
     _coerce_unmapped_code,

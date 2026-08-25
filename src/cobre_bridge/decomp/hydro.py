@@ -93,16 +93,16 @@ import pyarrow as pa
 from idecomp.decomp.modelos.dadger import ACALTEFE
 from inewave.newave import Hidr
 
-from cobre_bridge import cobre_schemas
+from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.converters.hydro import build_mirror_unit_group
-from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
-from cobre_bridge.decomp.group_bounds import GroupBoundEntry
-from cobre_bridge.productivity import (
+from cobre_bridge.core.productivity import (
     KTURB_BY_TIPO_TURBINA,
     equivalent_productivity_from_coeffs,
     fpha_efficiency,
 )
-from cobre_bridge.tolerances import relative_tolerance
+from cobre_bridge.core.tolerances import relative_tolerance
+from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
+from cobre_bridge.decomp.group_bounds import GroupBoundEntry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

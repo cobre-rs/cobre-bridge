@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from cobre_bridge.core.diagnostics import Severity
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintRecord,
@@ -23,7 +24,6 @@ from cobre_bridge.decomp.constraint_registers import (
 from cobre_bridge.decomp.constraints import emit_re_generics, emit_rhq_rhv_generics
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
-from cobre_bridge.diagnostics import Severity
 from tests.conftest import _FakeDadger, make_decomp_case
 
 

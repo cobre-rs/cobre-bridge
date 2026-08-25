@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge import cobre_schemas
+from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.temporal import hours_weighted as _hours_weighted
 

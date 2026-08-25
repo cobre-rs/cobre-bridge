@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from typer.testing import CliRunner
 
-from cobre_bridge.errors import FieldParseError
+from cobre_bridge.core.errors import FieldParseError
 from tests.conftest import _empty_fake_dataset, _fake_dataset
 
 if TYPE_CHECKING:
@@ -410,7 +410,7 @@ class TestCompareDecompCommand:
         must catch it too -- a clean ERROR line + exit 2, not an unhandled
         traceback -- mirroring the compare newave fix and this class's own
         CobreReadError-analogue test above."""
-        from cobre_bridge.errors import CobrePartitionMissingError
+        from cobre_bridge.core.errors import CobrePartitionMissingError
 
         sim_dir = tmp_path / "cobre" / "simulation" / "hydro_bus_generation"
 

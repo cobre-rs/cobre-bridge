@@ -9,8 +9,8 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from cobre_bridge import diagnostics as dx
-from cobre_bridge.diagnostics import Severity
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity
 from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import (
     _hydro_case,

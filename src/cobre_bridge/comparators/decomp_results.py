@@ -53,8 +53,9 @@ from typing import TYPE_CHECKING
 
 import polars as pl
 
-from cobre_bridge.cobre_io import case_dir_for
-from cobre_bridge.comparators import cobre_readers, fpha
+from cobre_bridge.cobre import readers as cobre_readers
+from cobre_bridge.cobre.case_io import case_dir_for
+from cobre_bridge.comparators import fpha
 from cobre_bridge.comparators.decomp_readers import (
     read_dec_desvfpha,
     read_dec_estatfpha,
@@ -73,7 +74,7 @@ from cobre_bridge.comparators.decomp_readers import (
     read_relato_membership,
 )
 from cobre_bridge.comparators.results import PercentileData, ResultComparison
-from cobre_bridge.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
@@ -2970,12 +2971,12 @@ def build_decomp_dataset(
     # reused verbatim from `constraints_compare`; only the DECOMP-side LHS
     # (`_generic_constraint_lhs_decomp`) is new -- see that function's
     # docstring for the per-family derivation.
+    from cobre_bridge.cobre.constraint_expr import load_rho_acum_overrides
     from cobre_bridge.comparators.constraints_compare import (
         _load_generic_constraint_bounds,
         _load_generic_constraints,
         evaluate_lhs_cobre,
     )
-    from cobre_bridge.constraint_expr import load_rho_acum_overrides
 
     cobre_case_dir = case_dir_for(cobre_output_dir)
     gc_constraints = _load_generic_constraints(cobre_case_dir)

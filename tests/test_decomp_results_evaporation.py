@@ -18,7 +18,6 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from cobre_bridge import diagnostics as dx
 from cobre_bridge.comparators.decomp_results import (
     _HM3_TO_M3S_HOUR_FACTOR,
     _AlignedDecompFrames,
@@ -29,6 +28,7 @@ from cobre_bridge.comparators.decomp_results import (
     build_decomp_dataset,
 )
 from cobre_bridge.comparators.report_builder import build_comparison_report
+from cobre_bridge.core import diagnostics as dx
 from tests.conftest import (
     _aligned_fixture,
     _extract_tab_content,

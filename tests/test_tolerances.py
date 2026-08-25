@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from cobre_bridge.tolerances import (
+from cobre_bridge.core.tolerances import (
     RELATIVE_TOLERANCE,
     floats_differ,
     relative_tolerance,

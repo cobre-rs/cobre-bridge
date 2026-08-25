@@ -24,7 +24,7 @@ over every active ``(stage, block)`` cell, renders the cell-invariant
 expression once via :func:`build_electrical_expression`, and synthesizes a
 per-restriction :class:`~cobre_bridge.decomp.constraint_registers.
 ConstraintRecord` that feeds the **existing** E1–E7
-:class:`~cobre_bridge.generic_constraint_builder.GenericConstraintBuilder` —
+:class:`~cobre_bridge.core.generic_constraint_builder.GenericConstraintBuilder` —
 never a new emitter. The pipeline wiring that builds *id_map*/*ncs_id_by_pee_code*/
 *conjh_bus_by_code_group*/*line_map* from a real deck lives in the pipeline
 caller — this module only ever consumes those maps, never
@@ -38,6 +38,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.generic_constraint_builder import (
+    ConstraintIdAllocator,
+    GenericConstraintBuilder,
+)
 from cobre_bridge.decomp.constraint_registers import ConstraintRecord, StageBounds
 from cobre_bridge.decomp.constraints import (
     _format_expression,
@@ -48,11 +53,6 @@ from cobre_bridge.decomp.libs_electrical import (
     UnrecognizedElectricalToken,
     active_cells,
     assemble_bound,
-)
-from cobre_bridge.diagnostics import Diagnostic, Severity, emit
-from cobre_bridge.generic_constraint_builder import (
-    ConstraintIdAllocator,
-    GenericConstraintBuilder,
 )
 
 if TYPE_CHECKING:
@@ -193,7 +193,7 @@ def _cobre_token(
     - ``ener_comerc(c)`` -> not on the target deck; always ``None`` (deferred).
 
     Returns ``None`` — after emitting one ``Severity.WARNING``
-    :class:`~cobre_bridge.diagnostics.Diagnostic` — when *term*'s plant,
+    :class:`~cobre_bridge.core.diagnostics.Diagnostic` — when *term*'s plant,
     thermal, park, bus, or line is absent from its map (a caught
     ``KeyError``, never propagated) or when *term* is ``ener_comerc``.
 

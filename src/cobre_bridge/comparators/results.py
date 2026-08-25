@@ -18,7 +18,7 @@ import pandas as pd
 import polars as pl
 
 from cobre_bridge.case import NewaveCase
-from cobre_bridge.cobre_io import case_dir_for
+from cobre_bridge.cobre.case_io import case_dir_for
 from cobre_bridge.comparators.alignment import EntityAlignment
 from cobre_bridge.id_map import NewaveIdMap
 
@@ -1018,8 +1018,7 @@ def compare_results(
         Relative tolerance for results comparison (informational).
 
     """
-    from cobre_bridge.comparators.alignment import read_reference_names
-    from cobre_bridge.comparators.cobre_readers import (
+    from cobre_bridge.cobre.readers import (
         read_cobre_bus_aggregates,
         read_cobre_bus_means,
         read_cobre_bus_metadata,
@@ -1047,6 +1046,7 @@ def compare_results(
         read_cobre_thermal_percentiles,
         read_cobre_training_duration,
     )
+    from cobre_bridge.comparators.alignment import read_reference_names
     from cobre_bridge.comparators.newave_readers import (
         read_fpha_grid,
         read_fpha_planes,

@@ -67,10 +67,10 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.generic_constraint_format import sense_to_interval
 from cobre_bridge.decomp.hydro import _rated_envelope
 from cobre_bridge.decomp.load import _per_stage_block_loads
-from cobre_bridge.diagnostics import Diagnostic, Severity, emit
-from cobre_bridge.generic_constraint_format import sense_to_interval
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -1772,7 +1772,7 @@ def assemble_bound(
         bucket-C term but *a_h* is ``None``, when a restriction uses
         ``disp_usih`` outside the documented reserve sign structure
         (:func:`_fold_reserve_disp_usih`'s CRITICAL-pitfall guard), or
-        propagated from :func:`~cobre_bridge.generic_constraint_format.
+        propagated from :func:`~cobre_bridge.core.generic_constraint_format.
         sense_to_interval` on an unrecognized INEQUACAO operator — none of
         these is the resolver-unresolvable case this function otherwise
         catches.
@@ -1914,11 +1914,11 @@ def active_cells(
 
     When the rule evaluates ``False`` in **every** in-horizonte cell, the
     returned set is empty and this function itself emits one
-    ``Severity.INFO`` :class:`~cobre_bridge.diagnostics.Diagnostic` naming
+    ``Severity.INFO`` :class:`~cobre_bridge.core.diagnostics.Diagnostic` naming
     *restriction* (mirroring ``constraint_registers``'s dropped-restriction
     skip logging, as a diagnostic here rather than a bare log record).
     Raising it here keeps *active_cells* self-contained and directly
-    testable (via :func:`~cobre_bridge.diagnostics.collect`) — the caller
+    testable (via :func:`~cobre_bridge.core.diagnostics.collect`) — the caller
     simply adds no bound rows for an empty set and does not need to emit
     this diagnostic itself.
 
@@ -2142,7 +2142,7 @@ def _flip_operator(sense: str) -> str:
     ------
     ValueError
         When *sense* is not one of ``">="``, ``"<="``, ``"=="`` — mirroring
-        :func:`~cobre_bridge.generic_constraint_format.sense_to_interval`.
+        :func:`~cobre_bridge.core.generic_constraint_format.sense_to_interval`.
     """
     if sense == ">=":
         return "<="

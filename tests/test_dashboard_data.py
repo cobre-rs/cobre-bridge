@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 import pytest
 from typer.testing import CliRunner
 
-from cobre_bridge import diagnostics as dx
+from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.dashboard.data import (
     DashboardData,
     _load_policy_metadata,

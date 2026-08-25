@@ -20,7 +20,7 @@ import json
 from collections import Counter
 from typing import TYPE_CHECKING
 
-from cobre_bridge.comparators.cobre_readers import read_cobre_training_metadata
+from cobre_bridge.cobre.readers import read_cobre_training_metadata
 from cobre_bridge.comparators.manifest import ComparisonManifest
 
 if TYPE_CHECKING:
@@ -92,7 +92,7 @@ def write_artifacts(
             conversion manifest's ``input_files``); omitted (``None``) records
             an empty list.
         diagnostics: The compare run's diagnostics, each as a
-            :meth:`~cobre_bridge.diagnostics.Diagnostic.to_dict` dict; omitted
+            :meth:`~cobre_bridge.core.diagnostics.Diagnostic.to_dict` dict; omitted
             (``None``) records an empty ``diagnostics`` list and an empty
             ``diagnostics_summary``.
 

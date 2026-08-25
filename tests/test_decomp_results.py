@@ -32,9 +32,9 @@ from cobre_bridge.comparators.decomp_results import (
     _weighted_group_mean,
     build_decomp_dataset,
 )
+from cobre_bridge.core.errors import FieldParseError, SourceFileError
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.pipeline import DecompFiles
-from cobre_bridge.errors import FieldParseError, SourceFileError
 from tests.conftest import (
     _aligned_fixture,
     _no_dec_oper,

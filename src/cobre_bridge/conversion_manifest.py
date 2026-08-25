@@ -5,10 +5,10 @@ converted Cobre case directory so that a downstream agent can know exactly which
 bridge version, git state, source-model case directory, and input files produced
 a given conversion, plus the entity counts and the diagnostics raised during the
 run. It mirrors :mod:`cobre_bridge.comparators.manifest`; both subclass
-:class:`cobre_bridge.provenance_manifest.ProvenanceManifest` for their shared
+:class:`cobre_bridge.core.provenance.ProvenanceManifest` for their shared
 ``to_json``/``from_json`` behaviour.
 
-The shared :func:`cobre_bridge._git.git_sha` runs the git subprocess only
+The shared :func:`cobre_bridge.core.git.git_sha` runs the git subprocess only
 inside :meth:`ConversionManifest.create`, never at import time.
 """
 
@@ -20,9 +20,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 import cobre_bridge
-from cobre_bridge._git import git_sha
-from cobre_bridge.cobre_compat import MIN_COBRE_VERSION
-from cobre_bridge.provenance_manifest import ProvenanceManifest
+from cobre_bridge.cobre.compat import MIN_COBRE_VERSION
+from cobre_bridge.core.git import git_sha
+from cobre_bridge.core.provenance import ProvenanceManifest
 from cobre_bridge.ui.console import print_status
 
 if TYPE_CHECKING:
@@ -82,7 +82,7 @@ class ConversionManifest(ProvenanceManifest):
         ``bridge_version`` is taken from :data:`cobre_bridge.__version__`,
         ``timestamp`` from :func:`datetime.now` in UTC (ISO 8601) — the only
         non-deterministic field — and ``git_sha`` from
-        :func:`cobre_bridge._git.git_sha`. The
+        :func:`cobre_bridge.core.git.git_sha`. The
         ``source_dir`` / ``output_dir`` paths are stringified via ``str(...)``.
         ``min_cobre_version`` records the minimum cobre version the output
         requires (``None`` only when omitted, e.g. by an older caller). The
@@ -124,7 +124,7 @@ def _write_conversion_manifest(
     swallowed — the conversion itself already succeeded, so neither changes the
     exit code.
     """
-    from cobre_bridge.provenance_manifest import (
+    from cobre_bridge.core.provenance import (
         hash_input_files,
         summarize_diagnostics,
     )

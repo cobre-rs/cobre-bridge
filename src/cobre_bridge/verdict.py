@@ -30,7 +30,7 @@ renamed or removed, or when an existing key's meaning changes — a breaking
 change for consumers. Adding a NEW optional key under ``summary`` is
 backward-compatible and does NOT bump the version.
 
-This is a pure leaf: besides :class:`~cobre_bridge.diagnostics.Severity` (the
+This is a pure leaf: besides :class:`~cobre_bridge.core.diagnostics.Severity` (the
 runtime dependency of ``_convert_status``), it imports stdlib only — the
 cross-module ``Diagnostic`` / ``ConversionReport`` / ``CompareVerdict`` types
 are referenced under ``TYPE_CHECKING``. It reads its inputs, allocates fresh
@@ -42,14 +42,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cobre_bridge.diagnostics import Severity
+from cobre_bridge.core.diagnostics import Severity
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from cobre_bridge.comparators.dataset import ComparisonDataset
     from cobre_bridge.comparators.verdict import CompareVerdict
-    from cobre_bridge.diagnostics import Diagnostic
+    from cobre_bridge.core.diagnostics import Diagnostic
     from cobre_bridge.pipeline import ConversionReport
 
 # Bump only on a breaking change: a key rename/removal or a meaning change.

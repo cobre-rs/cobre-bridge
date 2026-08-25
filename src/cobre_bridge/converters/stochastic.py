@@ -18,8 +18,9 @@ import pandas as pd
 import pyarrow as pa
 from inewave.newave import Cadic, Dger, Vazoes
 
-from cobre_bridge import cobre_schemas, plants
+from cobre_bridge import plants
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.horizon import POST_STUDY_YEAR, study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 

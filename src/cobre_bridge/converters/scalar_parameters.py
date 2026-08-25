@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 
-from cobre_bridge import cobre_schemas
+from cobre_bridge.cobre import schemas as cobre_schemas
 
 
 def rho_acum_name(hydro_id: int) -> str:

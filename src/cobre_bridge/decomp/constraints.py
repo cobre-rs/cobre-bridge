@@ -9,7 +9,7 @@ coefficient, or a whole-cascade energy sum — which needs cobre's
 ``slack{enabled, penalty}`` pair, and a companion per-
 ``(constraint_id, stage_id, block_id)`` bounds table carrying cobre's F3
 sense-free interval endpoints (``bound_lower``/``bound_upper`` — see
-:mod:`cobre_bridge.generic_constraint_format`) instead of a ``sense``/
+:mod:`cobre_bridge.core.generic_constraint_format`) instead of a ``sense``/
 ``bound`` pair.
 
 This module stands up that shared scaffolding: the per-term expression-token
@@ -17,14 +17,14 @@ dispatch (``_variable_token``), the ``FI``-interchange line resolver
 (``build_fi_line_map``/``resolve_fi_term``), the coefficient-string formatter
 (``_format_expression``), the ``BIG_M`` slack-penalty helper, and
 ``slots_from_record`` (the per-record (stage, block) slot enumeration feeding
-the shared :class:`~cobre_bridge.generic_constraint_builder.
+the shared :class:`~cobre_bridge.core.generic_constraint_builder.
 GenericConstraintBuilder`), plus the multi-term ``RE`` emitter
 (``emit_re_generics``) and the ``RHQ``/``RHV`` emitter (
 ``emit_rhq_rhv_generics``) built on top of it. This module mirrors — but
 never imports — the sibling ``converters/constraints.py`` emitter's
 ``_parse_formula`` pattern; both tracks share one
 ``GenericConstraintBuilder``/``GenericConstraintResult``
-(:mod:`cobre_bridge.generic_constraint_builder`).
+(:mod:`cobre_bridge.core.generic_constraint_builder`).
 
 GNL pre-processing (feature spec section 2.1/G4 -- abating commanded
 generation, aborting on uncommanded) is out of scope here: ``emit_re_generics``
@@ -54,22 +54,23 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, NamedTuple
 
-from cobre_bridge.decomp.cadastro import effective_storage_range
-from cobre_bridge.decomp.constraint_registers import StageBounds
-from cobre_bridge.decomp.hydro import _downstream_operated
-from cobre_bridge.decomp.scalar_parameters import rho_acum_name
-from cobre_bridge.diagnostics import Diagnostic, Severity, emit
-from cobre_bridge.generic_constraint_builder import (
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.generic_constraint_builder import (
     ConstraintIdAllocator,
     GenericConstraintBuilder,
     GenericConstraintResult,
     is_bounded,
 )
-from cobre_bridge.productivity import stored_energy_productivity
+from cobre_bridge.core.productivity import stored_energy_productivity
+from cobre_bridge.decomp.cadastro import effective_storage_range
+from cobre_bridge.decomp.constraint_registers import StageBounds
+from cobre_bridge.decomp.hydro import _downstream_operated
+from cobre_bridge.decomp.scalar_parameters import rho_acum_name
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from cobre_bridge.core.generic_constraint_builder import Slot
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.constraint_registers import (
@@ -79,7 +80,6 @@ if TYPE_CHECKING:
     )
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
-    from cobre_bridge.generic_constraint_builder import Slot
 
 
 #: The source model's ``num_max_iteracoes``-style deficit multiplier: the
@@ -327,7 +327,7 @@ def slots_from_record(
     beyond the stage's real block count is dropped, never emitted as an
     orphan row); for a stage-level record (``record.per_block is False``),
     one slot per declared stage with ``block_id=None``. Feeds
-    :meth:`~cobre_bridge.generic_constraint_builder.GenericConstraintBuilder.add`,
+    :meth:`~cobre_bridge.core.generic_constraint_builder.GenericConstraintBuilder.add`,
     which itself filters to slots bounded on either side.
     """
     slots: list[Slot] = []
@@ -461,7 +461,7 @@ def emit_re_generics(
 
     Iterates ``census.to_generic`` filtered to ``record.family == "RE"``,
     resolves each record's terms via :func:`_resolve_re_terms`, and feeds a
-    :class:`~cobre_bridge.generic_constraint_builder.GenericConstraintBuilder`;
+    :class:`~cobre_bridge.core.generic_constraint_builder.GenericConstraintBuilder`;
     a record whose terms cannot all be resolved is dropped entirely
     (skip-not-partial, one diagnostic per skipped constraint — see
     :func:`_resolve_re_terms`). Single-hydro-generation RE records never
@@ -606,7 +606,7 @@ def _emit_rhv_volume_tipo_deferred(record: ConstraintRecord, tipo: str) -> None:
 def _offset_if_bounded(value: float | None, offset: float) -> float | None:
     """Add *offset* to *value* iff it is a real bound; otherwise pass it through.
 
-    Mirrors :func:`~cobre_bridge.generic_constraint_builder.is_bounded`'s
+    Mirrors :func:`~cobre_bridge.core.generic_constraint_builder.is_bounded`'s
     sentinel check, phrased so mypy narrows *value* to ``float`` on the
     addition: a ``None`` or ``±1e21`` side never gets an offset added to it.
     """
@@ -634,7 +634,7 @@ def _resolve_hv_varm(
     declared stage, ``offset = sum(cᵢ * effective_storage_range(effective,
     codeᵢ, stage)[0] for term i)``, added to whichever side of the record's
     stage-level ``StageBounds`` is actually bounded
-    (:func:`~cobre_bridge.generic_constraint_builder.is_bounded`) —
+    (:func:`~cobre_bridge.core.generic_constraint_builder.is_bounded`) —
     a ``±1e21``/``None`` side is left untouched, never offset. *calendar* is
     accepted for signature symmetry with the per-block resolvers (mirroring
     ``single_term_bounds._hv_storage_contributions``); ``VARM`` is
@@ -832,7 +832,7 @@ def _per_stage_own_integrated_rho(
     and ``canal_fuga_medio``/``volume_minimo``/``volume_maximo``/
     ``volume_referencia`` (:meth:`~cobre_bridge.decomp.cadastro.
     EffectiveCadastro.value`) — then calls
-    :func:`~cobre_bridge.productivity.stored_energy_productivity` on it,
+    :func:`~cobre_bridge.core.productivity.stored_energy_productivity` on it,
     which itself branches on ``tipo_regulacao`` (the volume-integrated EARM
     ρ for ``"M"``, the point ρ at ``volume_referencia`` for ``"D"``/``"S"``).
     A plant with no per-stage override on any of these falls through to the

@@ -248,7 +248,7 @@ class TestConvertNewaweCasePipeline:
 
         fake_id_map = MagicMock()
         with (
-            patch("cobre_bridge.case_writer.pq.write_table") as write_table,
+            patch("cobre_bridge.cobre.case_writer.pq.write_table") as write_table,
             contextlib.ExitStack() as stack,
         ):
             for p in _all_converter_patches(fake_id_map):
@@ -278,7 +278,7 @@ class TestEmissionCheckWiring:
         43 is explicitly "not applicable" (INFO), not silently absent, and the
         convert verdict stays clean."""
         from cobre_bridge.cli import _convert_status
-        from cobre_bridge.diagnostics import Severity
+        from cobre_bridge.core.diagnostics import Severity
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
@@ -302,7 +302,7 @@ class TestEmissionCheckWiring:
         import contextlib
 
         from cobre_bridge.cli import _convert_status
-        from cobre_bridge.diagnostics import Severity
+        from cobre_bridge.core.diagnostics import Severity
         from cobre_bridge.pipeline import convert_newave_case
 
         src = _make_fake_newave_dir(tmp_path)

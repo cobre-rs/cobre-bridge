@@ -50,7 +50,7 @@ from idecomp.decomp import (
     Relato,
 )
 
-from cobre_bridge.paths import find_case_insensitive
+from cobre_bridge.core.paths import find_case_insensitive
 
 _LOG = logging.getLogger(__name__)
 

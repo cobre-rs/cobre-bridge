@@ -1,9 +1,9 @@
-"""Unit tests for the typed-failure model (``cobre_bridge.errors``)."""
+"""Unit tests for the typed-failure model (``cobre_bridge.core.errors``)."""
 
 from __future__ import annotations
 
-from cobre_bridge.diagnostics import Severity
-from cobre_bridge.errors import (
+from cobre_bridge.core.diagnostics import Severity
+from cobre_bridge.core.errors import (
     BridgeError,
     CobreOutputError,
     CobrePartitionMissingError,

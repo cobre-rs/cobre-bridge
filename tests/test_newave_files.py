@@ -1,7 +1,7 @@
 """Tests for ``NewaveFiles`` discovery — required-file failures as typed errors.
 
 The discovery chain (``caso.dat`` → ``Arquivos`` → required files) now raises
-:class:`~cobre_bridge.errors.SourceFileError` (a :class:`FileNotFoundError`
+:class:`~cobre_bridge.core.errors.SourceFileError` (a :class:`FileNotFoundError`
 subclass) carrying ``path``/``field`` location detail, instead of a bare
 ``FileNotFoundError``. These tests pin the type, the instance-check that keeps
 ``except FileNotFoundError`` handlers working, and the location attributes.
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from cobre_bridge.errors import SourceFileError
+from cobre_bridge.core.errors import SourceFileError
 from cobre_bridge.newave_files import NewaveFiles, _resolve_required
 
 

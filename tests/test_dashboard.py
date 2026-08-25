@@ -18,7 +18,8 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from cobre_bridge import diagnostics as dx
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.errors import CobreOutputError
 from cobre_bridge.dashboard.data import (
     _aggregate_timing_by_iteration,
     _correct_wall_times_from_convergence,
@@ -39,7 +40,6 @@ from cobre_bridge.dashboard.tabs import (
     collect_required_js,
     get_renderable_tabs,
 )
-from cobre_bridge.errors import CobreOutputError
 from cobre_bridge.ui.html import build_html
 from tests.conftest import hydro_with_group
 

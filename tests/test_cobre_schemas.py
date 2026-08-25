@@ -18,7 +18,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from cobre_bridge import cobre_schemas
+from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.id_map import NewaveIdMap
 from tests.conftest import _all_converter_patches, _make_fake_newave_dir, make_case
 
@@ -125,7 +125,7 @@ def test_generic_constraints_json_emit_matches_registry(tmp_path) -> None:
     pipeline run with every converter mocked except ``convert_vminop_constraints``
     — the minimum needed to reach the merge and get a non-empty file."""
     from cobre_bridge.converters.constraints import VminopResult
-    from cobre_bridge.generic_constraint_builder import GENERIC_BOUNDS_SCHEMA
+    from cobre_bridge.core.generic_constraint_builder import GENERIC_BOUNDS_SCHEMA
     from cobre_bridge.pipeline import convert_newave_case
 
     src = _make_fake_newave_dir(tmp_path)

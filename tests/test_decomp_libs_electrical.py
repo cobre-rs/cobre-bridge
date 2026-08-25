@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from cobre_bridge import diagnostics as dx
+from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.group_bounds import GroupBoundEntry
 from cobre_bridge.decomp.id_map import DecompIdMap

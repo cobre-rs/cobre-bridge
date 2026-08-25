@@ -34,7 +34,7 @@ from cobre_bridge.comparators.fpha import (
     dense_grid,
 )
 from cobre_bridge.comparators.results import build_results_summary
-from cobre_bridge.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -546,7 +546,7 @@ class _BusNameLookupCache:
     variable: 6 ``hydro_per_bus_chart`` + 5 ``hydro_slack_per_bus_chart``
     calls); each resolves every plant's bus via :func:`_bus_name_lookups`,
     which -- for an ambiguous or empty-map condition -- emits a
-    :class:`~cobre_bridge.diagnostics.Diagnostic`. Compare has no diagnostics
+    :class:`~cobre_bridge.core.diagnostics.Diagnostic`. Compare has no diagnostics
     de-dup sink, so without this cache the identical warning logs ~11x for
     one condition.
 
@@ -593,7 +593,7 @@ def _bus_name_lookups(
     added to every one of them either: either choice would misreport the
     per-bus roll-up (silently dropping one bus's share, or double-counting
     the plant's whole value at each bus it touches). It is instead excluded
-    from ``hydro_to_bus`` and a :class:`~cobre_bridge.diagnostics.Diagnostic`
+    from ``hydro_to_bus`` and a :class:`~cobre_bridge.core.diagnostics.Diagnostic`
     is raised naming the plant (id and, when available, its
     ``hydro_meta[hid]["name"]``), so the ambiguity surfaces instead of
     quietly producing wrong numbers. If that leaves ``hydro_to_bus`` empty
@@ -1603,7 +1603,7 @@ def build_productivity_detail(
     Returns an empty frame (with the full schema) when there are no aligned
     hydros.
     """
-    from cobre_bridge.productivity import (
+    from cobre_bridge.core.productivity import (
         compute_productivity,
         stored_energy_productivity,
     )

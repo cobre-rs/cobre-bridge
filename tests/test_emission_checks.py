@@ -1,4 +1,4 @@
-"""Unit tests for cobre_bridge.emission_checks (ticket-016, epic-04).
+"""Unit tests for cobre_bridge.core.emission_checks (ticket-016, epic-04).
 
 Each rule gets a positive test (synthetic violation caught) and a negative
 test (the legal shape passes), run against hand-built artifacts — this module
@@ -10,9 +10,9 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
-from cobre_bridge import diagnostics as dx
-from cobre_bridge.diagnostics import Severity
-from cobre_bridge.emission_checks import (
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity
+from cobre_bridge.core.emission_checks import (
     BoundFamily,
     EmissionCheckError,
     check_block_id_not_on_anticipated_thermal,

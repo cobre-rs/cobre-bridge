@@ -26,6 +26,7 @@ import pyarrow.parquet as pq
 import pytest
 
 import cobre_bridge.dashboard.tabs.constraints as tab_constraints
+from cobre_bridge.core.generic_constraint_format import sense_to_interval
 from cobre_bridge.dashboard.tabs.constraints import (
     _build_constraint_lhs_data,
     _build_lhs_section,
@@ -39,7 +40,6 @@ from cobre_bridge.dashboard.tabs.constraints_utils import (
     build_constraints_summary_table,
     derive_constraint_shape,
 )
-from cobre_bridge.generic_constraint_format import sense_to_interval
 
 # ---------------------------------------------------------------------------
 # Helpers / data factories
@@ -904,7 +904,7 @@ class TestParseExpression:
     HEAD ``@name`` sigil."""
 
     def _parse(self, expr: str) -> list[tuple]:
-        from cobre_bridge.constraint_expr import parse_expression
+        from cobre_bridge.cobre.constraint_expr import parse_expression
 
         return parse_expression(expr)
 
@@ -971,7 +971,7 @@ class TestResolveParamToColumn:
     columns."""
 
     def _resolve(self, name: str):
-        from cobre_bridge.constraint_expr import resolve_param_to_column
+        from cobre_bridge.cobre.constraint_expr import resolve_param_to_column
 
         return resolve_param_to_column(name)
 
@@ -1036,7 +1036,7 @@ class TestEvaluateAtName:
     columns."""
 
     def _evaluate(self, expression: str, *, with_productivity: bool = True):
-        from cobre_bridge.constraint_expr import evaluate_constraint_expressions
+        from cobre_bridge.cobre.constraint_expr import evaluate_constraint_expressions
 
         constraints = [
             {
@@ -1093,14 +1093,14 @@ class TestEvaluateAtNameRhoAcumOverride:
     """``rho_acum_overrides`` replaces the default productivity column at
     ``@rho_acum_h{id}`` -- the mechanism VminOP/RHE need to match the LP's
     own resolution instead of the simulation's default point productivity
-    (see :func:`cobre_bridge.constraint_expr.load_rho_acum_overrides`)."""
+    (see :func:`cobre_bridge.cobre.constraint_expr.load_rho_acum_overrides`)."""
 
     def _evaluate(
         self,
         expression: str,
         rho_acum_overrides: dict[int, dict[int, float]] | None,
     ):
-        from cobre_bridge.constraint_expr import evaluate_constraint_expressions
+        from cobre_bridge.cobre.constraint_expr import evaluate_constraint_expressions
 
         constraints = [
             {
@@ -1206,7 +1206,7 @@ class TestStorageOnlyFastPath:
     """
 
     def _evaluate(self, expression: str):
-        from cobre_bridge.constraint_expr import evaluate_constraint_expressions
+        from cobre_bridge.cobre.constraint_expr import evaluate_constraint_expressions
 
         constraints = [
             {

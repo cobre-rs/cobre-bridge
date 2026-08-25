@@ -26,7 +26,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from cobre_bridge import diagnostics as dx
+from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintCensus,

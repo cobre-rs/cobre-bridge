@@ -1,10 +1,10 @@
-"""Unit tests for the structured-diagnostics model (``cobre_bridge.diagnostics``)."""
+"""Unit tests for the structured-diagnostics model (``cobre_bridge.core.diagnostics``)."""
 
 from __future__ import annotations
 
 import logging
 
-from cobre_bridge.diagnostics import (
+from cobre_bridge.core.diagnostics import (
     Diagnostic,
     DiagnosticTable,
     Severity,
@@ -119,7 +119,7 @@ class TestToDict:
 
 class TestWarningCollector:
     def test_captures_warning_and_above(self) -> None:
-        logger = logging.getLogger("cobre_bridge.diagnostics.fake")
+        logger = logging.getLogger("cobre_bridge.core.diagnostics.fake")
         collector = WarningCollector()
         logger.addHandler(collector)
         try:
@@ -130,7 +130,7 @@ class TestWarningCollector:
         assert collector.messages == ["degraded input A", "degraded input B"]
 
     def test_ignores_info_and_below(self) -> None:
-        logger = logging.getLogger("cobre_bridge.diagnostics.fake2")
+        logger = logging.getLogger("cobre_bridge.core.diagnostics.fake2")
         logger.setLevel(logging.DEBUG)
         collector = WarningCollector()
         logger.addHandler(collector)

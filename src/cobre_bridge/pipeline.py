@@ -13,11 +13,9 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from cobre_bridge import cobre_schemas, emission_checks
-from cobre_bridge import diagnostics as dx
-from cobre_bridge.bound_merge import merge_bound_tables
 from cobre_bridge.case import NewaveCase
-from cobre_bridge.case_writer import CaseWriter
+from cobre_bridge.cobre import schemas as cobre_schemas
+from cobre_bridge.cobre.case_writer import CaseWriter
 from cobre_bridge.converters import constraints as constraints_conv
 from cobre_bridge.converters import hydro as hydro_conv
 from cobre_bridge.converters import inflow_windows
@@ -28,7 +26,10 @@ from cobre_bridge.converters import stochastic as stochastic_conv
 from cobre_bridge.converters import tailrace as tailrace_conv
 from cobre_bridge.converters import temporal as temporal_conv
 from cobre_bridge.converters import thermal as thermal_conv
-from cobre_bridge.generic_constraint_builder import ConstraintIdAllocator
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core import emission_checks
+from cobre_bridge.core.bound_merge import merge_bound_tables
+from cobre_bridge.core.generic_constraint_builder import ConstraintIdAllocator
 
 logger = logging.getLogger(__name__)
 
@@ -430,7 +431,7 @@ def _convert_newave_case_impl(
 
     # Post-emission self-checks: mirror cheap cobre load invariants
     # (rules 43, 41, 36, and the block_id-range rule) over the in-memory
-    # artifacts before anything is written. See cobre_bridge.emission_checks
+    # artifacts before anything is written. See cobre_bridge.core.emission_checks
     # for the rule scope.
     bound_families = [
         emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds_table),

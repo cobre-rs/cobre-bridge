@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from cobre_bridge import cobre_schemas
+from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.converters.network import (
     PCORTEOL,
     PEXC,

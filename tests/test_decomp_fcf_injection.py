@@ -28,7 +28,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cobre_bridge.case_writer import CaseWriter
+from cobre_bridge.cobre.case_writer import CaseWriter
 from cobre_bridge.decomp.fcf.importer import (
     _patch_policy_boundary,
     _seed_recent_observations,

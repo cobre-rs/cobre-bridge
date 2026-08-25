@@ -15,7 +15,13 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
-from cobre_bridge import diagnostics as dx
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity
+from cobre_bridge.core.emission_checks import (
+    BoundFamily,
+    check_bound_block_id_range,
+    check_bound_row_uniqueness,
+)
 from cobre_bridge.decomp.group_bounds import (
     _HYDRO_UNIT_GROUP_BOUNDS_SCHEMA,
     GroupBoundEntry,
@@ -23,12 +29,6 @@ from cobre_bridge.decomp.group_bounds import (
     convert_hydro_unit_group_bounds,
 )
 from cobre_bridge.decomp.temporal import build_operative_calendar
-from cobre_bridge.diagnostics import Severity
-from cobre_bridge.emission_checks import (
-    BoundFamily,
-    check_bound_block_id_range,
-    check_bound_row_uniqueness,
-)
 from tests.conftest import make_decomp_case
 
 

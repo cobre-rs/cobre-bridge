@@ -20,6 +20,10 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from cobre_bridge.cobre.constraint_expr import (
+    load_rho_acum_overrides,
+    scales_storage_by_rho_acum,
+)
 from cobre_bridge.comparators.alignment import EntityAlignment
 from cobre_bridge.comparators.constraints_compare import (
     _load_generic_constraint_bounds,
@@ -32,10 +36,6 @@ from cobre_bridge.comparators.constraints_compare import (
     per_stage_bounds,
 )
 from cobre_bridge.comparators.newave_readers import read_medias_hydro
-from cobre_bridge.constraint_expr import (
-    load_rho_acum_overrides,
-    scales_storage_by_rho_acum,
-)
 from cobre_bridge.id_map import NewaveIdMap
 
 _COBRE_INPUT_DIR = (
@@ -70,7 +70,7 @@ def _id_map() -> NewaveIdMap:
 
 def _write_sim_hydros_parquet(output_dir: Path) -> None:
     """Small in-test simulation parquet: 2 hydros x 2 stages x 1 block x 1
-    scenario, under the hive-partitioned layout ``_scan_simulation_entity``
+    scenario, under the hive-partitioned layout ``scan_simulation_entity``
     expects."""
     sim_dir = output_dir / "simulation" / "hydros" / "scenario_id=0"
     sim_dir.mkdir(parents=True, exist_ok=True)

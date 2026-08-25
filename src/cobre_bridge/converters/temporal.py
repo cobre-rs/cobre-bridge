@@ -14,8 +14,8 @@ from datetime import date
 
 from inewave.newave import Dger
 
-from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.horizon import study_horizon
 from cobre_bridge.id_map import NewaveIdMap
 

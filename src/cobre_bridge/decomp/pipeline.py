@@ -22,10 +22,13 @@ import polars as pl
 import pyarrow as pa
 from idecomp.decomp import Dadger, Vazoes
 
-from cobre_bridge import cobre_schemas, emission_checks
-from cobre_bridge import diagnostics as dx
-from cobre_bridge.bound_merge import merge_bound_tables
-from cobre_bridge.case_writer import CaseWriter
+from cobre_bridge.cobre import schemas as cobre_schemas
+from cobre_bridge.cobre.case_writer import CaseWriter
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core import emission_checks
+from cobre_bridge.core.bound_merge import merge_bound_tables
+from cobre_bridge.core.errors import SourceFileError
+from cobre_bridge.core.generic_constraint_builder import ConstraintIdAllocator
 from cobre_bridge.decomp import anticipated as anticipated_conv
 from cobre_bridge.decomp import bounds as bounds_conv
 from cobre_bridge.decomp import (
@@ -55,8 +58,6 @@ from cobre_bridge.decomp.scalar_parameters import (
     build_decomp_scalar_parameters,
     write_scalar_parameters,
 )
-from cobre_bridge.errors import SourceFileError
-from cobre_bridge.generic_constraint_builder import ConstraintIdAllocator
 from cobre_bridge.pipeline import (
     ClearedArtifacts,
     ConversionReport,
@@ -341,7 +342,7 @@ def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.T
     table), restoring the ``cost_per_mwh`` column ``convert_thermal_bounds``
     carries alongside rather than through its bound contributions.
 
-    Merged via :func:`~cobre_bridge.bound_merge.merge_bound_tables`
+    Merged via :func:`~cobre_bridge.core.bound_merge.merge_bound_tables`
     (``precedence="base"``, immaterial here since the two frames share no
     non-key column) on ``(thermal_id, stage_id, block_id)`` — not a
     left-join keyed off *thermal_bounds* — because a ``(thermal, stage)``
@@ -715,7 +716,7 @@ def _attach_water_withdrawal(
     ``water_withdrawal_m3s`` is not a ``HYDRO_BOUNDS_SCHEMA`` column (its axis
     rides its own side-table, per that schema's own comment), so the resolved
     rows fan out into their own table (:func:`_fan_resolved_rows`) and attach via
-    :func:`~cobre_bridge.bound_merge.merge_bound_tables` — mirroring
+    :func:`~cobre_bridge.core.bound_merge.merge_bound_tables` — mirroring
     :func:`_rejoin_thermal_cost`'s ``-1`` block-id sentinel dance (polars' join
     never matches null keys against each other), restored to null afterward.
     Returns ``hydro_bounds`` unchanged when the deck declares no irrigation.
@@ -1688,7 +1689,7 @@ def _emit_and_write(
     # hydro_bounds carries max_turbined_m3s/max_generation_mw whenever a
     # single-term special constraint (e.g. an RE FU generation ceiling) lowers
     # to one; it raises when such a bound exceeds the entity's own declared
-    # capacity. See cobre_bridge.emission_checks for the rule scope.
+    # capacity. See cobre_bridge.core.emission_checks for the rule scope.
     bound_families = [
         emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds),
         emission_checks.BoundFamily("Thermal", "thermal_id", thermal_bounds_table),
@@ -1935,7 +1936,7 @@ def convert_decomp_case(
     """Convert one deck revision into a Cobre case directory.
 
     Mirrors the NEWAVE twin ``convert_newave_case``'s return contract: wraps
-    the conversion in a top-level :func:`cobre_bridge.diagnostics.collect`
+    the conversion in a top-level :func:`cobre_bridge.core.diagnostics.collect`
     sink and a package-logger ``dx.WarningCollector`` so every structured
     ``dx.emit`` finding *and* every residual ``logger.warning`` string is
     captured, then returns them as one de-duplicated
@@ -1966,7 +1967,7 @@ def convert_decomp_case(
     ------
     ValueError
         If the post-emission self-checks (cobre 0.13 rules 43/41/45/38/36 and
-        the ``block_id``-range rule; see :mod:`cobre_bridge.emission_checks`)
+        the ``block_id``-range rule; see :mod:`cobre_bridge.core.emission_checks`)
         find an ``ERROR``-severity violation in the converted artifacts. An
         ``INFO`` finding (e.g. rule 43's "not applicable" report, emitted when
         no hydro-bounds capacity column is populated) never raises. No report

@@ -1,7 +1,7 @@
 """Presentation helpers for the constraints tab.
 
 The constraint-expression *domain* logic (parser, parameter resolver, LHS
-evaluator) now lives in :mod:`cobre_bridge.constraint_expr` so the dashboard and
+evaluator) now lives in :mod:`cobre_bridge.cobre.constraint_expr` so the dashboard and
 the comparator share one definition. This module keeps only the HTML rendering
 plus the small F3 bound-shape derivation used to display it.
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from cobre_bridge.generic_constraint_format import shape_from_bounds
+from cobre_bridge.core.generic_constraint_format import shape_from_bounds
 from cobre_bridge.ui.html import escape_text
 
 
@@ -19,7 +19,7 @@ def derive_constraint_shape(bounds_rows: pd.DataFrame) -> str:
 
     cobre's F3 ``generic_constraints.json`` objects are sense-free; direction
     is encoded entirely by which endpoint(s) of ``generic_constraint_bounds
-    .parquet`` are populated (see :mod:`cobre_bridge.generic_constraint_format`).
+    .parquet`` are populated (see :mod:`cobre_bridge.core.generic_constraint_format`).
     DECOMP's ``RE``/``HQ``/``HV`` families genuinely emit two-sided
     ``"range"`` rows (a single id carrying both ``bound_lower`` and
     ``bound_upper``), and a constraint's per-row direction can vary across

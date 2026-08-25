@@ -17,14 +17,14 @@ import pandas as pd
 import polars as pl
 import pyarrow.parquet as pq
 
-from cobre_bridge.cobre_io import resolve_hydro_productivities
-from cobre_bridge.comparators.cobre_readers import (
+from cobre_bridge.cobre.case_io import resolve_hydro_productivities
+from cobre_bridge.cobre.readers import (
     read_cobre_line_bounds,
     read_cobre_lines,
     read_cobre_training_metadata,
 )
-from cobre_bridge.diagnostics import Diagnostic, Severity, emit
-from cobre_bridge.errors import CobreOutputError
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.errors import CobreOutputError
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,7 @@ def resolve_hydro_bus_id(hydro: dict, *, hydros_path: Path) -> int | None:
       compare layer resolved the same way in
       ``comparators.analyze._bus_name_lookups``. Implementation note (a
       deliberate degraded-rendering choice): a ``WARNING``
-      :class:`~cobre_bridge.diagnostics.Diagnostic` is emitted and ``None``
+      :class:`~cobre_bridge.core.diagnostics.Diagnostic` is emitted and ``None``
       is returned. Callers must omit the plant from any single-bus-keyed
       view: ``load_hydro_bus_map``'s id->bus map has no room for more than
       one bus per plant, and ``load_hydro_metadata`` drops the ``"bus_id"``
@@ -785,7 +785,7 @@ class SolverPerformance:
 #: Renames cobre 0.14's canonical diagnostic-output axes back to the pre-0.14
 #: spellings the dashboard's chart layer was written against, applied at this
 #: single load choke point (mirroring
-#: :func:`cobre_bridge.comparators.cobre_readers.read_cobre_convergence`).
+#: :func:`cobre_bridge.cobre.readers.read_cobre_convergence`).
 _OUTPUT_COLUMN_ALIASES: dict[str, str] = {
     "stage_id": "stage",
     "opening_index": "opening",
@@ -1046,7 +1046,7 @@ class GenericConstraintData:
     F3 shape: ``constraints`` dicts carry no ``sense`` key, and ``bounds``
     has nullable ``bound_lower``/``bound_upper`` endpoint columns instead of
     a single ``bound`` column (see
-    :mod:`cobre_bridge.generic_constraint_format`). Readers derive the
+    :mod:`cobre_bridge.core.generic_constraint_format`). Readers derive the
     displayed direction from the endpoints via
     :func:`cobre_bridge.dashboard.tabs.constraints_utils.derive_constraint_shape`.
     """

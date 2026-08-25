@@ -26,7 +26,7 @@ fix must keep satisfying — if a future converter change reintroduces even
 one raising row, this test fails.
 
 The scan logic here is written independently of
-``cobre_bridge.emission_checks`` (parses ``hydros.json``/
+``cobre_bridge.core.emission_checks`` (parses ``hydros.json``/
 ``hydro_bounds.parquet`` itself, does not import that module's private
 helpers) so this test does not simply assert that the courtesy mirror
 agrees with itself; it independently re-derives the same cobre-side
@@ -49,7 +49,7 @@ import pytest
 _GUARDED_COLUMNS: tuple[str, ...] = ("max_turbined_m3s", "max_generation_mw")
 
 #: Mirrors cobre-io's ``ENVELOPE_TOLERANCE`` (also independently mirrored by
-#: ``cobre_bridge.emission_checks._tolerance``) — a *relative* tolerance, so
+#: ``cobre_bridge.core.emission_checks._tolerance``) — a *relative* tolerance, so
 #: a plant declared near zero is not held to an absolute epsilon that would
 #: swallow a real violation, while a plant declared at, say, 1e6 does not
 #: false-fire on float noise.

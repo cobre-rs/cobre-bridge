@@ -25,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from cobre_bridge import diagnostics as dx
+from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.libs_electrical import read_carga_ande

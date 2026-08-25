@@ -6,7 +6,7 @@ import io
 
 from rich.console import Console
 
-from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
+from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity
 from cobre_bridge.pipeline import ConversionReport
 from cobre_bridge.preflight import CheckItem, PreflightResult, PreflightVerdict
 from cobre_bridge.ui.console import (
@@ -321,7 +321,7 @@ class TestCompareRowStyle:
         assert compare_row_style(within_tol=True) == _SUCCESS_STYLE
 
     def test_not_within_tol_returns_error_style(self) -> None:
-        from cobre_bridge.diagnostics import Severity
+        from cobre_bridge.core.diagnostics import Severity
         from cobre_bridge.ui.console import _SEVERITY_STYLE
 
         assert compare_row_style(within_tol=False) == _SEVERITY_STYLE[Severity.ERROR]

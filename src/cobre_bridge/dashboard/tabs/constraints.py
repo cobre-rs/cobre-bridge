@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from cobre_bridge.constraint_expr import (
+from cobre_bridge.cobre.constraint_expr import (
     evaluate_constraint_expressions,
     load_rho_acum_overrides,
 )
@@ -210,7 +210,7 @@ def _build_constraint_lhs_data(
             ``stage_id``, ``block_id``, ``lhs_value``.
         gc_bounds: DataFrame with columns ``constraint_id``, ``stage_id``,
             ``block_id``, ``bound_lower``, ``bound_upper`` (the F3 sense-free
-            interval; see :mod:`cobre_bridge.generic_constraint_format`).
+            interval; see :mod:`cobre_bridge.core.generic_constraint_format`).
         stage_labels: Stage id to human-readable label mapping.
 
     Returns:

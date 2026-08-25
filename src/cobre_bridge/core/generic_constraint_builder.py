@@ -8,7 +8,7 @@ the single model-agnostic home both tracks use for that stateful assembly —
 :class:`GenericConstraintResult`, :data:`GENERIC_BOUNDS_SCHEMA`, and the F3
 slot/sentinel helpers (:data:`UNBOUNDED`, :func:`is_bounded`,
 :func:`slot_endpoints`) — built on the pure mapping leaf
-:mod:`cobre_bridge.generic_constraint_format`.
+:mod:`cobre_bridge.core.generic_constraint_format`.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import NamedTuple
 
 import pyarrow as pa
 
-from cobre_bridge.generic_constraint_format import (
+from cobre_bridge.core.generic_constraint_format import (
     GENERIC_BOUNDS_COLUMNS,
     sense_to_interval,
 )
@@ -52,7 +52,7 @@ class GenericConstraintResult(NamedTuple):
 
     ``constraints`` is the list of constraint dicts (``{"id", "name",
     "description", "expression", "slack"}`` — cobre's F3 sense-free shape,
-    see :mod:`cobre_bridge.generic_constraint_format`); ``bounds`` is the
+    see :mod:`cobre_bridge.core.generic_constraint_format`); ``bounds`` is the
     per-``(constraint_id, stage_id, block_id)`` bounds table honouring
     :data:`GENERIC_BOUNDS_SCHEMA` (nullable ``bound_lower``/``bound_upper``
     endpoints, no single ``bound``).
@@ -63,7 +63,7 @@ class GenericConstraintResult(NamedTuple):
 
 
 #: Schema for the generic-constraint bounds table (F3 shape: see
-#: :data:`~cobre_bridge.generic_constraint_format.GENERIC_BOUNDS_COLUMNS`).
+#: :data:`~cobre_bridge.core.generic_constraint_format.GENERIC_BOUNDS_COLUMNS`).
 #: ``block_id`` is nullable: ``None`` means "all blocks" (a stage-level
 #: constraint, or a per-block one whose bound applies uniformly).
 #: ``bound_lower``/``bound_upper`` are both nullable; the null-pattern

@@ -21,7 +21,7 @@ from cobre_bridge.cli_args import (
     DashboardArgs,
     _parse_formats,
 )
-from cobre_bridge.cobre_compat import MIN_COBRE_VERSION as MIN_COBRE_VERSION
+from cobre_bridge.cobre.compat import MIN_COBRE_VERSION as MIN_COBRE_VERSION
 from cobre_bridge.cobre_validation import (
     _partition_validation_warnings as _partition_validation_warnings,
 )
@@ -31,8 +31,8 @@ from cobre_bridge.config_resolution import (
     load_config,
 )
 from cobre_bridge.conversion_manifest import _write_conversion_manifest
-from cobre_bridge.diagnostics import _write_diagnostics_json
-from cobre_bridge.errors import (
+from cobre_bridge.core.diagnostics import _write_diagnostics_json
+from cobre_bridge.core.errors import (
     BridgeError,
     CobreOutputError,
     SourceFileError,
@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     from cobre_bridge.cli_args import CommonArgs
     from cobre_bridge.comparators.alignment import EntityAlignment
     from cobre_bridge.comparators.dataset import ComparisonDataset
-    from cobre_bridge.diagnostics import Diagnostic
+    from cobre_bridge.core.diagnostics import Diagnostic
     from cobre_bridge.id_map import NewaveIdMap
     from cobre_bridge.pipeline import ConversionReport
 
@@ -97,8 +97,8 @@ def _load_compare_context(
     missing (``FileNotFoundError`` from ``NewaveCase.from_directory``).
     """
     from cobre_bridge.case import NewaveCase
+    from cobre_bridge.cobre.readers import read_cobre_lines
     from cobre_bridge.comparators.alignment import build_entity_alignment
-    from cobre_bridge.comparators.cobre_readers import read_cobre_lines
 
     try:
         case = NewaveCase.from_directory(newave_dir)
@@ -263,13 +263,13 @@ def _run_newave_comparison(args: CompareArgs) -> None:
     """
     args = _resolve_compare_settings(args)
 
-    from cobre_bridge import diagnostics as dx
-    from cobre_bridge.comparators.cobre_readers import CobreReadError
+    from cobre_bridge.cobre.readers import CobreReadError
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
     from cobre_bridge.comparators.results import compare_results
     from cobre_bridge.comparators.verdict import build_compare_verdict, compare_status
-    from cobre_bridge.errors import CobrePartitionMissingError
-    from cobre_bridge.provenance_manifest import hash_input_files
+    from cobre_bridge.core import diagnostics as dx
+    from cobre_bridge.core.errors import CobrePartitionMissingError
+    from cobre_bridge.core.provenance import hash_input_files
 
     newave_dir: Path = args.source_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -359,7 +359,7 @@ def _run_dashboard(args: DashboardArgs) -> None:
             1,
         )
 
-    from cobre_bridge import diagnostics as dx
+    from cobre_bridge.core import diagnostics as dx
 
     output_path: Path = args.output or (case_dir / "dashboard.html")
     if not args.json_output and not args.quiet:
@@ -1097,7 +1097,7 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
         )
     if fcf_cut_files_present:
         assert case is not None  # narrowed by fcf_cut_files_present
-        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.core import diagnostics as dx
 
         fcf_diags: list[Diagnostic] = []
         try:
@@ -1317,14 +1317,14 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
     the one failure (exit 2) — reporting a zero-vs-zero match on data we could
     not read would be worse than stopping.
     """
-    from cobre_bridge import diagnostics as dx
-    from cobre_bridge.comparators.cobre_readers import CobreReadError
+    from cobre_bridge.cobre.readers import CobreReadError
     from cobre_bridge.comparators.decomp_results import build_decomp_dataset
     from cobre_bridge.comparators.report import print_results_summary_from_dataset
     from cobre_bridge.comparators.verdict import compare_status
+    from cobre_bridge.core import diagnostics as dx
+    from cobre_bridge.core.errors import CobrePartitionMissingError, FieldParseError
+    from cobre_bridge.core.provenance import hash_input_files
     from cobre_bridge.decomp.case import DecompCase
-    from cobre_bridge.errors import CobrePartitionMissingError, FieldParseError
-    from cobre_bridge.provenance_manifest import hash_input_files
 
     # Resolved before the read (unlike the pre-dataset ordering) so
     # ``build_decomp_dataset`` below gets a concrete tolerance rather than the

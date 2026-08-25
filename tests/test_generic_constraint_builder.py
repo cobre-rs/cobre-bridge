@@ -8,12 +8,12 @@ Covers the ``GENERIC_BOUNDS_SCHEMA`` drift-guard invariant, every
 
 from __future__ import annotations
 
-from cobre_bridge.generic_constraint_builder import (
+from cobre_bridge.core.generic_constraint_builder import (
     GENERIC_BOUNDS_SCHEMA,
     ConstraintIdAllocator,
     GenericConstraintBuilder,
 )
-from cobre_bridge.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
+from cobre_bridge.core.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
 
 
 def test_generic_bounds_schema_matches_shared_columns() -> None:

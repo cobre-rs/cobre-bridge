@@ -50,9 +50,9 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
+from cobre_bridge.core.tolerances import floats_differ
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
-from cobre_bridge.tolerances import floats_differ
 
 if TYPE_CHECKING:
     from cobre_bridge.decomp.cadastro import EffectiveCadastro

@@ -18,6 +18,8 @@ from idecomp.decomp.modelos.dadger import (
     ACVOLMIN,
 )
 
+from cobre_bridge.core.diagnostics import Severity
+from cobre_bridge.core.errors import FieldParseError
 from cobre_bridge.decomp.cadastro import (
     _SCALAR_AC_SPECS,
     APPLIED_AC_CLASSES,
@@ -38,8 +40,6 @@ from cobre_bridge.decomp.preflight import (
     _special_constraint_coverage,
     run_decomp_preflight,
 )
-from cobre_bridge.diagnostics import Severity
-from cobre_bridge.errors import FieldParseError
 from cobre_bridge.preflight import CheckItem, PreflightVerdict, optional_input_advisory
 from tests.conftest import make_decomp_case
 from tests.test_decomp_cadastro import _FakeDadger

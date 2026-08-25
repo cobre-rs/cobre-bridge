@@ -110,9 +110,7 @@ def _patch_newave_context(monkeypatch: pytest.MonkeyPatch) -> None:
         "cobre_bridge.comparators.alignment.build_entity_alignment",
         lambda *a, **k: MagicMock(),
     )
-    monkeypatch.setattr(
-        "cobre_bridge.comparators.cobre_readers.read_cobre_lines", lambda _dir: []
-    )
+    monkeypatch.setattr("cobre_bridge.cobre.readers.read_cobre_lines", lambda _dir: [])
 
 
 def _invoke_newave(

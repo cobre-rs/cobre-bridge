@@ -16,7 +16,6 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from cobre_bridge import diagnostics as dx
 from cobre_bridge.comparators.charts import ree_energy_chart
 from cobre_bridge.comparators.decomp_results import (
     _EARM_MWH_TO_MWMES,
@@ -28,6 +27,7 @@ from cobre_bridge.comparators.decomp_results import (
 )
 from cobre_bridge.comparators.report_builder import build_comparison_report
 from cobre_bridge.comparators.results import ResultComparison
+from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.decomp.id_map import DecompIdMap
 from tests.conftest import (
     _aligned_fixture,

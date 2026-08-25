@@ -22,7 +22,7 @@ from typer.testing import CliRunner, Result
 
 from cobre_bridge.cli import _run_check, _run_decomp_check, app
 from cobre_bridge.cli_args import CheckArgs
-from cobre_bridge.diagnostics import Diagnostic, Severity
+from cobre_bridge.core.diagnostics import Diagnostic, Severity
 from cobre_bridge.preflight import CheckItem, PreflightResult, PreflightVerdict
 from tests.conftest import _make_fake_newave_dir, _run_cli_subprocess
 
@@ -249,7 +249,7 @@ class TestCheckCommand:
         realistic payload; the verdict itself is taken verbatim by the handler and
         renderer (never recomputed from the checks/diagnostics here).
         """
-        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.core.diagnostics import Diagnostic, Severity
         from cobre_bridge.preflight import (
             CheckItem,
             PreflightResult,

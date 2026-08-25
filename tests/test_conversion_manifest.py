@@ -14,8 +14,8 @@ import pytest
 import cobre_bridge
 from cobre_bridge.conversion_manifest import ConversionManifest
 from cobre_bridge.conversion_manifest import git_sha as conversion_git_sha
-from cobre_bridge.diagnostics import Diagnostic, Severity
-from cobre_bridge.provenance_manifest import hash_input_files, summarize_diagnostics
+from cobre_bridge.core.diagnostics import Diagnostic, Severity
+from cobre_bridge.core.provenance import hash_input_files, summarize_diagnostics
 from tests.conftest import make_nw_files
 
 
@@ -288,8 +288,8 @@ def test_create_git_sha_in_repo() -> None:
 
 def test_git_sha_is_shared_not_duplicated() -> None:
     """Both manifests use the one shared git helper, never a duplicate."""
-    from cobre_bridge._git import git_sha as shared_git_sha
     from cobre_bridge.comparators.manifest import git_sha as comparison_git_sha
+    from cobre_bridge.core.git import git_sha as shared_git_sha
 
     assert conversion_git_sha is shared_git_sha
     assert comparison_git_sha is shared_git_sha

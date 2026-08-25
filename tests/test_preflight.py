@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from cobre_bridge import preflight
-from cobre_bridge.diagnostics import Severity
+from cobre_bridge.core.diagnostics import Severity
 from cobre_bridge.newave_files import NewaveFiles
 from cobre_bridge.preflight import PreflightVerdict, run_preflight
 from tests.conftest import make_nw_files

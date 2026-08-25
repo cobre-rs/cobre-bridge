@@ -8,7 +8,6 @@ from typing import cast
 import polars as pl
 import pytest
 
-from cobre_bridge import diagnostics as dx
 from cobre_bridge.comparators.analyze import (
     aggregate_percentile_band,
     build_results_dataset,
@@ -46,6 +45,7 @@ from cobre_bridge.comparators.verdict import (
     CompareVerdict,
     build_compare_verdict,
 )
+from cobre_bridge.core import diagnostics as dx
 
 
 def _make_results() -> list[ResultComparison]:

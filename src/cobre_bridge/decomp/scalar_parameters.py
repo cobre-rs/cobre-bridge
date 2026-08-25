@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from cobre_bridge.case_writer import CaseWriter
+from cobre_bridge.cobre.case_writer import CaseWriter
 from cobre_bridge.converters.scalar_parameters import (
     build_scalar_parameters,
     rho_acum_name,  # re-exported for the RHE emitter's @-sigil expression
@@ -74,7 +74,7 @@ def write_scalar_parameters(writer: CaseWriter, params: Mapping[str, object]) ->
     """Write *params* to ``constraints/generic_parameters.json`` via *writer*.
 
     Delegates the byte format and the ``dry_run``/would-write bookkeeping to
-    the shared :class:`~cobre_bridge.case_writer.CaseWriter` — this module owns
+    the shared :class:`~cobre_bridge.cobre.case_writer.CaseWriter` — this module owns
     only the relpath the DECOMP case writes it under.
     """
     writer.write_json(_SCALAR_PARAMETERS_RELPATH.as_posix(), params)

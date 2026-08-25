@@ -21,6 +21,7 @@ import pandas as pd
 import pytest
 from idecomp.decomp.modelos.dadger import ACCOTVOL, ACJUSMED, ACPERHID, ACPROESP
 
+from cobre_bridge.core.productivity import apply_hydraulic_loss, mean_cota
 from cobre_bridge.decomp.cadastro import (
     EffectiveCadastro,
     OutOfHorizon,
@@ -33,7 +34,6 @@ from cobre_bridge.decomp.hydro import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
-from cobre_bridge.productivity import apply_hydraulic_loss, mean_cota
 from tests.conftest import make_decomp_case
 
 if TYPE_CHECKING:
@@ -518,7 +518,7 @@ def test_all_zero_coeffs_plant_returns_zero_and_warns(
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
     effective = EffectiveCadastro(base=hidr, n_stages=1, stage_varying={})
 
-    with caplog.at_level(logging.WARNING, logger="cobre_bridge.productivity"):
+    with caplog.at_level(logging.WARNING, logger="cobre_bridge.core.productivity"):
         table = convert_energy_productivity(effective, id_map).to_pandas()
 
     assert table["equivalent_productivity_mw_per_m3s"].iloc[0] == 0.0

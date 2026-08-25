@@ -23,8 +23,8 @@ from cobre_bridge.converters.hydro import (
     convert_production_models,
     fpha_eligible_codes,
 )
+from cobre_bridge.core.productivity import fpha_efficiency
 from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.productivity import fpha_efficiency
 from tests.conftest import (
     _make_confhd_df,
     _make_hidr_cadastro,

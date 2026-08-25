@@ -3,7 +3,7 @@ machinery, the production-model JSON, and the FPHA plane-reduction /
 computed-config helpers.
 
 All point / PRODT / integrated productivity math routes through the
-presentation-free :mod:`cobre_bridge.productivity` domain module; this module
+presentation-free :mod:`cobre_bridge.core.productivity` domain module; this module
 holds only the source-model-specific orchestration (temporal overrides,
 seasonal reference volumes, FICT-cascade fold-in) around that math.
 """
@@ -15,8 +15,8 @@ import logging
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge import cobre_schemas
 from cobre_bridge.case import NewaveCase
+from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.converters.hydro.geometry import (
     _read_volref_saz,
     _seasonal_reference_volume,
@@ -27,19 +27,19 @@ from cobre_bridge.converters.hydro.overrides import (
     _extract_temporal_overrides,
     _per_stage_drop_overrides,
 )
-from cobre_bridge.diagnostics import Diagnostic, Severity, emit
-from cobre_bridge.id_map import NewaveIdMap
-from cobre_bridge.productivity import (
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.productivity import (
     compute_productivity,
     equivalent_productivity,
     integrated_productivity,
     stored_energy_productivity,
 )
+from cobre_bridge.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
 
 # The point / PRODT / integrated productivity functions now live in the
-# presentation-free ``cobre_bridge.productivity`` domain module. These aliases
+# presentation-free ``cobre_bridge.core.productivity`` domain module. These aliases
 # keep hydro.py's many internal callers (and tests that import the private
 # names) working; external modules import the public names directly.
 _compute_productivity = compute_productivity

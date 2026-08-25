@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from cobre_bridge.diagnostics import Diagnostic, Severity
+from cobre_bridge.core.diagnostics import Diagnostic, Severity
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence

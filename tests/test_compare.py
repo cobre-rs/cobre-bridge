@@ -27,7 +27,7 @@ from cobre_bridge.horizon import is_effectively_infinite
 
 if TYPE_CHECKING:
     from cobre_bridge.comparators.dataset import ComparisonDataset
-    from cobre_bridge.diagnostics import Diagnostic
+    from cobre_bridge.core.diagnostics import Diagnostic
 
 # -------------------------------------------------------------------
 # Horizon bounds-helper unit tests
@@ -330,7 +330,7 @@ class TestCompareVerdictExitCodes:
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.cobre_readers.read_cobre_lines",
+            "cobre_bridge.cobre.readers.read_cobre_lines",
             lambda _dir: [],
         )
 
@@ -409,7 +409,7 @@ def _fake_decomp_dataset() -> ComparisonDataset:
 
 
 def _dropped_plant_diagnostic() -> Diagnostic:
-    from cobre_bridge.diagnostics import Diagnostic, Severity
+    from cobre_bridge.core.diagnostics import Diagnostic, Severity
 
     return Diagnostic(
         code="test-dropped-plant",
@@ -448,7 +448,7 @@ class TestCompareDiagnosticsWiring:
     def test_compare_newave_json_diagnostics_array_is_non_empty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.core import diagnostics as dx
 
         TestCompareVerdictExitCodes._patch_compare_context(monkeypatch)
         diagnostic = _dropped_plant_diagnostic()
@@ -476,7 +476,7 @@ class TestCompareDiagnosticsWiring:
     def test_compare_decomp_json_diagnostics_array_is_non_empty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.core import diagnostics as dx
 
         self._patch_decomp_case(monkeypatch)
         diagnostic = _dropped_plant_diagnostic()
@@ -504,7 +504,7 @@ class TestCompareDiagnosticsWiring:
     def test_compare_newave_non_json_renders_diagnostic_title_on_stderr(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.core import diagnostics as dx
 
         TestCompareVerdictExitCodes._patch_compare_context(monkeypatch)
         diagnostic = _dropped_plant_diagnostic()
@@ -530,7 +530,7 @@ class TestCompareDiagnosticsWiring:
     def test_compare_decomp_non_json_renders_diagnostic_title_on_stderr(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.core import diagnostics as dx
 
         self._patch_decomp_case(monkeypatch)
         diagnostic = _dropped_plant_diagnostic()
@@ -664,7 +664,7 @@ class TestReconstructedCost:
     """Reconstruct the source model live immediate cost from MEDIAS × our penalties."""
 
     def test_read_converted_penalties(self, tmp_path: Path) -> None:
-        from cobre_bridge.comparators.cobre_readers import read_converted_penalties
+        from cobre_bridge.cobre.readers import read_converted_penalties
 
         (tmp_path / "penalties.json").write_text('{"hydro": {"spillage_cost": 0.5}}')
         out = tmp_path / "output"
@@ -725,7 +725,7 @@ class TestOverviewCostCharts:
         assert "40.0" in html and "-40.0" in html
 
     def test_stage_costs_reader_includes_thermal_cost(self, tmp_path: Path) -> None:
-        from cobre_bridge.comparators.cobre_readers import read_cobre_stage_costs
+        from cobre_bridge.cobre.readers import read_cobre_stage_costs
 
         d = tmp_path / "simulation" / "costs" / "scenario_id=0000"
         d.mkdir(parents=True)
@@ -753,7 +753,7 @@ class TestOverviewCostCharts:
     def test_stage_costs_reader_folds_anticipated_into_thermal_total(
         self, tmp_path: Path
     ) -> None:
-        from cobre_bridge.comparators.cobre_readers import read_cobre_stage_costs
+        from cobre_bridge.cobre.readers import read_cobre_stage_costs
 
         d = tmp_path / "simulation" / "costs" / "scenario_id=0000"
         d.mkdir(parents=True)
@@ -867,7 +867,7 @@ class TestEdgeCases:
 
     def test_cobre_readers_missing_dir(self, tmp_path: Path) -> None:
         """Cobre readers return empty DataFrames when dir missing."""
-        from cobre_bridge.comparators.cobre_readers import (
+        from cobre_bridge.cobre.readers import (
             read_cobre_bus_means,
             read_cobre_convergence,
             read_cobre_hydro_means,
@@ -890,7 +890,7 @@ class TestEdgeCases:
         failure mode is a silently empty convergence frame."""
         import polars as pl
 
-        from cobre_bridge.comparators.cobre_readers import read_cobre_convergence
+        from cobre_bridge.cobre.readers import read_cobre_convergence
 
         training = tmp_path / "training"
         training.mkdir()
@@ -916,7 +916,7 @@ class TestEdgeCases:
         """The legacy ``upper_bound_mean`` spelling still reads (back-compat)."""
         import polars as pl
 
-        from cobre_bridge.comparators.cobre_readers import read_cobre_convergence
+        from cobre_bridge.cobre.readers import read_cobre_convergence
 
         training = tmp_path / "training"
         training.mkdir()
@@ -1107,7 +1107,7 @@ class TestCompareResultsReturnsDataset:
     def _patch_all_readers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         import pandas as pd
 
-        cr = "cobre_bridge.comparators.cobre_readers."
+        cr = "cobre_bridge.cobre.readers."
         nr = "cobre_bridge.comparators.newave_readers."
         empty_pl = pl.DataFrame
         empty_pd = lambda *a, **k: pd.DataFrame()  # noqa: E731
@@ -1176,7 +1176,9 @@ class TestCompareResultsReturnsDataset:
         )
 
         # Generic-constraint loaders (case dir resolves under tmp_path).
-        monkeypatch.setattr("cobre_bridge.cobre_io.case_dir_for", lambda _d: tmp_path)
+        monkeypatch.setattr(
+            "cobre_bridge.cobre.case_io.case_dir_for", lambda _d: tmp_path
+        )
         monkeypatch.setattr(
             "cobre_bridge.comparators.constraints_compare._load_generic_constraints",
             lambda _d: [],
@@ -1269,7 +1271,7 @@ class TestProductivityDetail:
 
     def test_cobre_productivity_detail_reader(self, tmp_path: Path) -> None:
         """Cobre reader surfaces the converted building blocks per hydro."""
-        from cobre_bridge.comparators.cobre_readers import (
+        from cobre_bridge.cobre.readers import (
             read_cobre_productivity_detail,
         )
 
@@ -1292,7 +1294,7 @@ class TestProductivityDetail:
         assert "accumulated" not in alpha
 
     def test_cobre_productivity_detail_missing_dir(self, tmp_path: Path) -> None:
-        from cobre_bridge.comparators.cobre_readers import (
+        from cobre_bridge.cobre.readers import (
             read_cobre_productivity_detail,
         )
 
@@ -1360,7 +1362,7 @@ class TestProductivityDetail:
             HydroEntity,
         )
         from cobre_bridge.comparators.analyze import build_productivity_detail
-        from cobre_bridge.productivity import compute_productivity
+        from cobre_bridge.core.productivity import compute_productivity
 
         alignment = EntityAlignment(
             hydros=[HydroEntity(newave_code=6, cobre_id=69, name="ALPHA")]
@@ -1614,7 +1616,7 @@ class TestEvaluateLhsCobre:
             return hydros if entity == "hydros" else None
 
         with patch(
-            "cobre_bridge.comparators.constraints_compare._scan_simulation_entity",
+            "cobre_bridge.comparators.constraints_compare.scan_simulation_entity",
             side_effect=fake_scan,
         ):
             result = evaluate_lhs_cobre(self._storage_constraint(), Path("/out"))
@@ -1631,7 +1633,7 @@ class TestEvaluateLhsCobre:
         from cobre_bridge.comparators.constraints_compare import evaluate_lhs_cobre
 
         with patch(
-            "cobre_bridge.comparators.constraints_compare._scan_simulation_entity",
+            "cobre_bridge.comparators.constraints_compare.scan_simulation_entity",
             return_value=None,
         ):
             result = evaluate_lhs_cobre(self._storage_constraint(), Path("/out"))
@@ -1653,27 +1655,27 @@ class TestShapeFromBounds:
     """AC2: unit tests for the F3 inverse-mapping helper."""
 
     def test_lower_only_is_ge(self) -> None:
-        from cobre_bridge.generic_constraint_format import shape_from_bounds
+        from cobre_bridge.core.generic_constraint_format import shape_from_bounds
 
         assert shape_from_bounds(10.0, None) == ">="
 
     def test_upper_only_is_le(self) -> None:
-        from cobre_bridge.generic_constraint_format import shape_from_bounds
+        from cobre_bridge.core.generic_constraint_format import shape_from_bounds
 
         assert shape_from_bounds(None, 10.0) == "<="
 
     def test_both_equal_is_eq(self) -> None:
-        from cobre_bridge.generic_constraint_format import shape_from_bounds
+        from cobre_bridge.core.generic_constraint_format import shape_from_bounds
 
         assert shape_from_bounds(7.0, 7.0) == "=="
 
     def test_both_unequal_is_range(self) -> None:
-        from cobre_bridge.generic_constraint_format import shape_from_bounds
+        from cobre_bridge.core.generic_constraint_format import shape_from_bounds
 
         assert shape_from_bounds(1.0, 10.0) == "range"
 
     def test_both_none_raises_value_error(self) -> None:
-        from cobre_bridge.generic_constraint_format import shape_from_bounds
+        from cobre_bridge.core.generic_constraint_format import shape_from_bounds
 
         with pytest.raises(ValueError, match="at least one endpoint"):
             shape_from_bounds(None, None)
@@ -1804,7 +1806,7 @@ class TestAC3NumericRegressionAcrossF3Migration:
             _load_generic_constraint_bounds,
             per_stage_bounds,
         )
-        from cobre_bridge.generic_constraint_format import sense_to_interval
+        from cobre_bridge.core.generic_constraint_format import sense_to_interval
 
         # Pre-F3 ground truth this case is migrated from: constraint 0 is a
         # VminOP-style `>=` security-curve floor; constraint 1 is an

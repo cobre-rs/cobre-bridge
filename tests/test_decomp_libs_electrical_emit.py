@@ -16,7 +16,8 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from cobre_bridge import diagnostics as dx
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.generic_constraint_builder import ConstraintIdAllocator
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.libs_electrical import (
     AssembledBound,
@@ -38,7 +39,6 @@ from cobre_bridge.decomp.libs_electrical_emit import (
 )
 from cobre_bridge.decomp.ncs import _pee_series, build_pee_ncs_id_map
 from cobre_bridge.decomp.temporal import OperativeStage
-from cobre_bridge.generic_constraint_builder import ConstraintIdAllocator
 from tests.conftest import make_decomp_case
 
 # ---------------------------------------------------------------------------

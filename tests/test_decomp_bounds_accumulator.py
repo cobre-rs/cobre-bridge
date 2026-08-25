@@ -202,7 +202,7 @@ def test_intersect_tightest_pair() -> None:
 
 def test_effective_normalizes_unbounded_sentinel_to_none() -> None:
     """``_effective`` delegates to the shared
-    :func:`cobre_bridge.generic_constraint_builder.is_bounded` sentinel check
+    :func:`cobre_bridge.core.generic_constraint_builder.is_bounded` sentinel check
     (single source) — a magnitude at the sentinel normalizes to
     ``None``, while a genuine bound passes through unchanged."""
     assert _effective(1e21) is None

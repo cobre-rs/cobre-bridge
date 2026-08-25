@@ -153,7 +153,7 @@ class TestCliInProcess:
     def test_convert_verdict_shape(self) -> None:
         """The convert ``summary``+``status`` helpers feed the unified envelope."""
         from cobre_bridge.cli import _convert_status, _convert_verdict_summary
-        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.core.diagnostics import Diagnostic, Severity
         from cobre_bridge.pipeline import ConversionReport
         from cobre_bridge.verdict import build_verdict
 
@@ -199,7 +199,7 @@ class TestCliInProcess:
     def test_convert_verdict_error_status_on_error_diagnostic(self) -> None:
         """Any ERROR-severity diagnostic flips ``status`` to ``"error"``."""
         from cobre_bridge.cli import _convert_status, _convert_verdict_summary
-        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.core.diagnostics import Diagnostic, Severity
         from cobre_bridge.verdict import build_verdict
 
         error = Diagnostic(
@@ -313,7 +313,7 @@ class TestCliInProcess:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An ERROR diagnostic reaching a non-raising report exits 1 under --json."""
-        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.core.diagnostics import Diagnostic, Severity
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -577,7 +577,7 @@ class TestCliInProcess:
         # regardless of whichever cobre-python happens to be installed in the
         # dev/CI venv (which may itself now be older than MIN_COBRE_VERSION).
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version",
+            "cobre_bridge.cobre.compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         # Inject a fake ``cobre.io`` whose ``validate`` reports a failure with one
@@ -650,7 +650,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version",
+            "cobre_bridge.cobre.compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         cobre_pkg = types.ModuleType("cobre")
@@ -709,7 +709,7 @@ class TestCliInProcess:
         # regardless of whichever cobre-python happens to be installed in the
         # dev/CI venv (which may itself now be older than MIN_COBRE_VERSION).
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version",
+            "cobre_bridge.cobre.compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         cobre_pkg = types.ModuleType("cobre")
@@ -782,7 +782,7 @@ class TestCliInProcess:
     ) -> None:
         """The manifest carries the conversion's diagnostics + their summary."""
         from cobre_bridge.conversion_manifest import ConversionManifest
-        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.core.diagnostics import Diagnostic, Severity
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_newave_dir(tmp_path)
@@ -1094,7 +1094,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: "0.9.0"
+            "cobre_bridge.cobre.compat._installed_cobre_python_version", lambda: "0.9.0"
         )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
 
@@ -1123,7 +1123,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: "0.9.0"
+            "cobre_bridge.cobre.compat._installed_cobre_python_version", lambda: "0.9.0"
         )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
 
@@ -1165,7 +1165,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: "0.9.0"
+            "cobre_bridge.cobre.compat._installed_cobre_python_version", lambda: "0.9.0"
         )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
 
@@ -1208,7 +1208,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version",
+            "cobre_bridge.cobre.compat._installed_cobre_python_version",
             lambda: "0.12.0",
         )
         validate = self._inject_cobre_io(monkeypatch, MagicMock())
@@ -1255,7 +1255,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version",
+            "cobre_bridge.cobre.compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         validate = self._inject_cobre_io(
@@ -1288,7 +1288,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: None
+            "cobre_bridge.cobre.compat._installed_cobre_python_version", lambda: None
         )
         # Force ``import cobre.io`` to raise regardless of whether the real
         # cobre-python is installed in this environment (a ``None`` entry in
@@ -1322,7 +1322,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version", lambda: None
+            "cobre_bridge.cobre.compat._installed_cobre_python_version", lambda: None
         )
         validate = self._inject_cobre_io(
             monkeypatch,
@@ -1363,7 +1363,7 @@ class TestCliInProcess:
         )
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version",
+            "cobre_bridge.cobre.compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         interop_warning = (
@@ -1425,7 +1425,7 @@ class TestCliInProcess:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A ``WARNING`` diagnostic on the report renders the notes roll-up + title."""
-        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.core.diagnostics import Diagnostic, Severity
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_decomp_dir(tmp_path)
@@ -1519,7 +1519,7 @@ class TestCliInProcess:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An ERROR diagnostic reaching a non-raising report exits 1 without --json."""
-        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.core.diagnostics import Diagnostic, Severity
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_decomp_dir(tmp_path)
@@ -1557,7 +1557,7 @@ class TestCliInProcess:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``--diagnostics-json`` writes the report-shaped sidecar (summary + findings)."""
-        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.core.diagnostics import Diagnostic, Severity
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_decomp_dir(tmp_path)
@@ -1687,7 +1687,7 @@ class TestCliInProcess:
         dst = tmp_path / "dst"
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version",
+            "cobre_bridge.cobre.compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         interop_warning = (
@@ -2214,7 +2214,7 @@ class TestCliInProcess:
             return {"valid": False, "warnings": [], "errors": ["boom"]}
 
         monkeypatch.setattr(
-            "cobre_bridge.cobre_compat._installed_cobre_python_version",
+            "cobre_bridge.cobre.compat._installed_cobre_python_version",
             lambda: MIN_COBRE_VERSION,
         )
         self._inject_cobre_io(monkeypatch, MagicMock(side_effect=_fake_validate))
@@ -2285,7 +2285,7 @@ class TestCliInProcess:
         This test fails against the pre-sink CLI (no ``dx.collect()``
         wrapping ``import_boundary_fcf``), proving the deferred Epic-03 gap
         is closed."""
-        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.core import diagnostics as dx
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_decomp_dir_with_cuts(tmp_path)
@@ -2344,7 +2344,7 @@ class TestCliInProcess:
         diagnostic's title renders on stderr (the Rich panel), and the
         existing happy-path C8-recipe assertions still hold (no
         double-render, no exit-code change)."""
-        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.core import diagnostics as dx
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_decomp_dir_with_cuts(tmp_path)
@@ -2403,7 +2403,7 @@ class TestCliInProcess:
         the ``--json`` stdout verdict. This test fails against the pre-fix
         CLI, where the sidecar is written BEFORE the boundary-FCF block runs
         and therefore only ever contains ``report.diagnostics``."""
-        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.core import diagnostics as dx
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_decomp_dir_with_cuts(tmp_path)
@@ -2461,7 +2461,7 @@ class TestCliInProcess:
         """Guard: a ``convert decomp --diagnostics-json --no-fcf`` sidecar is
         exactly ``report.diagnostics`` — deferring the sidecar write past the
         (here, skipped) boundary-FCF block must not regress the contract."""
-        from cobre_bridge.diagnostics import Diagnostic, Severity
+        from cobre_bridge.core.diagnostics import Diagnostic, Severity
         from cobre_bridge.pipeline import ConversionReport
 
         src = _make_fake_decomp_dir(tmp_path)
@@ -2530,7 +2530,7 @@ class TestConversionDiagnosticsRendering:
         return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
 
     def _report_with_gtmin(self):
-        from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
+        from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity
         from cobre_bridge.pipeline import ConversionReport
 
         diag = Diagnostic(

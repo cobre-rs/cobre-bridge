@@ -15,7 +15,7 @@ import pyarrow as pa
 
 from cobre_bridge.case import NewaveCase
 from cobre_bridge.converters.hydro.overrides import _apply_permanent_overrides
-from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
+from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
 from cobre_bridge.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)

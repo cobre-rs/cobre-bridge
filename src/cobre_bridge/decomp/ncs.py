@@ -28,8 +28,8 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge import cobre_schemas
-from cobre_bridge.tolerances import relative_tolerance
+from cobre_bridge.cobre import schemas as cobre_schemas
+from cobre_bridge.core.tolerances import relative_tolerance
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

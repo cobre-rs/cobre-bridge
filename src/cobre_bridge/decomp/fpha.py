@@ -7,7 +7,7 @@ window, cobre fits the production-function hyperplanes itself. This module
 builds the DECOMP-side inputs, mirroring :mod:`cobre_bridge.converters.hydro`
 and :mod:`cobre_bridge.converters.tailrace` on the source-model side and reusing
 their shared cores (:func:`~cobre_bridge.converters.tailrace.build_tailrace_table`,
-:func:`~cobre_bridge.productivity.fpha_efficiency`).
+:func:`~cobre_bridge.core.productivity.fpha_efficiency`).
 
 Eligibility mirrors the source-model rule: a plant with a non-degenerate
 volume→cota polynomial (the forebay curve) and a positive ``ρ_esp``. Ineligible
@@ -28,8 +28,8 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 
 from cobre_bridge.converters.tailrace import build_tailrace_table
+from cobre_bridge.core.productivity import evaluate_cota, fpha_efficiency
 from cobre_bridge.decomp.cadastro import effective_storage_range
-from cobre_bridge.productivity import evaluate_cota, fpha_efficiency
 
 if TYPE_CHECKING:
     from pathlib import Path

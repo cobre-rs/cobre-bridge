@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from cobre_bridge.productivity import compute_productivity
+from cobre_bridge.core.productivity import compute_productivity
 
 logger = logging.getLogger(__name__)
 

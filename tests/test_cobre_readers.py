@@ -20,9 +20,8 @@ import pyarrow.parquet as pq
 import pytest
 import typer
 
-from cobre_bridge import diagnostics as dx
 from cobre_bridge.cli_args import CompareArgs
-from cobre_bridge.comparators.cobre_readers import (
+from cobre_bridge.cobre.readers import (
     CobreReadError,
     _load_entity_bus_map,
     read_cobre_bus_aggregates,
@@ -41,8 +40,9 @@ from cobre_bridge.comparators.cobre_readers import (
     read_cobre_thermal_metadata,
     read_cobre_training_metadata,
 )
-from cobre_bridge.diagnostics import Severity
-from cobre_bridge.errors import CobrePartitionMissingError
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity
+from cobre_bridge.core.errors import CobrePartitionMissingError
 
 # ---------------------------------------------------------------------------
 # Fixtures: build corrupt vs. valid-but-empty Cobre output layouts on disk.
@@ -318,7 +318,7 @@ class TestCliExitCodeTwoOnCobreReadError:
 
         with (
             patch(
-                "cobre_bridge.comparators.cobre_readers.read_cobre_lines",
+                "cobre_bridge.cobre.readers.read_cobre_lines",
                 return_value=[],
             ),
             patch(

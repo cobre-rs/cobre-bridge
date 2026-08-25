@@ -16,7 +16,7 @@ so an ``except FileNotFoundError`` site keeps catching it unchanged.
 
 from __future__ import annotations
 
-from cobre_bridge.diagnostics import Diagnostic, Severity
+from cobre_bridge.core.diagnostics import Diagnostic, Severity
 
 
 class BridgeError(Exception):

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from cobre_bridge.generic_constraint_format import (
+from cobre_bridge.core.generic_constraint_format import (
     GENERIC_BOUNDS_COLUMNS,
     sense_to_interval,
 )

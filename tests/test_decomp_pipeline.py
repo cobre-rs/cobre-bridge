@@ -17,8 +17,9 @@ import pyarrow.parquet as pq
 import pytest
 from typer.testing import CliRunner
 
-from cobre_bridge import cobre_schemas
 from cobre_bridge.cli import app
+from cobre_bridge.cobre import schemas as cobre_schemas
+from cobre_bridge.core.diagnostics import Diagnostic
 from cobre_bridge.decomp.anticipated import GnlEmission
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
 from cobre_bridge.decomp.cadastro import DiversionChannel, EffectiveCadastro
@@ -46,7 +47,6 @@ from cobre_bridge.decomp.scenarios import (
 from cobre_bridge.decomp.single_term_bounds import HydroCapacities
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import _THERMAL_COST_SCHEMA, ThermalBounds
-from cobre_bridge.diagnostics import Diagnostic
 from tests.conftest import make_decomp_case
 
 _ID_MAP = DecompIdMap(
@@ -208,8 +208,8 @@ class TestPipeline:
     def test_discover_decomp_files_no_caso_raises_source_file_error(
         self, tmp_path: Path
     ) -> None:
+        from cobre_bridge.core.errors import SourceFileError
         from cobre_bridge.decomp.pipeline import discover_decomp_files
-        from cobre_bridge.errors import SourceFileError
 
         with pytest.raises(SourceFileError) as excinfo:
             discover_decomp_files(tmp_path)
@@ -223,8 +223,8 @@ class TestPipeline:
     def test_discover_decomp_files_no_dadger_raises_source_file_error(
         self, tmp_path: Path
     ) -> None:
+        from cobre_bridge.core.errors import SourceFileError
         from cobre_bridge.decomp.pipeline import discover_decomp_files
-        from cobre_bridge.errors import SourceFileError
 
         (tmp_path / "caso.dat").write_text("rv0\n", encoding="latin-1")
 
@@ -342,7 +342,7 @@ class TestEmissionCheckWiring:
         ``EmissionCheckError``, and that exception must still satisfy
         ``isinstance(exc, ValueError)`` for any existing
         ``pytest.raises(ValueError)`` call site."""
-        from cobre_bridge import emission_checks
+        from cobre_bridge.core import emission_checks
 
         hydro_bounds = pa.table(
             {
@@ -370,9 +370,9 @@ class TestEmissionCheckWiring:
         verdict via ``cli._convert_status`` — the single function both
         pipelines' convert verdicts key off (AC #3), not a bare inspection of
         the diagnostic."""
-        from cobre_bridge import diagnostics as dx
         from cobre_bridge.cli import _convert_status
-        from cobre_bridge.emission_checks import check_hydro_bounds_no_raising
+        from cobre_bridge.core import diagnostics as dx
+        from cobre_bridge.core.emission_checks import check_hydro_bounds_no_raising
 
         hydros = {
             "hydros": [
@@ -1088,7 +1088,7 @@ class TestCadastroPipelineWiring:
         ``dx.collect()``, so this reads the diagnostics via
         ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
         ``dx.collect()`` (which would be shadowed and see nothing)."""
-        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.core import diagnostics as dx
 
         ac_volmax_frame = pd.DataFrame(
             [
@@ -1327,7 +1327,7 @@ class TestGenericConstraintWiring:
         ``dx.collect()``, so this reads the diagnostics via
         ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
         ``dx.collect()`` (which would be shadowed and see nothing)."""
-        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.core import diagnostics as dx
 
         fe_diagnostic = dx.Diagnostic(
             code="decomp-fe-participation-unreadable",
@@ -1680,7 +1680,7 @@ class TestDeferralWarning:
         ``dx.collect()``, so the diagnostics half reads
         ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
         ``dx.collect()`` (which would be shadowed and see nothing)."""
-        from cobre_bridge import diagnostics as dx
+        from cobre_bridge.core import diagnostics as dx
 
         fe_diagnostic = dx.Diagnostic(
             code="decomp-fe-participation-unreadable",

@@ -1,7 +1,7 @@
 """Shared low-level readers for Cobre case/output files.
 
 Both the dashboard (``dashboard/data.py``) and the comparator
-(``comparators/cobre_readers.py``) read the same on-disk Cobre artifacts. This
+(``cobre/readers.py``) read the same on-disk Cobre artifacts. This
 module holds the pieces they genuinely share, so a fix lands in one place
 instead of drifting between two near-copies.
 

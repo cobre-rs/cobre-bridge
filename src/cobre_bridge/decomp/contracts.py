@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge import cobre_schemas
-from cobre_bridge import diagnostics as dx
+from cobre_bridge.cobre import schemas as cobre_schemas
+from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.decomp.thermal import _hours_weighted
 
 if TYPE_CHECKING:

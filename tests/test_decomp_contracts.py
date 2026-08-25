@@ -12,8 +12,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from cobre_bridge import cobre_schemas
-from cobre_bridge import diagnostics as dx
+from cobre_bridge.cobre import schemas as cobre_schemas
+from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.contracts import (
     _CONTRACT_BOUNDS_SCHEMA,

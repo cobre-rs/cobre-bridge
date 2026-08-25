@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import polars as pl
 
+from cobre_bridge.cobre.cost_categories import AGGREGATE_COST_COLUMNS
 from cobre_bridge.comparators import analyze
 from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
 )
-from cobre_bridge.cost_categories import AGGREGATE_COST_COLUMNS
 from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
 
 # Per-category mapping between the source model pmo.dat

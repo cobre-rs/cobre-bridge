@@ -19,7 +19,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from cobre_bridge import diagnostics as dx
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.constraint_registers import (
@@ -35,7 +36,6 @@ from cobre_bridge.decomp.single_term_bounds import (
     single_term_bound_contributions,
 )
 from cobre_bridge.decomp.temporal import OperativeStage
-from cobre_bridge.diagnostics import Severity
 from tests.conftest import make_decomp_case
 
 
