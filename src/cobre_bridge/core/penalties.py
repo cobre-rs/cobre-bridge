@@ -108,11 +108,12 @@ def hydro_penalty_costs(
 
     The returned dict preserves the exact key order of ``penalties.json:hydro``.
     """
-    desvio_mwh = penalid_costs.get("DESVIO", _EVAPORATION_MULT * max_deficit_cost)
-    vazmin_mwh = penalid_costs.get("VAZMIN", _EVAPORATION_MULT * max_deficit_cost)
-    ghmin_mwh = penalid_costs.get("GHMIN", _EVAPORATION_MULT * max_deficit_cost)
-    turbmn_mwh = penalid_costs.get("TURBMN", _EVAPORATION_MULT * max_deficit_cost)
-    turbmx_mwh = penalid_costs.get("TURBMX", _EVAPORATION_MULT * max_deficit_cost)
+    evaporation_tier_mwh = _EVAPORATION_MULT * max_deficit_cost
+    desvio_mwh = penalid_costs.get("DESVIO", evaporation_tier_mwh)
+    vazmin_mwh = penalid_costs.get("VAZMIN", evaporation_tier_mwh)
+    ghmin_mwh = penalid_costs.get("GHMIN", evaporation_tier_mwh)
+    turbmn_mwh = penalid_costs.get("TURBMN", evaporation_tier_mwh)
+    turbmx_mwh = penalid_costs.get("TURBMX", evaporation_tier_mwh)
 
     water_withdrawal_cost = desvio_mwh * rho_max_acum
     outflow_below_cost = vazmin_mwh * rho_avg
