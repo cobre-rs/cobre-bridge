@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
@@ -17,7 +18,6 @@ from cobre_bridge.cli.verdict import (
     _convert_verdict_summary,
     build_verdict,
 )
-from cobre_bridge.core.diagnostics import _write_diagnostics_json
 from cobre_bridge.core.errors import (
     BridgeError,
     SourceFileError,
@@ -34,6 +34,8 @@ from cobre_bridge.ui.console import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from rich.console import Console
 
     from cobre_bridge.core.conversion import ConversionReport
@@ -62,6 +64,49 @@ def _handle_conversion_pipeline_failure(
     else:
         render_diagnostics([diag], console=err_console, quiet=args.quiet)
     raise typer.Exit(code=1)
+
+
+def _write_diagnostics_json(
+    report: ConversionReport,
+    path: Path,
+    *,
+    diagnostics: Sequence[Diagnostic] | None = None,
+    console: Console,
+) -> None:
+    """Write the conversion counts + diagnostics to *path* as JSON.
+
+    ``diagnostics`` defaults to ``report.diagnostics`` (the plain
+    ``convert newave``/``convert decomp`` contract); a caller with additional
+    findings not yet folded into ``report`` — e.g. ``convert decomp
+    --boundary-fcf``'s importer diagnostics — passes the combined list
+    explicitly so the sidecar matches the ``--json`` verdict's merge.
+
+    A write failure is reported but does not change the exit code — the conversion
+    itself already succeeded.
+    """
+    resolved_diagnostics = report.diagnostics if diagnostics is None else diagnostics
+    payload = {
+        "summary": {
+            "hydros": report.hydro_count,
+            "thermals": report.thermal_count,
+            "buses": report.bus_count,
+            "lines": report.line_count,
+            "stages": report.stage_count,
+        },
+        "diagnostics": [d.to_dict() for d in resolved_diagnostics],
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except OSError as exc:
+        print_status(
+            f"Warning: failed to write diagnostics JSON: {exc}",
+            console=console,
+            style="#F5A623",
+        )
+    else:
+        print_status(f"Diagnostics written to {path}", console=console)
 
 
 def _run_newave_conversion(args: ConvertArgs) -> None:

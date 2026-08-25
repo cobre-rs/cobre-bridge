@@ -277,9 +277,6 @@ _PENDING_DIRECTION_EDGES: frozenset[tuple[str, str]] = frozenset(
         ("comparators.report_builder", "ui.plotly_helpers"),
         ("comparators.results", "newave.converters.constraints"),
         ("comparators.results", "newave.converters.hydro"),
-        # writer-relocation debt: _write_diagnostics_json's lazy import, retired
-        # when the cli/ epic moves the writer out of core.diagnostics.
-        ("core.diagnostics", "ui.console"),
         ("dashboard", "ui.css"),
         ("dashboard", "ui.html"),
         ("dashboard", "ui.js"),
@@ -313,7 +310,6 @@ _PENDING_DIRECTION_EDGES: frozenset[tuple[str, str]] = frozenset(
 # Rule B. Shrinks to empty as each name is promoted to a public home; never widen.
 _PENDING_PRIVATE_EDGES: frozenset[tuple[str, str, str]] = frozenset(
     {
-        ("cli.convert", "core.diagnostics", "_write_diagnostics_json"),
         ("dashboard.tabs.plants", "ui.html", "_sparkline_svg"),
     }
 )
