@@ -33,8 +33,8 @@ from cobre_bridge.comparators.decomp_results import (
     build_decomp_dataset,
 )
 from cobre_bridge.core.errors import FieldParseError, SourceFileError
+from cobre_bridge.decomp.files import DecompFiles
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.pipeline import DecompFiles
 from tests.conftest import (
     _aligned_fixture,
     _no_dec_oper,
@@ -569,7 +569,7 @@ def _patch_discoverable_deck_with_no_sb(
     ``FieldParseError`` parse-boundary raise (rather than the discovery
     failure the bare-``tmp_path`` tests exercise)."""
     monkeypatch.setattr(
-        "cobre_bridge.decomp.pipeline.discover_decomp_files",
+        "cobre_bridge.decomp.case.discover_decomp_files",
         lambda _src: _decomp_files_stub(tmp_path),
     )
     monkeypatch.setattr(
@@ -667,7 +667,7 @@ class TestBuildDecompDatasetSingleParse:
         )
         monkeypatch.setattr("idecomp.decomp.Dadger.read", spy)
         monkeypatch.setattr(
-            "cobre_bridge.decomp.pipeline.discover_decomp_files",
+            "cobre_bridge.decomp.case.discover_decomp_files",
             lambda _src: _decomp_files_stub(decomp_dir),
         )
         monkeypatch.setattr(

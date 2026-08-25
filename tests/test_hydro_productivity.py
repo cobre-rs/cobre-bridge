@@ -97,7 +97,7 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
         return make_case(tmp_path, dger=mock_dger)
 
     def test_step_function_carries_when_sazonaliza_zero(self, tmp_path) -> None:
-        from cobre_bridge.converters.hydro import _per_stage_productivities
+        from cobre_bridge.newave.converters.hydro import _per_stage_productivities
 
         overrides = [
             {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
@@ -124,7 +124,7 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
     def test_seasonal_cycle_after_last_event_when_sazonaliza_one(
         self, tmp_path
     ) -> None:
-        from cobre_bridge.converters.hydro import _per_stage_productivities
+        from cobre_bridge.newave.converters.hydro import _per_stage_productivities
 
         overrides = [
             {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
@@ -153,7 +153,7 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
     def test_seasonal_picks_latest_year_value_per_month(self, tmp_path) -> None:
         """When the same calendar month appears in multiple years, the
         latest year's value becomes the seasonal value."""
-        from cobre_bridge.converters.hydro import _per_stage_productivities
+        from cobre_bridge.newave.converters.hydro import _per_stage_productivities
 
         overrides = [
             {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
@@ -175,7 +175,7 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
     def test_no_overrides_returns_base(self, tmp_path) -> None:
         """Without any CFUGA/CMONT overrides the base value is returned
         unchanged at every stage."""
-        from cobre_bridge.converters.hydro import _per_stage_productivities
+        from cobre_bridge.newave.converters.hydro import _per_stage_productivities
 
         vals = _per_stage_productivities(
             self._hreg(),
@@ -194,7 +194,7 @@ class TestPerStageProductivitiesSazonalCfugaCmont:
         no-flag bounds (outflow / turbined) freeze. With study_months = 4,
         stages 4+ are post-study and must keep cycling Sep=645 / Oct=640.
         """
-        from cobre_bridge.converters.hydro import _per_stage_productivities
+        from cobre_bridge.newave.converters.hydro import _per_stage_productivities
 
         overrides = [
             {"type": "CFUGA", "year": 2024, "month": 9, "value": 5.0},
@@ -252,7 +252,7 @@ class TestComputeProductivity:
     def test_monthly_regulated_linear_polynomial(self) -> None:
         """tipo_regulacao='M': poly evaluated at 65% useful storage (the source model
         ``produtibilidade_altura_65`` convention)."""
-        from cobre_bridge.converters.hydro import _compute_productivity
+        from cobre_bridge.newave.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
             {
@@ -282,7 +282,7 @@ class TestComputeProductivity:
 
     def test_run_of_river_point_evaluation(self) -> None:
         """tipo_regulacao='D': evaluates poly at volume_referencia."""
-        from cobre_bridge.converters.hydro import _compute_productivity
+        from cobre_bridge.newave.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
             {
@@ -309,7 +309,7 @@ class TestComputeProductivity:
 
     def test_multiplicative_loss(self) -> None:
         """tipo_perda=1: adjusted_drop = net_drop * (1 - perdas/100)."""
-        from cobre_bridge.converters.hydro import _compute_productivity
+        from cobre_bridge.newave.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
             {
@@ -334,7 +334,7 @@ class TestComputeProductivity:
 
     def test_additive_loss(self) -> None:
         """tipo_perda=2: adjusted_drop = net_drop - perdas."""
-        from cobre_bridge.converters.hydro import _compute_productivity
+        from cobre_bridge.newave.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
             {
@@ -359,7 +359,7 @@ class TestComputeProductivity:
 
     def test_no_loss(self) -> None:
         """tipo_perda=0 (or unknown): no loss applied, adjusted_drop = net_drop."""
-        from cobre_bridge.converters.hydro import _compute_productivity
+        from cobre_bridge.newave.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
             {
@@ -384,7 +384,7 @@ class TestComputeProductivity:
 
     def test_equal_volumes_fallback(self) -> None:
         """tipo_regulacao='M' with vmin == vmax: v_65 collapses to that point."""
-        from cobre_bridge.converters.hydro import _compute_productivity
+        from cobre_bridge.newave.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
             {
@@ -418,7 +418,7 @@ class TestComputeProductivityOverrides:
 
     def test_canal_fuga_override_replaces_base(self) -> None:
         """canal_fuga_override replaces canal_fuga_medio in the net drop calc."""
-        from cobre_bridge.converters.hydro import _compute_productivity
+        from cobre_bridge.newave.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
             {
@@ -441,7 +441,7 @@ class TestComputeProductivityOverrides:
 
     def test_cmont_override_replaces_polynomial_height(self) -> None:
         """cmont_override bypasses the polynomial and uses the supplied height."""
-        from cobre_bridge.converters.hydro import _compute_productivity
+        from cobre_bridge.newave.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
             {
@@ -461,7 +461,7 @@ class TestComputeProductivityOverrides:
 
     def test_both_overrides_together(self) -> None:
         """canal_fuga_override and cmont_override can both be active."""
-        from cobre_bridge.converters.hydro import _compute_productivity
+        from cobre_bridge.newave.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
             {
@@ -483,7 +483,7 @@ class TestComputeProductivityOverrides:
 
     def test_no_overrides_matches_original_behaviour(self) -> None:
         """With no overrides, M-plant ρ comes from poly evaluated at 65% storage."""
-        from cobre_bridge.converters.hydro import _compute_productivity
+        from cobre_bridge.newave.converters.hydro import _compute_productivity
 
         hreg = _make_hreg(
             {
@@ -524,7 +524,7 @@ class TestEquivalentProductivity:
 
     def test_linear_polynomial_uses_mean_head(self) -> None:
         """h(v)=a0+a1·v → mean head over [vmin,vmax] = a0 + a1·(vmin+vmax)/2."""
-        from cobre_bridge.converters.hydro import _equivalent_productivity
+        from cobre_bridge.newave.converters.hydro import _equivalent_productivity
 
         hreg = _make_hreg({})  # a0=300, a1=0.1, vmin=100, vmax=1000, cfuga=250
         # mean head = 300 + 0.1·550 = 355 ; net = 105 ; ·0.95 loss ; ·0.009 pesp
@@ -534,7 +534,7 @@ class TestEquivalentProductivity:
 
     def test_differs_from_point_reference(self) -> None:
         """PRODT (mean over range) ≠ the 65%-volume point productivity."""
-        from cobre_bridge.converters.hydro import (
+        from cobre_bridge.newave.converters.hydro import (
             _compute_productivity,
             _equivalent_productivity,
         )
@@ -548,7 +548,7 @@ class TestEquivalentProductivity:
 
     def test_run_of_river_uses_point_head(self) -> None:
         """Vmax == Vmin → head evaluated at Vmin (no integral)."""
-        from cobre_bridge.converters.hydro import _equivalent_productivity
+        from cobre_bridge.newave.converters.hydro import _equivalent_productivity
 
         hreg = _make_hreg({"volume_minimo": 500.0, "volume_maximo": 500.0})
         # h(500) = 300 + 0.1·500 = 350 ; net 100 ; ·0.95 ; ·0.009
@@ -557,7 +557,7 @@ class TestEquivalentProductivity:
         )
 
     def test_canal_fuga_override(self) -> None:
-        from cobre_bridge.converters.hydro import _equivalent_productivity
+        from cobre_bridge.newave.converters.hydro import _equivalent_productivity
 
         hreg = _make_hreg({})
         assert _equivalent_productivity(
@@ -566,7 +566,7 @@ class TestEquivalentProductivity:
 
     def test_cmont_override_pins_forebay(self) -> None:
         """CMONT pins the upstream level → head = cmont − cfuga (no integral)."""
-        from cobre_bridge.converters.hydro import _equivalent_productivity
+        from cobre_bridge.newave.converters.hydro import _equivalent_productivity
 
         hreg = _make_hreg({})
         assert _equivalent_productivity(hreg, cmont_override=400.0) == pytest.approx(
@@ -574,7 +574,7 @@ class TestEquivalentProductivity:
         )
 
     def test_zero_polynomial_returns_zero(self) -> None:
-        from cobre_bridge.converters.hydro import _equivalent_productivity
+        from cobre_bridge.newave.converters.hydro import _equivalent_productivity
 
         hreg = _make_hreg({f"a{i}_volume_cota": 0.0 for i in range(5)})
         assert _equivalent_productivity(hreg) == 0.0
@@ -609,7 +609,7 @@ class TestProductivitySinMeans:
         confhd_obj.usinas = confhd
         case = make_case(tmp_path, hidr=hidr_obj, confhd=confhd_obj)
         overrides = patch(
-            "cobre_bridge.converters.hydro.productivity._apply_permanent_overrides",
+            "cobre_bridge.newave.converters.hydro.productivity._apply_permanent_overrides",
             new=lambda cadastro, case: cadastro,
         )
         return case, overrides
@@ -618,7 +618,7 @@ class TestProductivitySinMeans:
         self, tmp_path: Path
     ) -> None:
         """Mean over EX, non-FICT plants present in cadastro; others excluded."""
-        from cobre_bridge.converters.hydro import (
+        from cobre_bridge.newave.converters.hydro import (
             _equivalent_productivity,
             compute_prodt_sin_mean,
         )
@@ -680,7 +680,7 @@ class TestProductivitySinMeans:
         self, tmp_path: Path
     ) -> None:
         """No EX/non-FICT plant in cadastro → fall back to 1.0, not divide-by-zero."""
-        from cobre_bridge.converters.hydro import compute_prodt_sin_mean
+        from cobre_bridge.newave.converters.hydro import compute_prodt_sin_mean
 
         cadastro = self._cadastro({1: {}})
         confhd = self._confhd(
@@ -701,7 +701,7 @@ class TestProductivitySinMeans:
         self, tmp_path: Path
     ) -> None:
         """No CFUGA/CMONT override → every stage equals the constant SIN mean."""
-        from cobre_bridge.converters.hydro import (
+        from cobre_bridge.newave.converters.hydro import (
             _equivalent_productivity,
             compute_per_stage_prodt_sin_mean,
         )
@@ -722,11 +722,11 @@ class TestProductivitySinMeans:
         with (
             overrides,
             patch(
-                "cobre_bridge.converters.hydro.productivity._total_study_stages",
+                "cobre_bridge.newave.converters.hydro.productivity._total_study_stages",
                 return_value=4,
             ),
             patch(
-                "cobre_bridge.converters.hydro.productivity._extract_temporal_overrides",
+                "cobre_bridge.newave.converters.hydro.productivity._extract_temporal_overrides",
                 return_value={},
             ),
         ):
@@ -744,7 +744,7 @@ class TestProductivitySinMeans:
     ) -> None:
         """A plant carrying a CFUGA override drifts; the SIN mean tracks it per
         stage."""
-        from cobre_bridge.converters.hydro import (
+        from cobre_bridge.newave.converters.hydro import (
             _equivalent_productivity,
             compute_per_stage_prodt_sin_mean,
         )
@@ -767,15 +767,15 @@ class TestProductivitySinMeans:
         with (
             overrides,
             patch(
-                "cobre_bridge.converters.hydro.productivity._total_study_stages",
+                "cobre_bridge.newave.converters.hydro.productivity._total_study_stages",
                 return_value=3,
             ),
             patch(
-                "cobre_bridge.converters.hydro.productivity._extract_temporal_overrides",
+                "cobre_bridge.newave.converters.hydro.productivity._extract_temporal_overrides",
                 return_value={1: [{"type": "CFUGA"}]},
             ),
             patch(
-                "cobre_bridge.converters.hydro.productivity._per_stage_equivalent_productivities",
+                "cobre_bridge.newave.converters.hydro.productivity._per_stage_equivalent_productivities",
                 side_effect=fake_series,
             ),
         ):
@@ -792,8 +792,8 @@ class TestProductivitySinMeans:
 
     def test_max_prodtacum_sin_picks_cascade_max(self, tmp_path: Path) -> None:
         """Accumulated productivity peaks at the head of the longest cascade."""
-        from cobre_bridge.converters.constraints import compute_max_prodtacum_sin
-        from cobre_bridge.converters.hydro import _compute_productivity
+        from cobre_bridge.newave.converters.constraints import compute_max_prodtacum_sin
+        from cobre_bridge.newave.converters.hydro import _compute_productivity
 
         # Cascade A(1) → B(2) → terminal; C(3) standalone.
         cadastro = self._cadastro({1: {}, 2: {}, 3: {}})
@@ -825,7 +825,7 @@ class TestProductivitySinMeans:
         confhd_obj.usinas = confhd
         case = make_case(tmp_path, hidr=hidr_obj, confhd=confhd_obj)
         with patch(
-            "cobre_bridge.converters.constraints._apply_permanent_overrides",
+            "cobre_bridge.newave.converters.constraints._apply_permanent_overrides",
             new=lambda cadastro, case: cadastro,
         ):
             result = compute_max_prodtacum_sin(case)
@@ -841,7 +841,7 @@ class TestProductivitySinMeans:
     def test_max_prodtacum_sin_returns_none_on_read_error(self, tmp_path: Path) -> None:
         """Unreadable the source model inputs → None (soft fallback for mocked
         pipelines)."""
-        from cobre_bridge.converters.constraints import compute_max_prodtacum_sin
+        from cobre_bridge.newave.converters.constraints import compute_max_prodtacum_sin
 
         case = make_case(tmp_path)
         # Drop the conftest default hidr so accessing ``case.hidr`` triggers the
@@ -906,7 +906,7 @@ class TestConvertProductionModels:
         """
         case = self._base_case(tmp_path)
 
-        from cobre_bridge.converters.hydro import convert_production_models
+        from cobre_bridge.newave.converters.hydro import convert_production_models
 
         result = convert_production_models(case, self._make_id_map())
         assert result is not None
@@ -941,7 +941,7 @@ class TestConvertProductionModels:
 
         case = self._base_case(tmp_path, modif=mock_modif)
 
-        from cobre_bridge.converters.hydro import convert_production_models
+        from cobre_bridge.newave.converters.hydro import convert_production_models
 
         result = convert_production_models(case, self._make_id_map())
         assert result is not None
@@ -969,7 +969,7 @@ class TestConvertProductionModels:
             tmp_path, modif=mock_modif, ano_inicio=2025, mes_inicio=1, num_anos=5
         )
 
-        from cobre_bridge.converters.hydro import convert_production_models
+        from cobre_bridge.newave.converters.hydro import convert_production_models
 
         result = convert_production_models(case, self._make_id_map())
 
@@ -1005,7 +1005,7 @@ class TestConvertProductionModels:
             tmp_path, modif=mock_modif, ano_inicio=2025, mes_inicio=1, num_anos=5
         )
 
-        from cobre_bridge.converters.hydro import convert_production_models
+        from cobre_bridge.newave.converters.hydro import convert_production_models
 
         result = convert_production_models(case, self._make_id_map())
 
@@ -1037,7 +1037,7 @@ class TestConvertProductionModels:
             tmp_path, modif=mock_modif, ano_inicio=2025, mes_inicio=1, num_anos=5
         )
 
-        from cobre_bridge.converters.hydro import convert_production_models
+        from cobre_bridge.newave.converters.hydro import convert_production_models
 
         result = convert_production_models(case, self._make_id_map())
 
@@ -1071,7 +1071,7 @@ class TestConvertProductionModels:
             tmp_path, modif=mock_modif, ano_inicio=2025, mes_inicio=1, num_anos=5
         )
 
-        from cobre_bridge.converters.hydro import convert_production_models
+        from cobre_bridge.newave.converters.hydro import convert_production_models
 
         result = convert_production_models(case, self._make_id_map())
 
@@ -1142,7 +1142,9 @@ class TestConvertHydroEnergyProductivity:
         productivity."""
         case = self._base_case(tmp_path)
 
-        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            convert_hydro_energy_productivity,
+        )
 
         table = convert_hydro_energy_productivity(case, self._make_id_map())
 
@@ -1168,7 +1170,9 @@ class TestConvertHydroEnergyProductivity:
             tmp_path, modif=mock_modif, ano_inicio=2025, mes_inicio=1, num_anos=5
         )
 
-        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            convert_hydro_energy_productivity,
+        )
 
         table = convert_hydro_energy_productivity(case, self._make_id_map())
 
@@ -1218,7 +1222,9 @@ class TestConvertHydroEnergyProductivity:
             num_anos=1,
         )
 
-        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            convert_hydro_energy_productivity,
+        )
 
         table = convert_hydro_energy_productivity(case, self._make_id_map())
         rows = table.to_pylist()
@@ -1265,7 +1271,9 @@ class TestConvertHydroEnergyProductivity:
             num_anos=1,
         )
 
-        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            convert_hydro_energy_productivity,
+        )
 
         table = convert_hydro_energy_productivity(case, self._make_id_map())
         rows = table.to_pylist()
@@ -1303,7 +1311,9 @@ class TestConvertHydroEnergyProductivity:
             num_anos=1,
         )
 
-        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            convert_hydro_energy_productivity,
+        )
 
         table = convert_hydro_energy_productivity(case, self._make_id_map())
         rows = table.to_pylist()
@@ -1350,7 +1360,9 @@ class TestConvertHydroEnergyProductivity:
             num_anos=1,
         )
 
-        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            convert_hydro_energy_productivity,
+        )
 
         table = convert_hydro_energy_productivity(case, self._make_id_map())
         rows = [r for r in table.to_pylist() if r["hydro_id"] == 0]
@@ -1374,7 +1386,9 @@ class TestConvertHydroEnergyProductivity:
         """
         case = self._base_case(tmp_path)
 
-        from cobre_bridge.converters.hydro import convert_hydro_energy_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            convert_hydro_energy_productivity,
+        )
 
         table = convert_hydro_energy_productivity(case, self._make_id_map())
 
@@ -1412,7 +1426,7 @@ class TestParseFphaPlaneReductionDiagnostics:
     def test_multiple_methods_emits_one_diagnostic_using_the_first(
         self, tmp_path: Path
     ) -> None:
-        from cobre_bridge.converters.hydro import _parse_fpha_plane_reduction
+        from cobre_bridge.newave.converters.hydro import _parse_fpha_plane_reduction
 
         case = self._case_with_text(tmp_path, self._MULTI_METHOD_TEXT)
 
@@ -1432,7 +1446,7 @@ class TestParseFphaPlaneReductionDiagnostics:
         _assert_no_repo_internal_leaks(collected)
 
     def test_single_method_emits_no_diagnostic(self, tmp_path: Path) -> None:
-        from cobre_bridge.converters.hydro import _parse_fpha_plane_reduction
+        from cobre_bridge.newave.converters.hydro import _parse_fpha_plane_reduction
 
         case = self._case_with_text(
             tmp_path, "HIDRELETRICA-FPHA-METODO-REDUCAO-CORTES-ANGULO-PADRAO; 1.0\n"
@@ -1444,7 +1458,7 @@ class TestParseFphaPlaneReductionDiagnostics:
         assert collected == []
 
     def test_multiple_methods_carries_no_legacy_warning(self, tmp_path: Path) -> None:
-        from cobre_bridge.converters.hydro import _parse_fpha_plane_reduction
+        from cobre_bridge.newave.converters.hydro import _parse_fpha_plane_reduction
 
         case = self._case_with_text(tmp_path, self._MULTI_METHOD_TEXT)
 
@@ -1458,7 +1472,7 @@ class TestParseFphaPlaneReductionDiagnostics:
         record — the pre-migration caplog contract keeps working."""
         import logging
 
-        from cobre_bridge.converters.hydro import _parse_fpha_plane_reduction
+        from cobre_bridge.newave.converters.hydro import _parse_fpha_plane_reduction
 
         case = self._case_with_text(tmp_path, self._MULTI_METHOD_TEXT)
 

@@ -8,10 +8,10 @@ from datetime import date
 import pandas as pd
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.converters.anticipated import read_anticipated_dispatch
-from cobre_bridge.converters.hydro import read_cadastro
-from cobre_bridge.converters.thermal import thermal_generation_bounds
 from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.converters.anticipated import read_anticipated_dispatch
+from cobre_bridge.newave.converters.hydro import read_cadastro
+from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
 from cobre_bridge.newave.id_map import NewaveIdMap
 from cobre_bridge.newave.plants import filling_hydro_codes
 

@@ -34,7 +34,7 @@ class TestConvertInitialConditions:
         )
 
     def test_returns_storage_and_filling_storage(self, tmp_path) -> None:
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -43,7 +43,7 @@ class TestConvertInitialConditions:
         assert "filling_storage" in result
 
     def test_storage_values_converted_from_percentage(self, tmp_path) -> None:
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -58,7 +58,7 @@ class TestConvertInitialConditions:
         assert storage[1] == pytest.approx(387.5)
 
     def test_storage_sorted_by_hydro_id(self, tmp_path) -> None:
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -67,7 +67,7 @@ class TestConvertInitialConditions:
         assert ids == sorted(ids)
 
     def test_out_of_range_percentage_clamped(self, tmp_path) -> None:
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -80,7 +80,7 @@ class TestConvertInitialConditions:
         assert storage[1] == pytest.approx(500.0)
 
     def test_filling_storage_is_empty(self, tmp_path) -> None:
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -96,7 +96,7 @@ class TestConvertInitialConditions:
         initial storage must use the same min the bounds converter uses. Regression for
         the I. Solteira initial-storage bug.
         """
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -130,7 +130,7 @@ class TestConvertInitialConditions:
         source model keeps ITAIPU at VARMPUH 0% = Vmin).  The
         ``volume_inicial_percentual`` (50% here) is ignored for 'S' plants.
         """
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -166,7 +166,7 @@ class TestConvertInitialConditions:
         JURUENA (code 309 → cobre id 2) has ``volume_morto == 0`` and
         ``volume_minimo == 2.93``, so its seed is ``0.00 × 2.93 == 0.0``.
         """
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -181,7 +181,7 @@ class TestConvertInitialConditions:
         The two EX plants (cobre ids 0, 1) stay in ``storage``; JURUENA (id 2) is
         absent from it.
         """
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -198,7 +198,7 @@ class TestConvertInitialConditions:
         With a synthetic ``volume_morto == 50`` and ``volume_minimo == 2.93``,
         the seed is ``0.50 × 2.93 == 1.465`` hm³.
         """
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -215,7 +215,7 @@ class TestConvertInitialConditions:
         Synthetic ``volume_morto == 150`` clamps to 100%, giving the full
         ``volume_minimo == 2.93`` hm³ seed, and logs a clamp warning.
         """
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -262,13 +262,17 @@ class TestAnticipatedCommitmentSeeding:
             thermal_codes=[86],
         )
 
-    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
-    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch(
+        "cobre_bridge.newave.converters.initial_conditions.thermal_generation_bounds"
+    )
+    @patch(
+        "cobre_bridge.newave.converters.initial_conditions.read_anticipated_dispatch"
+    )
     def test_in_range_values_pass_through(
         self, mock_read, mock_bounds, tmp_path, caplog
     ) -> None:
-        from cobre_bridge.converters.anticipated import AnticipatedDispatch
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.anticipated import AnticipatedDispatch
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -278,7 +282,7 @@ class TestAnticipatedCommitmentSeeding:
         mock_bounds.return_value = {86: (0.0, 481.27)}
 
         with caplog.at_level(
-            logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
+            logging.WARNING, logger="cobre_bridge.newave.converters.initial_conditions"
         ):
             result = convert_initial_conditions(_ic_case(tmp_path), self._id_map())
 
@@ -300,13 +304,17 @@ class TestAnticipatedCommitmentSeeding:
         ]
         assert "clamping" not in caplog.text
 
-    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
-    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch(
+        "cobre_bridge.newave.converters.initial_conditions.thermal_generation_bounds"
+    )
+    @patch(
+        "cobre_bridge.newave.converters.initial_conditions.read_anticipated_dispatch"
+    )
     def test_out_of_range_values_clamped_and_warned(
         self, mock_read, mock_bounds, tmp_path, caplog
     ) -> None:
-        from cobre_bridge.converters.anticipated import AnticipatedDispatch
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.anticipated import AnticipatedDispatch
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -317,7 +325,7 @@ class TestAnticipatedCommitmentSeeding:
         mock_bounds.return_value = {86: (0.0, 481.27)}
 
         with caplog.at_level(
-            logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
+            logging.WARNING, logger="cobre_bridge.newave.converters.initial_conditions"
         ):
             result = convert_initial_conditions(_ic_case(tmp_path), self._id_map())
 
@@ -328,13 +336,17 @@ class TestAnticipatedCommitmentSeeding:
         assert "code=86" in caplog.text
         assert "clamping" in caplog.text
 
-    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
-    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch(
+        "cobre_bridge.newave.converters.initial_conditions.thermal_generation_bounds"
+    )
+    @patch(
+        "cobre_bridge.newave.converters.initial_conditions.read_anticipated_dispatch"
+    )
     def test_code_absent_from_id_map_skipped(
         self, mock_read, mock_bounds, tmp_path, caplog
     ) -> None:
-        from cobre_bridge.converters.anticipated import AnticipatedDispatch
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.anticipated import AnticipatedDispatch
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -344,7 +356,7 @@ class TestAnticipatedCommitmentSeeding:
         mock_bounds.return_value = {999: (0.0, 500.0)}
 
         with caplog.at_level(
-            logging.WARNING, logger="cobre_bridge.converters.initial_conditions"
+            logging.WARNING, logger="cobre_bridge.newave.converters.initial_conditions"
         ):
             result = convert_initial_conditions(_ic_case(tmp_path), self._id_map())
 
@@ -352,12 +364,16 @@ class TestAnticipatedCommitmentSeeding:
         assert "past_anticipated_commitments" not in result
         assert "absent from" in caplog.text
 
-    @patch("cobre_bridge.converters.initial_conditions.thermal_generation_bounds")
-    @patch("cobre_bridge.converters.initial_conditions.read_anticipated_dispatch")
+    @patch(
+        "cobre_bridge.newave.converters.initial_conditions.thermal_generation_bounds"
+    )
+    @patch(
+        "cobre_bridge.newave.converters.initial_conditions.read_anticipated_dispatch"
+    )
     def test_non_gnl_case_skips_bounds_computation(
         self, mock_read, mock_bounds, tmp_path
     ) -> None:
-        from cobre_bridge.converters.initial_conditions import (
+        from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
@@ -370,7 +386,7 @@ class TestAnticipatedCommitmentSeeding:
 
     def test_delivery_window_year_and_december_wrap(self) -> None:
         """The windowed-commitment dates wrap the year at December correctly."""
-        from cobre_bridge.converters.initial_conditions import _delivery_window
+        from cobre_bridge.newave.converters.initial_conditions import _delivery_window
 
         # Study starts Nov 2024.
         assert _delivery_window(2024, 11, 0) == ("2024-11-01", "2024-12-01")
@@ -393,7 +409,7 @@ class TestReadAnticipatedDispatchHorizonTruncation:
     """
 
     def test_lag_beyond_horizon_truncated_and_warned(self, tmp_path, caplog) -> None:
-        from cobre_bridge.converters.anticipated import read_anticipated_dispatch
+        from cobre_bridge.newave.converters.anticipated import read_anticipated_dispatch
 
         adterm_path = tmp_path / "adterm.dat"
         adterm_path.touch()
@@ -425,7 +441,7 @@ class TestReadAnticipatedDispatchHorizonTruncation:
         )
 
         with caplog.at_level(
-            logging.WARNING, logger="cobre_bridge.converters.anticipated"
+            logging.WARNING, logger="cobre_bridge.newave.converters.anticipated"
         ):
             result = read_anticipated_dispatch(case)
 

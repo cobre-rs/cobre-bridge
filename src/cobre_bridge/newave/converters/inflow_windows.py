@@ -22,16 +22,16 @@ from datetime import date
 
 import pyarrow as pa
 
-from cobre_bridge.converters.stochastic import (
-    _incremental_history,
-    _vazpast_incremental,
-)
 from cobre_bridge.core.inflow_windows import (
     format_observation_windows,
     month_window,
     previous_months,
 )
 from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.converters.stochastic import (
+    _incremental_history,
+    _vazpast_incremental,
+)
 from cobre_bridge.newave.id_map import NewaveIdMap
 
 # Parquet schema for the windowed past-inflow history (Cobre >= 0.13).

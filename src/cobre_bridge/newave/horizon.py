@@ -102,7 +102,7 @@ def historical_start_date(dger: Dger) -> str:
     treated as in service since the start of the historical inflow record
     (``dger.ano_inicial_historico``), taken as January 1st of that year. Falls
     back to 1931 (the usual record start) when the field is absent, matching
-    ``converters.temporal``. The date is a canonical-ordering key in Cobre, not a
+    ``newave.converters.temporal``. The date is a canonical-ordering key in Cobre, not a
     commissioning gate (that is ``entry_stage_id``/``exit_stage_id``), so a shared
     value orders these entities by id.
     """
@@ -155,7 +155,7 @@ def seasonal_step_function(
       flag): freeze the last study stage's value across the post-study tail.
 
     This is the single source of truth for the storage-bounds converter
-    (``converters.hydro.convert_storage_bounds``).
+    (``newave.converters.hydro.convert_storage_bounds``).
     """
     sm = horizon.start_month
     study_months = horizon.study_months

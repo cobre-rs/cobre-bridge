@@ -203,7 +203,7 @@ class NewaveCase:
 
         The ``inewave.libs.UsinasHidreletricas`` reader exposes the tailrace
         ``h_jus(q_jus)`` families consumed by cobre's FPHA production model — see
-        :func:`cobre_bridge.converters.tailrace.convert_tailrace_curves`.
+        :func:`cobre_bridge.newave.converters.tailrace.convert_tailrace_curves`.
         """
         path = self.files.polinjus
         if path is None:

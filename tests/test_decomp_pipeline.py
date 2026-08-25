@@ -209,7 +209,7 @@ class TestPipeline:
         self, tmp_path: Path
     ) -> None:
         from cobre_bridge.core.errors import SourceFileError
-        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.decomp.files import discover_decomp_files
 
         with pytest.raises(SourceFileError) as excinfo:
             discover_decomp_files(tmp_path)
@@ -224,7 +224,7 @@ class TestPipeline:
         self, tmp_path: Path
     ) -> None:
         from cobre_bridge.core.errors import SourceFileError
-        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.decomp.files import discover_decomp_files
 
         (tmp_path / "caso.dat").write_text("rv0\n", encoding="latin-1")
 
@@ -685,7 +685,8 @@ def _run_cadastro_pipeline(
     a caller recover the ``convert_gnl`` mock (and thus its call args) after
     the patched run — populated only alongside *gnl_emission*.
     """
-    from cobre_bridge.decomp.pipeline import DecompFiles, convert_decomp_case
+    from cobre_bridge.decomp.files import DecompFiles
+    from cobre_bridge.decomp.pipeline import convert_decomp_case
 
     files = DecompFiles(
         revision="rv0",
@@ -1938,7 +1939,7 @@ class TestDiscoverDecompFilesBoundaryFcf:
         (deck_dir / "hidr.dat").write_text("", encoding="latin-1")
 
     def test_cortesh_and_cortes_resolved_when_present(self, tmp_path: Path) -> None:
-        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.decomp.files import discover_decomp_files
 
         self._minimal_deck(tmp_path)
         (tmp_path / "cortesh.dat").write_text("", encoding="latin-1")
@@ -1950,7 +1951,7 @@ class TestDiscoverDecompFilesBoundaryFcf:
         assert files.cortes == tmp_path / "cortes-004.dat"
 
     def test_cortesh_and_cortes_none_when_absent(self, tmp_path: Path) -> None:
-        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.decomp.files import discover_decomp_files
 
         self._minimal_deck(tmp_path)
 
@@ -1962,7 +1963,7 @@ class TestDiscoverDecompFilesBoundaryFcf:
     def test_cortes_prefers_single_stage_export_over_consolidated_archive(
         self, tmp_path: Path
     ) -> None:
-        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.decomp.files import discover_decomp_files
 
         self._minimal_deck(tmp_path)
         (tmp_path / "cortesh.dat").write_text("", encoding="latin-1")
@@ -1979,7 +1980,7 @@ class TestDiscoverDecompFilesBoundaryFcf:
         """The ``FC`` record's own ``caminho`` may be a relative path
         pointing outside the deck directory (e.g. a shared upstream run
         directory); the glob idiom alone could never find it there."""
-        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.decomp.files import discover_decomp_files
 
         deck_dir = tmp_path / "deck"
         deck_dir.mkdir()
@@ -2003,7 +2004,7 @@ class TestDiscoverDecompFilesBoundaryFcf:
         """A malformed/stale ``FC`` record (naming a file that does not
         exist) must never raise -- discovery falls through to the deck-local
         glob idiom instead."""
-        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.decomp.files import discover_decomp_files
 
         self._minimal_deck(
             tmp_path,
@@ -2020,7 +2021,7 @@ class TestDiscoverDecompFilesBoundaryFcf:
         """Every pre-existing ``DecompFiles(...)`` call site (this ticket
         touches none of them) keeps constructing unchanged -- both new
         fields default to ``None``."""
-        from cobre_bridge.decomp.pipeline import DecompFiles
+        from cobre_bridge.decomp.files import DecompFiles
 
         files = DecompFiles(
             revision="rv0",

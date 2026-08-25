@@ -1,4 +1,4 @@
-"""Tests for ``cobre_bridge.converters.fict_cascade.resolve_cascade``.
+"""Tests for ``cobre_bridge.newave.converters.fict_cascade.resolve_cascade``.
 
 Focuses on cascade rewiring rules — in particular, that NE/NC plants in
 the middle of a cascade are bypassed transparently so upstream real
@@ -10,7 +10,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from cobre_bridge.converters.fict_cascade import resolve_cascade
+from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
 
 def _confhd_row(

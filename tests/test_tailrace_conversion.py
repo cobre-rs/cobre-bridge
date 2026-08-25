@@ -1,4 +1,4 @@
-"""Tests for ``converters.tailrace.convert_tailrace_curves`` (polinjus → parquet)."""
+"""Tests for ``newave.converters.tailrace.convert_tailrace_curves`` (polinjus → parquet)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from cobre_bridge.converters.tailrace import convert_tailrace_curves
+from cobre_bridge.newave.converters.tailrace import convert_tailrace_curves
 from cobre_bridge.newave.id_map import NewaveIdMap
 
 

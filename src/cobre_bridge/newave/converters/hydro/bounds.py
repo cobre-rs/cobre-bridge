@@ -16,18 +16,6 @@ from collections.abc import Callable
 import pandas as pd
 import pyarrow as pa
 
-from cobre_bridge.converters.hydro.geometry import _read_volref_saz
-from cobre_bridge.converters.hydro.overrides import (
-    _apply_permanent_overrides,
-    _extract_temporal_overrides,
-    _read_ghmin_per_stage,
-    read_cadastro,
-)
-from cobre_bridge.converters.hydro.productivity import (
-    _compute_productivity,
-    _per_stage_productivities,
-    _total_study_stages,
-)
 from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
 from cobre_bridge.core.pandas_utils import is_na
 from cobre_bridge.core.productivity import (
@@ -37,6 +25,18 @@ from cobre_bridge.core.productivity import (
     mean_cota,
 )
 from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.converters.hydro.geometry import _read_volref_saz
+from cobre_bridge.newave.converters.hydro.overrides import (
+    _apply_permanent_overrides,
+    _extract_temporal_overrides,
+    _read_ghmin_per_stage,
+    read_cadastro,
+)
+from cobre_bridge.newave.converters.hydro.productivity import (
+    _compute_productivity,
+    _per_stage_productivities,
+    _total_study_stages,
+)
 from cobre_bridge.newave.filling import filling_schedule, online_machines
 from cobre_bridge.newave.filling import stage_id as filling_stage_id
 from cobre_bridge.newave.horizon import seasonal_step_function

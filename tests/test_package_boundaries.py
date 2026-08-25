@@ -21,9 +21,6 @@ from pathlib import Path
 
 _SRC = Path(__file__).resolve().parent.parent / "src" / "cobre_bridge"
 
-# `converters/` is the NEWAVE track's pre-move home -- it resolves to
-# `newave` from day one so a `decomp -> converters` edge is already visible
-# as a direction violation, not hidden behind its current directory name.
 _DIR_TO_PACKAGE: dict[str, str] = {
     "core": "core",
     "cobre": "cobre",
@@ -33,7 +30,6 @@ _DIR_TO_PACKAGE: dict[str, str] = {
     "comparators": "comparators",
     "dashboard": "dashboard",
     "cli": "cli",
-    "converters": "newave",
 }
 
 _SUBPACKAGE_REFINEMENTS: dict[tuple[str, str], str] = {
@@ -120,8 +116,8 @@ def _package_of(dotted: str) -> str:
 
 def _qualname(dotted: str, package: str) -> str:
     """Offender id for `dotted`: bare when it already names its own package,
-    `package.dotted` when the `converters` -> `newave` remap would otherwise
-    hide which package the module resolves to."""
+    `package.dotted` when a `_DIR_TO_PACKAGE` remap would otherwise hide
+    which package the module resolves to."""
     if package == "<root>" or dotted == package or dotted.startswith(package + "."):
         return dotted
     return f"{package}.{dotted}"
@@ -350,7 +346,7 @@ _TYPE_CHECKING_EDGES: frozenset[tuple[str, str]] = frozenset(
         ("comparators.decomp_results", "decomp.id_map"),
         ("comparators.results", "newave.case"),
         ("comparators.results", "newave.id_map"),
-        ("core.provenance", "decomp.pipeline"),
+        ("core.provenance", "decomp.files"),
         ("core.provenance", "newave.files"),
         ("decomp.constraints", "core.generic_constraint_builder"),
         ("ui.console", "comparators.verdict"),

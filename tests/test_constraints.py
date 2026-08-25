@@ -10,7 +10,16 @@ import pyarrow as pa
 import pytest
 
 from cobre_bridge.cobre.scalar_parameters import build_scalar_parameters
-from cobre_bridge.converters.constraints import (
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity, finalize_diagnostics
+from cobre_bridge.core.generic_constraint_builder import (
+    GENERIC_BOUNDS_SCHEMA,
+    ConstraintIdAllocator,
+)
+from cobre_bridge.core.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
+from cobre_bridge.core.units import C_M3S2HM3
+from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.converters.constraints import (
     _curve_seasonalizes,
     _ElectricTermSkip,
     _is_stored_energy_reservoir,
@@ -23,15 +32,6 @@ from cobre_bridge.converters.constraints import (
     convert_electric_constraints,
     convert_vminop_constraints,
 )
-from cobre_bridge.core import diagnostics as dx
-from cobre_bridge.core.diagnostics import Severity, finalize_diagnostics
-from cobre_bridge.core.generic_constraint_builder import (
-    GENERIC_BOUNDS_SCHEMA,
-    ConstraintIdAllocator,
-)
-from cobre_bridge.core.generic_constraint_format import GENERIC_BOUNDS_COLUMNS
-from cobre_bridge.core.units import C_M3S2HM3
-from cobre_bridge.newave.case import NewaveCase
 from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 
@@ -290,7 +290,9 @@ class TestIntegratedProductivity:
     """
 
     def test_closed_form_average_for_linear_polynomial(self) -> None:
-        from cobre_bridge.converters.hydro import _compute_integrated_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            _compute_integrated_productivity,
+        )
 
         cadastro = _make_cadastro()
         # PLANT_A: h(V) = 300 + 0.1·V. vmin=100, vmax=1000. Average h over
@@ -300,7 +302,9 @@ class TestIntegratedProductivity:
         assert result == pytest.approx(0.01 * (300.0 + 0.1 * 550.0 - 200.0))
 
     def test_canal_fuga_override(self) -> None:
-        from cobre_bridge.converters.hydro import _compute_integrated_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            _compute_integrated_productivity,
+        )
 
         cadastro = _make_cadastro()
         result = _compute_integrated_productivity(
@@ -310,7 +314,9 @@ class TestIntegratedProductivity:
         assert result == pytest.approx(0.01 * (355.0 - 180.0))
 
     def test_cmont_override_collapses_to_constant_drop(self) -> None:
-        from cobre_bridge.converters.hydro import _compute_integrated_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            _compute_integrated_productivity,
+        )
 
         cadastro = _make_cadastro()
         # CMONT supplies the upstream level directly; the polynomial is
@@ -319,7 +325,9 @@ class TestIntegratedProductivity:
         assert result == pytest.approx(0.01 * (360.0 - 200.0))
 
     def test_run_of_river_uses_point_value(self) -> None:
-        from cobre_bridge.converters.hydro import _compute_integrated_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            _compute_integrated_productivity,
+        )
 
         cadastro = _make_cadastro().copy()
         # Collapse PLANT_A to run-of-river by setting vmax = vmin.
@@ -332,7 +340,9 @@ class TestIntegratedProductivity:
         """For h(V) = a0 + a1·V + a2·V² the integrated average over
         [vmin, vmax] is a0 + a1·(vmin+vmax)/2 + a2·(vmax³−vmin³)/(3·(vmax−vmin)).
         Verify the closed-form matches that formula on a quadratic case."""
-        from cobre_bridge.converters.hydro import _compute_integrated_productivity
+        from cobre_bridge.newave.converters.hydro import (
+            _compute_integrated_productivity,
+        )
 
         cadastro = _make_cadastro().copy()
         cadastro.loc[1, "a2_volume_cota"] = 1e-5  # tiny quadratic term
@@ -432,7 +442,7 @@ class TestPerStageAccumulatedProductivities:
     def test_no_overrides_yields_flat_lists(self) -> None:
         """Without CFUGA/CMONT inputs every plant has a constant ρ_acum across
         stages."""
-        from cobre_bridge.converters.constraints import (
+        from cobre_bridge.newave.converters.constraints import (
             compute_per_stage_acc_productivities,
         )
 
@@ -454,7 +464,7 @@ class TestPerStageAccumulatedProductivities:
         """A CFUGA-style change in plant 3's own ρ_eq at stage 1 shifts every
         upstream plant's ρ_acum from that stage on. Stage 0 stays unchanged.
         """
-        from cobre_bridge.converters.constraints import (
+        from cobre_bridge.newave.converters.constraints import (
             compute_per_stage_acc_productivities,
         )
 
@@ -474,7 +484,7 @@ class TestPerStageAccumulatedProductivities:
 
     def test_sibling_branch_unaffected_by_override(self) -> None:
         """Sibling branches stay untouched when a leaf in another branch shifts."""
-        from cobre_bridge.converters.constraints import (
+        from cobre_bridge.newave.converters.constraints import (
             compute_per_stage_acc_productivities,
         )
 
@@ -1395,7 +1405,7 @@ class TestConvertAgrintConstraints:
         fake_line_map = {(1, 3): 0}
 
         with patch(
-            "cobre_bridge.converters.constraints._build_line_id_map",
+            "cobre_bridge.newave.converters.constraints._build_line_id_map",
             return_value=fake_line_map,
         ):
             result = convert_agrint_constraints(case, id_map)
@@ -1416,7 +1426,7 @@ class TestConvertAgrintConstraints:
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
 
         with patch(
-            "cobre_bridge.converters.constraints._build_line_id_map",
+            "cobre_bridge.newave.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
             result = convert_agrint_constraints(case, id_map)
@@ -1438,7 +1448,7 @@ class TestConvertAgrintConstraints:
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
 
         with patch(
-            "cobre_bridge.converters.constraints._build_line_id_map",
+            "cobre_bridge.newave.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
             result_0 = convert_agrint_constraints(case, id_map)
@@ -1463,7 +1473,7 @@ class TestConvertAgrintConstraints:
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
 
         with patch(
-            "cobre_bridge.converters.constraints._build_line_id_map",
+            "cobre_bridge.newave.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
             result = convert_agrint_constraints(case, id_map)
@@ -1507,7 +1517,7 @@ class TestConvertAgrintConstraints:
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
 
         with patch(
-            "cobre_bridge.converters.constraints._build_line_id_map",
+            "cobre_bridge.newave.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
             result = convert_agrint_constraints(case, id_map)
@@ -1563,7 +1573,7 @@ class TestConvertAgrintConstraints:
         id_map = NewaveIdMap(subsystem_ids=[1, 3, 11], hydro_codes=[], thermal_codes=[])
 
         with patch(
-            "cobre_bridge.converters.constraints._build_line_id_map",
+            "cobre_bridge.newave.converters.constraints._build_line_id_map",
             return_value={(1, 11): 3, (3, 11): 4},
         ):
             result = convert_agrint_constraints(case, id_map)
@@ -1599,7 +1609,7 @@ class TestConvertAgrintConstraints:
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
 
         with patch(
-            "cobre_bridge.converters.constraints._build_line_id_map",
+            "cobre_bridge.newave.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
             result = convert_agrint_constraints(case, id_map)
@@ -1650,7 +1660,7 @@ class TestConvertAgrintConstraintsEmission:
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
 
         with patch(
-            "cobre_bridge.converters.constraints._build_line_id_map",
+            "cobre_bridge.newave.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
             with dx.collect() as collected:
@@ -1698,7 +1708,7 @@ class TestNewaveCrossEmitterAllocatorContiguity:
 
         allocator = ConstraintIdAllocator()
         with patch(
-            "cobre_bridge.converters.constraints._build_line_id_map",
+            "cobre_bridge.newave.converters.constraints._build_line_id_map",
             return_value={(1, 3): 0},
         ):
             electric_result = convert_electric_constraints(
@@ -1722,7 +1732,7 @@ class TestConstraintResultTypes:
     """The constraint converters return named tuples (named + index access)."""
 
     def test_vminop_result_named_and_tuple_access(self) -> None:
-        from cobre_bridge.converters.constraints import VminopResult
+        from cobre_bridge.newave.converters.constraints import VminopResult
 
         bounds = pa.table({"constraint_id": [0]})
         r = VminopResult({"constraints": [1, 2]}, bounds, [3, 4], {5: [1.0]})
@@ -1738,7 +1748,7 @@ class TestConstraintResultTypes:
         assert ids == [3, 4]
 
     def test_generic_constraint_result_named_and_tuple_access(self) -> None:
-        from cobre_bridge.converters.constraints import GenericConstraintResult
+        from cobre_bridge.newave.converters.constraints import GenericConstraintResult
 
         bounds = pa.table({"constraint_id": [0]})
         r = GenericConstraintResult([{"id": 0}], bounds)

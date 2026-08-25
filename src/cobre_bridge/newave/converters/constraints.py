@@ -27,11 +27,6 @@ import pyarrow as pa
 
 from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.cobre.scalar_parameters import rho_acum_name
-from cobre_bridge.converters.hydro import (
-    _apply_permanent_overrides,
-    compute_per_stage_own_integrated_productivities,
-)
-from cobre_bridge.converters.temporal import _month_hours
 from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
 from cobre_bridge.core.generic_constraint_builder import (
     ConstraintIdAllocator,
@@ -44,6 +39,11 @@ from cobre_bridge.core.productivity import (
 )
 from cobre_bridge.core.units import C_M3S2HM3, MONTH_HOURS
 from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.converters.hydro import (
+    _apply_permanent_overrides,
+    compute_per_stage_own_integrated_productivities,
+)
+from cobre_bridge.newave.converters.temporal import _month_hours
 from cobre_bridge.newave.id_map import NewaveIdMap
 from cobre_bridge.newave.plants import active_hydros
 
@@ -149,7 +149,7 @@ def _build_hydro_downstream_map(
 
     The map collapses any chain of fictitious plants between a real plant and
     its next real downstream — see
-    :func:`cobre_bridge.converters.fict_cascade.resolve_cascade` for the
+    :func:`cobre_bridge.newave.converters.fict_cascade.resolve_cascade` for the
     resolution rules.  ``downstream_code`` is ``None`` when the cascade
     terminates at the sea.
 
@@ -165,7 +165,7 @@ def _build_hydro_downstream_map(
         the cascade stops short.  Defaults to empty only for callers that
         operate on FICT-free plant sets (e.g. unit tests).
     """
-    from cobre_bridge.converters.fict_cascade import resolve_cascade
+    from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
     if cadastro is None:
         cadastro = pd.DataFrame()
@@ -204,7 +204,7 @@ def compute_accumulated_integrated_productivities(
     :func:`convert_vminop_constraints` — the per-stage version is computed
     separately and accounts for CFUGA/CMONT overrides.
     """
-    from cobre_bridge.converters.fict_cascade import resolve_cascade
+    from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
     resolutions = resolve_cascade(confhd_df, cadastro)
     downstream_map: dict[int, int | None] = {
@@ -233,7 +233,7 @@ def compute_accumulated_productivities(
     traversing the cascade DAG from downstream (sea-level sinks) to upstream.
 
     The cascade chain is resolved with
-    :func:`cobre_bridge.converters.fict_cascade.resolve_cascade`, so any
+    :func:`cobre_bridge.newave.converters.fict_cascade.resolve_cascade`, so any
     fictitious plants between a real plant and its next real downstream are
     collapsed: the FICTs' ρ_eq is folded into the upstream real plant's own
     ρ_eq and the next real plant becomes the direct downstream.  This makes
@@ -252,7 +252,7 @@ def compute_accumulated_productivities(
     dict[int, float]
         Mapping from plant code to accumulated productivity in MW/(m³/s).
     """
-    from cobre_bridge.converters.fict_cascade import resolve_cascade
+    from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
     resolutions = resolve_cascade(confhd_df, cadastro)
     downstream_map: dict[int, int | None] = {
@@ -310,7 +310,7 @@ def compute_max_prodtacum_sin(case: NewaveCase) -> float | None:
 
     Falls back to ``None`` when the source model files cannot be read (mocked tests).
     """
-    from cobre_bridge.converters.fict_cascade import resolve_cascade
+    from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
     try:
         cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)

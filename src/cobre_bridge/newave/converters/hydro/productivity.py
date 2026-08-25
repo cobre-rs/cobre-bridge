@@ -16,16 +16,6 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.converters.hydro.geometry import (
-    _read_volref_saz,
-    _seasonal_reference_volume,
-    fpha_eligible_codes,
-)
-from cobre_bridge.converters.hydro.overrides import (
-    _apply_permanent_overrides,
-    _extract_temporal_overrides,
-    _per_stage_drop_overrides,
-)
 from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
 from cobre_bridge.core.productivity import (
     compute_productivity,
@@ -34,6 +24,16 @@ from cobre_bridge.core.productivity import (
     stored_energy_productivity,
 )
 from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.converters.hydro.geometry import (
+    _read_volref_saz,
+    _seasonal_reference_volume,
+    fpha_eligible_codes,
+)
+from cobre_bridge.newave.converters.hydro.overrides import (
+    _apply_permanent_overrides,
+    _extract_temporal_overrides,
+    _per_stage_drop_overrides,
+)
 from cobre_bridge.newave.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
@@ -439,7 +439,7 @@ def compute_per_stage_own_integrated_productivities(
         if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
     }
 
-    from cobre_bridge.converters.fict_cascade import resolve_cascade
+    from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
     fict_cascade = resolve_cascade(confhd_df, cadastro)
 
@@ -590,7 +590,7 @@ def convert_hydro_energy_productivity(
     # ``produtibilidade_acumulada_calculo_earm``.  FICT plants have ρ_esp = 0 in the
     # bundled cases, so this is numerically a no-op there — a structural fix, robust
     # to non-zero FICT productivities.
-    from cobre_bridge.converters.fict_cascade import resolve_cascade
+    from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
     fict_cascade = resolve_cascade(confhd_df, cadastro)
 
@@ -689,7 +689,7 @@ def compute_per_stage_own_productivities(
     # FICT-cascade fold-in: per-stage ρ_eq must already include any FICT
     # contribution so that the per-stage ρ_acum used by VminOP and EARM
     # accounting matches the topology rewired into ``hydros.json``.
-    from cobre_bridge.converters.fict_cascade import resolve_cascade
+    from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
     fict_cascade = resolve_cascade(confhd_df, cadastro)
 
@@ -733,7 +733,7 @@ def compute_base_productivities(
 
     # FICT-cascade fold-in — keep this in lockstep with the other productivity
     # helpers so every downstream consumer sees the same effective ρ_eq.
-    from cobre_bridge.converters.fict_cascade import resolve_cascade
+    from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
     fict_cascade = resolve_cascade(confhd_df, cadastro)
 

@@ -839,7 +839,8 @@ def read_cobre_hydro_withdrawal(cobre_output_dir: Path) -> pl.DataFrame:
     instead the target lives in ``constraints/hydro_bounds.parquet`` as
     ``water_withdrawal_m3s`` (one value per hydro-stage). Comparison against the source
     model ``VRETIRUH`` therefore matches the *input* target — discrepancies beyond the
-    post-study horizon are expected (see ``converters.hydro.convert_water_withdrawal``).
+    post-study horizon are expected
+    (see ``newave.converters.hydro.convert_water_withdrawal``).
 
     Returns columns: ``entity_id``, ``stage_id``, ``withdrawal_m3s``.
     Empty frame if the parquet is missing or lacks the column.

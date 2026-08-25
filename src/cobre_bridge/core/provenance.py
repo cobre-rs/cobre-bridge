@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, ClassVar, Self
 
 if TYPE_CHECKING:
     from cobre_bridge.core.diagnostics import Diagnostic
-    from cobre_bridge.decomp.pipeline import DecompFiles
+    from cobre_bridge.decomp.files import DecompFiles
     from cobre_bridge.newave.files import NewaveFiles
 
 _HASH_CHUNK_BYTES = 8192
@@ -70,7 +70,7 @@ def hash_input_files(files: NewaveFiles | DecompFiles) -> list[dict[str, object]
     files dataclass works), skipping the ``directory`` field and any field
     whose value is not a :class:`~pathlib.Path` (which also skips an absent
     optional, stored as ``None``, and a non-path field such as
-    :class:`~cobre_bridge.decomp.pipeline.DecompFiles`'s ``revision``). For
+    :class:`~cobre_bridge.decomp.files.DecompFiles`'s ``revision``). For
     each remaining ``(name, path)`` it produces an entry
     ``{"field", "path", "sha256", "size_bytes"}`` where ``sha256`` is the
     SHA-256 hex digest of the file's raw bytes and ``size_bytes`` is the file

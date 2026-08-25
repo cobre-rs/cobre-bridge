@@ -37,7 +37,7 @@ from cobre_bridge.decomp.constraint_registers import (
     detect_unreadable_electrical,
     read_constraints,
 )
-from cobre_bridge.decomp.pipeline import DecompFiles
+from cobre_bridge.decomp.files import DecompFiles
 from cobre_bridge.decomp.preflight import (
     _ALL_AC_CLASSES,
     _ac_coverage,
@@ -102,7 +102,7 @@ class TestIdMapReconcile:
         with ExitStack() as stack:
             stack.enter_context(
                 patch(
-                    "cobre_bridge.decomp.pipeline.discover_decomp_files",
+                    "cobre_bridge.decomp.preflight.discover_decomp_files",
                     return_value=files,
                 )
             )

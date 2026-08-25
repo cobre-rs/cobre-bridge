@@ -51,8 +51,8 @@ from cobre_bridge.decomp.fcf.writer import (
     build_stage_cuts_payload,
     write_boundary_checkpoint,
 )
+from cobre_bridge.decomp.files import DecompFiles
 from cobre_bridge.decomp.inflow_mlt import build_incremental_mlt, coupling_lag_means
-from cobre_bridge.decomp.pipeline import DecompFiles
 from cobre_bridge.decomp.scenarios import convert_recent_observation_windows
 
 if TYPE_CHECKING:
@@ -292,7 +292,7 @@ def _read_complexo_map(dadger_path: Path) -> dict[int, list[int]]:
 def _find_mlt(deck_dir: Path) -> Path | None:
     """Locate the deck's ``mlt.dat`` (média de longo termo), case-insensitively.
 
-    ``mlt.dat`` is not one of :class:`~cobre_bridge.decomp.pipeline.DecompFiles`'
+    ``mlt.dat`` is not one of :class:`~cobre_bridge.decomp.files.DecompFiles`'
     resolved inputs (it feeds only the boundary FCF's inflow-lag mean fold, not
     the conversion), so it is discovered here directly. Returns ``None`` when the
     deck carries none.

@@ -99,7 +99,7 @@ def _patamar_mock() -> MagicMock:
 
 
 def test_stages_json_emit_matches_registry(tmp_path) -> None:
-    from cobre_bridge.converters.temporal import convert_stages
+    from cobre_bridge.newave.converters.temporal import convert_stages
 
     case = make_case(tmp_path, dger=_dger_mock(), patamar=_patamar_mock())
     id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
@@ -110,7 +110,7 @@ def test_stages_json_emit_matches_registry(tmp_path) -> None:
 
 
 def test_config_json_emit_matches_registry(tmp_path) -> None:
-    from cobre_bridge.converters.temporal import convert_config
+    from cobre_bridge.newave.converters.temporal import convert_config
 
     case = make_case(tmp_path, dger=_dger_mock())
 
@@ -124,8 +124,8 @@ def test_generic_constraints_json_emit_matches_registry(tmp_path) -> None:
     own merge site (not a single converter), so this exercises the real
     pipeline run with every converter mocked except ``convert_vminop_constraints``
     — the minimum needed to reach the merge and get a non-empty file."""
-    from cobre_bridge.converters.constraints import VminopResult
     from cobre_bridge.core.generic_constraint_builder import GENERIC_BOUNDS_SCHEMA
+    from cobre_bridge.newave.converters.constraints import VminopResult
     from cobre_bridge.newave.pipeline import convert_newave_case
 
     src = _make_fake_newave_dir(tmp_path)

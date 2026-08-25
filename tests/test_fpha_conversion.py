@@ -14,7 +14,8 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from cobre_bridge.converters.hydro import (
+from cobre_bridge.core.productivity import fpha_efficiency
+from cobre_bridge.newave.converters.hydro import (
     _fpha_computed_config,
     _is_fpha_eligible,
     _parse_fpha_plane_reduction,
@@ -23,7 +24,6 @@ from cobre_bridge.converters.hydro import (
     convert_production_models,
     fpha_eligible_codes,
 )
-from cobre_bridge.core.productivity import fpha_efficiency
 from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import (
     _make_confhd_df,

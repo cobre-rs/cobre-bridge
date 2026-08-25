@@ -58,15 +58,19 @@ class TestCollectAndEmit:
         assert [d.severity for d in sink] == [Severity.WARNING, Severity.INFO]
 
     def test_emit_inside_collect_does_not_log(self, caplog) -> None:
-        logger = logging.getLogger("cobre_bridge.converters.fake")
-        with caplog.at_level(logging.INFO, logger="cobre_bridge.converters.fake"):
+        logger = logging.getLogger("cobre_bridge.newave.converters.fake")
+        with caplog.at_level(
+            logging.INFO, logger="cobre_bridge.newave.converters.fake"
+        ):
             with collect():
                 emit(self._diag(), logger=logger)
         assert caplog.records == []
 
     def test_emit_without_sink_logs_on_caller_logger(self, caplog) -> None:
-        logger = logging.getLogger("cobre_bridge.converters.fake")
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.converters.fake"):
+        logger = logging.getLogger("cobre_bridge.newave.converters.fake")
+        with caplog.at_level(
+            logging.WARNING, logger="cobre_bridge.newave.converters.fake"
+        ):
             emit(self._diag(), logger=logger)
         assert "something happened" in caplog.text
         assert caplog.records[0].levelno == logging.WARNING

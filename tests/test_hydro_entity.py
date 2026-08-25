@@ -35,21 +35,21 @@ class TestConvertHydros:
 
     def test_returns_hydros_key(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         assert "hydros" in result
 
     def test_hydro_count_matches_existing_plants(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         assert len(result["hydros"]) == 2
 
     def test_hydro_ids_are_zero_based_and_sorted(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         ids = [h["id"] for h in result["hydros"]]
@@ -58,7 +58,7 @@ class TestConvertHydros:
 
     def test_hydro_has_required_fields(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
@@ -92,7 +92,7 @@ class TestConvertHydros:
         turbine-excess inflow).  The converter must pin min==max==Vmin so cobre doesn't
         store and shift that surplus across stages.
         """
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         cadastro = _make_hidr_cadastro()
         cadastro.loc[1, "tipo_regulacao"] = "S"  # USINA_A: Vmin 100, Vmax 1000
@@ -110,7 +110,7 @@ class TestConvertHydros:
     def test_cascade_downstream_linkage(self, tmp_path) -> None:
         """Plant 2 (code=2) is downstream of plant 1 (code=1)."""
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         # USINA_A (code=1, cobre id=0) has no downstream.
@@ -122,7 +122,7 @@ class TestConvertHydros:
 
     def test_bus_id_matches_ree_subsystem(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
@@ -132,7 +132,7 @@ class TestConvertHydros:
 
     def test_generation_values_match_machine_sets(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
@@ -150,7 +150,7 @@ class TestConvertHydros:
         """cobre rule 41: the mirror group's four bounds equal the plant's own
         ``generation`` bounds verbatim, for every plant (not just one)."""
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
@@ -167,7 +167,7 @@ class TestConvertHydros:
         ``hydros.schema.json`` requires (decisions 13/14), never the 0.12
         shape asserted in ``TestLegacyHydroShapeRejectedBy013``."""
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
@@ -176,7 +176,7 @@ class TestConvertHydros:
 
     def test_schema_key_present(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         assert "$schema" in result
@@ -186,7 +186,7 @@ class TestConvertHydros:
         # Set up mocks but make the cadastro empty (no plants).
         case = _hydro_case(tmp_path, cadastro=pd.DataFrame())
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
         with pytest.raises(ValueError, match="not found in hidr.dat"):
@@ -200,7 +200,7 @@ class TestConvertHydros:
 
         case = _hydro_case(tmp_path, cadastro=cadastro)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
@@ -217,7 +217,7 @@ class TestConvertHydros:
 
         case = _hydro_case(tmp_path, cadastro=cadastro)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
@@ -234,7 +234,7 @@ class TestConvertHydros:
 
         case = _hydro_case(tmp_path, cadastro=cadastro)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
@@ -259,7 +259,7 @@ class TestConvertHydros:
             volref_saz=tmp_path / "volref_saz.dat",
         )
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
@@ -293,7 +293,7 @@ class TestConvertHydros:
             volref_saz=tmp_path / "volref_saz.dat",
         )
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
@@ -323,7 +323,7 @@ class TestConvertHydros:
             volref_saz=tmp_path / "volref_saz.dat",
         )
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
@@ -353,7 +353,7 @@ class TestConvertHydros:
 
         case = _hydro_case(tmp_path, cadastro=cadastro)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
@@ -371,7 +371,7 @@ class TestConvertHydros:
     def test_zero_teif_ip_no_derating(self, tmp_path) -> None:
         """TEIF=0% and IP=0% leaves max_generation_mw unchanged."""
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
@@ -386,7 +386,7 @@ class TestConvertHydros:
 
         case = _hydro_case(tmp_path, cadastro=cadastro)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
@@ -403,7 +403,7 @@ class TestConvertHydros:
         ``ζ_Oct = 744 * 3600 / 1e6 = 2.6784`` (design §5).
         """
         case = _ne_filling_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, _ne_filling_id_map())
         juruena = next(h for h in result["hydros"] if h["name"] == "JURUENA")
@@ -423,7 +423,7 @@ class TestConvertHydros:
     def test_ex_plants_keep_none_filling(self, tmp_path) -> None:
         """EX plants in the same case keep entry/exit/filling all None."""
         case = _ne_filling_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, _ne_filling_id_map())
         for name in ("USINA_A", "USINA_B"):
@@ -441,7 +441,7 @@ class TestConvertHydros:
         emits ``entry_stage_id`` only and keeps ``filling`` None (design §8).
         """
         case = _ne_filling_case(tmp_path, duracao=0)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, _ne_filling_id_map())
         juruena = next(h for h in result["hydros"] if h["name"] == "JURUENA")
@@ -473,7 +473,7 @@ class TestConvertHydros:
             # duracao 6: Oct-2024 start ⇒ start_sid == 0, entry_sid == 6 > 3.
             exph=_make_ne_exph_mock(duracao=6, volume_morto=0.0),
         )
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         # Must not raise (the IndexError this fix guards against).
         result = convert_hydros(case, _ne_filling_id_map())
@@ -497,7 +497,7 @@ class TestConvertHydros:
         Run under a ``collect()`` sink (as the pipeline does) so the diagnostic
         is captured instead of logged.
         """
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         with dx.collect() as collected:
             convert_hydros(_ne_filling_case(tmp_path), _ne_filling_id_map())
@@ -508,7 +508,7 @@ class TestConvertHydros:
 
     def test_ne_filling_diagnostic_table_row(self, tmp_path) -> None:
         """JURUENA's row carries its code, window 1→2, vol. morto 0.0, and ramp."""
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         with dx.collect() as collected:
             convert_hydros(_ne_filling_case(tmp_path), _ne_filling_id_map())
@@ -525,7 +525,7 @@ class TestConvertHydros:
 
     def test_ex_only_emits_no_filling_diagnostic(self, tmp_path) -> None:
         """An EX-only case emits no ``ne-filling-plant`` diagnostic."""
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         with dx.collect() as collected:
             convert_hydros(_hydro_case(tmp_path), self._make_id_map())
@@ -573,7 +573,7 @@ class TestConvertHydrosGhmin:
         # where the file is present, and the static field must still be 0.
         case = _hydro_case(tmp_path, ghmin=mock_ghmin_obj)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
 
@@ -584,7 +584,7 @@ class TestConvertHydrosGhmin:
         """With no GHMIN.DAT, static min_generation_mw is still 0."""
         case = _hydro_case(tmp_path)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
@@ -621,7 +621,7 @@ class TestConvertHydrosDownstreamFict:
 
         case = _hydro_case(tmp_path, cadastro=cadastro, confhd=confhd_df)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         # id_map has only plant 1; plant 2 (fictitious) is absent.
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1], thermal_codes=[])
@@ -674,7 +674,7 @@ class TestConvertHydrosDownstreamFict:
 
         case = _hydro_case(tmp_path, cadastro=cadastro, confhd=confhd_df)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 3], thermal_codes=[])
         result = convert_hydros(case, id_map)
@@ -704,7 +704,7 @@ class TestConvertHydrosPenalid:
         mock_penalid.penalidades = _make_penalid_df()
         case = _hydro_case(tmp_path, penalid=mock_penalid)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
         result = convert_hydros(case, id_map)
@@ -721,7 +721,7 @@ class TestConvertHydrosPenalid:
         """When PENALID.DAT is absent, every hydro entry has penalties=None."""
         case = _hydro_case(tmp_path)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
         result = convert_hydros(case, id_map)
@@ -755,7 +755,7 @@ class TestConvertHydrosPenalid:
 
         case = _hydro_case(tmp_path, confhd=confhd_df, rees=ree_df)
 
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
         result = convert_hydros(case, id_map)

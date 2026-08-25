@@ -7,7 +7,7 @@ per-month hm³-per-m³/s weight (:func:`zeta`).
 
 All functions are pure (no logging, no I/O) so they can be reused and tested in
 isolation. The module deliberately depends on nothing under
-``cobre_bridge.converters`` — the calendar-hours basis is re-implemented locally
+``cobre_bridge.newave.converters`` — the calendar-hours basis is re-implemented locally
 in :func:`month_hours` rather than imported, so a foundation module never pulls a
 converter into its import graph.
 """
@@ -24,7 +24,7 @@ def month_hours(year: int, month: int) -> float:
     """Total number of hours in the given calendar month.
 
     Uses the same calendar-hours basis as
-    ``cobre_bridge.converters.temporal._month_hours`` (the basis of record):
+    ``cobre_bridge.newave.converters.temporal._month_hours`` (the basis of record):
     ``calendar.monthrange(year, month)[1] * 24``. Re-implemented here to keep
     this foundation module free of any converter dependency.
 

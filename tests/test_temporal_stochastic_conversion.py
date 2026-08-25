@@ -127,7 +127,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         assert len(result["stages"]) == 60
@@ -137,7 +137,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         ids = [s["id"] for s in result["stages"]]
@@ -148,7 +148,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         stage0 = result["stages"][0]
@@ -161,7 +161,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         last = result["stages"][-1]
@@ -172,7 +172,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         stage0 = result["stages"][0]  # January 2020
@@ -188,7 +188,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         for stage in result["stages"]:
@@ -199,7 +199,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         assert result["policy_graph"]["annual_discount_rate"] == pytest.approx(0.12)
@@ -209,7 +209,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         assert result["policy_graph"]["type"] == "finite_horizon"
@@ -219,7 +219,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         transitions = result["policy_graph"]["transitions"]
@@ -236,7 +236,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         for stage in result["stages"]:
@@ -250,7 +250,7 @@ class TestConvertStagesSingleBlock:
         cvar_mock.valores_constantes = [15.0, 40.0]
         case = make_case(tmp_path, dger=dger, patamar=patamar, cvar=cvar_mock)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         for stage in result["stages"]:
@@ -281,7 +281,7 @@ class TestConvertStagesSingleBlock:
         cvar_mock.lambda_variavel = pd.DataFrame(lambda_rows)
         case = make_case(tmp_path, dger=dger, patamar=patamar, cvar=cvar_mock)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         stages = result["stages"]
@@ -303,7 +303,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         # cvar absent => fallback expectation
         result = convert_stages(case, _make_id_map_hydros([]))
@@ -315,7 +315,7 @@ class TestConvertStagesSingleBlock:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         with pytest.raises(ValueError, match="zero study years"):
             convert_stages(case, _make_id_map_hydros([]))
@@ -327,7 +327,7 @@ class TestConvertStagesThreeBlocks:
         patamar = _make_patamar_mock_three_blocks()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         for stage in result["stages"]:
@@ -338,7 +338,7 @@ class TestConvertStagesThreeBlocks:
         patamar = _make_patamar_mock_three_blocks()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         stage0 = result["stages"][0]
@@ -350,7 +350,7 @@ class TestConvertStagesThreeBlocks:
         patamar = _make_patamar_mock_three_blocks()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         for i, stage in enumerate(result["stages"]):
@@ -369,7 +369,7 @@ class TestConvertStagesPreStudy:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         pre = result.get("pre_study_stages", [])
@@ -382,7 +382,7 @@ class TestConvertStagesPreStudy:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         pre = result["pre_study_stages"]
@@ -395,7 +395,7 @@ class TestConvertStagesPreStudy:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
 
         result = convert_stages(case, _make_id_map_hydros([]))
         assert "pre_study_stages" not in result
@@ -411,7 +411,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(num_forwards=20)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["training"]["selection"] == {
@@ -423,7 +423,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(num_max_iteracoes=200)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         rules = result["training"]["stopping_rules"]
@@ -436,7 +436,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(num_aberturas=20)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         scheduler = result["training"]["parallelism"]["backward_scheduler"]
@@ -447,7 +447,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(num_aberturas=21)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         scheduler = result["training"]["parallelism"]["backward_scheduler"]
@@ -458,7 +458,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(num_aberturas=1)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         scheduler = result["training"]["parallelism"]["backward_scheduler"]
@@ -468,7 +468,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(tipo_execucao=1, tipo_simulacao_final=1)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["simulation"]["enabled"] is True
@@ -477,7 +477,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(num_series=500)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["simulation"]["selection"] == {
@@ -491,7 +491,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(impressao_estados_geracao_cortes=0)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["exports"]["states"] is True
@@ -500,7 +500,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(impressao_estados_geracao_cortes=1)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["exports"]["states"] is False
@@ -509,7 +509,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(impressao_estados_geracao_cortes=None)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["exports"]["states"] is False
@@ -520,7 +520,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(tipo_execucao=1)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert (
@@ -532,7 +532,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(tipo_execucao=0, tipo_simulacao_final=1)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["training"]["enabled"] is False
@@ -544,7 +544,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(tipo_execucao=1, tipo_simulacao_final=0)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["simulation"]["enabled"] is False
@@ -557,7 +557,7 @@ class TestConvertConfig:
         )
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["simulation"]["enabled"] is True
@@ -574,7 +574,7 @@ class TestConvertConfig:
         )
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["simulation"]["enabled"] is True
@@ -593,7 +593,7 @@ class TestConvertConfig:
         )
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["simulation"]["enabled"] is True
@@ -612,7 +612,7 @@ class TestConvertConfig:
         )
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         src = result["simulation"]["scenario_source"]
@@ -638,7 +638,7 @@ class TestConvertConfig:
         mock_shist.ano_inicio_varredura = 1932
         case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         src = result["training"]["scenario_source"]
@@ -674,7 +674,7 @@ class TestConvertConfig:
         mock_shist.ano_inicio_varredura = 1932
         case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["estimation"]["max_order"] == 4
@@ -696,7 +696,7 @@ class TestConvertConfig:
         mock_shist.ano_inicio_varredura = 1932
         case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         # With no reamostragem and not deterministic, training has no
@@ -720,7 +720,7 @@ class TestConvertConfig:
         mock_shist.ano_inicio_varredura = 1932
         case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert "scenario_source" not in result["training"]
@@ -745,7 +745,7 @@ class TestConvertConfig:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, shist=mock_shist, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
         from cobre_bridge.newave.id_map import NewaveIdMap
 
         result = convert_stages(
@@ -770,7 +770,7 @@ class TestConvertConfig:
         patamar = _make_patamar_mock_single()
         case = make_case(tmp_path, dger=dger, patamar=patamar)
 
-        from cobre_bridge.converters.temporal import convert_stages
+        from cobre_bridge.newave.converters.temporal import convert_stages
         from cobre_bridge.newave.id_map import NewaveIdMap
 
         result = convert_stages(
@@ -788,7 +788,7 @@ class TestConvertConfig:
         )
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         cs = result["training"]["cut_selection"]
@@ -803,7 +803,7 @@ class TestConvertConfig:
         )
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         cs = result["training"]["cut_selection"]
@@ -818,7 +818,7 @@ class TestConvertConfig:
         )
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         cs = result["training"]["cut_selection"]
@@ -833,7 +833,7 @@ class TestConvertConfig:
         )
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         cs = result["training"]["cut_selection"]
@@ -848,7 +848,7 @@ class TestConvertConfig:
         dger.selecao_de_cortes_backward = None
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         cs = result["training"]["cut_selection"]
@@ -874,7 +874,7 @@ class TestConvertConfig:
         mock_shist.ano_inicio_varredura = 1932
         case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         src = result["simulation"]["scenario_source"]
@@ -903,7 +903,7 @@ class TestConvertConfig:
         mock_shist.anos_inicio_simulacoes = []
         case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         src = result["simulation"]["scenario_source"]
@@ -928,7 +928,7 @@ class TestConvertConfig:
         mock_shist.anos_inicio_simulacoes = []
         case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         src = result["simulation"]["scenario_source"]
@@ -946,7 +946,7 @@ class TestConvertConfig:
         )
         case = make_case(tmp_path, dger=dger)  # shist absent
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         src = result["simulation"]["scenario_source"]
@@ -970,7 +970,7 @@ class TestConvertConfig:
         mock_shist.ano_inicio_varredura = 1932
         case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["simulation"]["selection"]["num_scenarios"] == 3
@@ -993,7 +993,7 @@ class TestConvertConfig:
         mock_shist.anos_inicio_simulacoes = []
         case = make_case(tmp_path, dger=dger, shist=mock_shist)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["simulation"]["selection"]["num_scenarios"] == 2018 - 1932 + 1
@@ -1011,7 +1011,7 @@ class TestConvertConfig:
         )
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["simulation"]["selection"]["num_scenarios"] == 2000
@@ -1022,7 +1022,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(tipo_execucao=1, considera_reamostragem_cenarios=1)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         src = result["training"]["scenario_source"]
@@ -1033,7 +1033,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(tipo_execucao=1, considera_reamostragem_cenarios=0)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert "scenario_source" not in result["training"]
@@ -1046,7 +1046,7 @@ class TestConvertConfig:
         )
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["training"]["enabled"] is False
@@ -1060,7 +1060,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(consideracao_media_anual_afluencias=None)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert "order_selection" not in result["estimation"]
@@ -1070,7 +1070,7 @@ class TestConvertConfig:
         dger = _make_dger_mock(consideracao_media_anual_afluencias=0)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["estimation"]["order_selection"] == "pacf"
@@ -1080,14 +1080,14 @@ class TestConvertConfig:
         dger = _make_dger_mock(consideracao_media_anual_afluencias=3)
         case = make_case(tmp_path, dger=dger)
 
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         result = convert_config(case)
         assert result["estimation"]["order_selection"] == "pacf_annual"
 
     def test_order_selection_pacf_annual_when_one_or_two(self, tmp_path) -> None:
         """Approximate PAR(p)-A variants (1, 2) also map to 'pacf_annual'."""
-        from cobre_bridge.converters.temporal import convert_config
+        from cobre_bridge.newave.converters.temporal import convert_config
 
         for value in (1, 2):
             dger = _make_dger_mock(consideracao_media_anual_afluencias=value)
@@ -1170,7 +1170,7 @@ def _make_dger_inflow_mock(
 
 
 class TestConvertInflowStats:
-    @patch("cobre_bridge.converters.stochastic.Vazoes")
+    @patch("cobre_bridge.newave.converters.stochastic.Vazoes")
     def test_returns_pyarrow_table(self, mock_vazoes_cls, tmp_path) -> None:
         (tmp_path / "vazoes.dat").touch()
         mock_vazoes_cls.read.return_value = _make_vazoes_mock(
@@ -1183,12 +1183,12 @@ class TestConvertInflowStats:
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
 
-        from cobre_bridge.converters.stochastic import convert_inflow_stats
+        from cobre_bridge.newave.converters.stochastic import convert_inflow_stats
 
         result = convert_inflow_stats(case, id_map)
         assert isinstance(result, pa.Table)
 
-    @patch("cobre_bridge.converters.stochastic.Vazoes")
+    @patch("cobre_bridge.newave.converters.stochastic.Vazoes")
     def test_schema_columns(self, mock_vazoes_cls, tmp_path) -> None:
         (tmp_path / "vazoes.dat").touch()
         mock_vazoes_cls.read.return_value = _make_vazoes_mock(
@@ -1201,12 +1201,12 @@ class TestConvertInflowStats:
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
 
-        from cobre_bridge.converters.stochastic import convert_inflow_stats
+        from cobre_bridge.newave.converters.stochastic import convert_inflow_stats
 
         result = convert_inflow_stats(case, id_map)
         assert result.column_names == ["hydro_id", "stage_id", "mean_m3s", "std_m3s"]
 
-    @patch("cobre_bridge.converters.stochastic.Vazoes")
+    @patch("cobre_bridge.newave.converters.stochastic.Vazoes")
     def test_column_types(self, mock_vazoes_cls, tmp_path) -> None:
         (tmp_path / "vazoes.dat").touch()
         mock_vazoes_cls.read.return_value = _make_vazoes_mock(
@@ -1219,7 +1219,7 @@ class TestConvertInflowStats:
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
 
-        from cobre_bridge.converters.stochastic import convert_inflow_stats
+        from cobre_bridge.newave.converters.stochastic import convert_inflow_stats
 
         result = convert_inflow_stats(case, id_map)
         assert result.schema.field("hydro_id").type == pa.int32()
@@ -1227,7 +1227,7 @@ class TestConvertInflowStats:
         assert result.schema.field("mean_m3s").type == pa.float64()
         assert result.schema.field("std_m3s").type == pa.float64()
 
-    @patch("cobre_bridge.converters.stochastic.Vazoes")
+    @patch("cobre_bridge.newave.converters.stochastic.Vazoes")
     def test_january_mean_correct(self, mock_vazoes_cls, tmp_path) -> None:
         """mean_m3s for January stages must equal the mean of all January values."""
         (tmp_path / "vazoes.dat").touch()
@@ -1254,7 +1254,7 @@ class TestConvertInflowStats:
 
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1], thermal_codes=[])
 
-        from cobre_bridge.converters.stochastic import convert_inflow_stats
+        from cobre_bridge.newave.converters.stochastic import convert_inflow_stats
 
         result = convert_inflow_stats(case, id_map)
         df_result = result.to_pydict()
@@ -1267,7 +1267,7 @@ class TestConvertInflowStats:
         ]
         assert len(jan_stage_ids) > 0, "No January stage found with expected mean"
 
-    @patch("cobre_bridge.converters.stochastic.Vazoes")
+    @patch("cobre_bridge.newave.converters.stochastic.Vazoes")
     def test_empty_vazoes_raises_file_not_found(
         self, mock_vazoes_cls, tmp_path
     ) -> None:
@@ -1279,12 +1279,12 @@ class TestConvertInflowStats:
 
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
 
-        from cobre_bridge.converters.stochastic import convert_inflow_stats
+        from cobre_bridge.newave.converters.stochastic import convert_inflow_stats
 
         with pytest.raises(FileNotFoundError, match="vazoes.dat not found or empty"):
             convert_inflow_stats(case, id_map)
 
-    @patch("cobre_bridge.converters.stochastic.Vazoes")
+    @patch("cobre_bridge.newave.converters.stochastic.Vazoes")
     def test_missing_posto_column_produces_zero(
         self, mock_vazoes_cls, tmp_path
     ) -> None:
@@ -1298,7 +1298,7 @@ class TestConvertInflowStats:
         )
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[1, 2], thermal_codes=[])
 
-        from cobre_bridge.converters.stochastic import convert_inflow_stats
+        from cobre_bridge.newave.converters.stochastic import convert_inflow_stats
 
         result = convert_inflow_stats(case, id_map)
         df = result.to_pydict()
@@ -1365,7 +1365,7 @@ class TestConvertLoadStats:
         )
         id_map = _make_id_map_buses([1, 2, 3, 4])
 
-        from cobre_bridge.converters.stochastic import convert_load_stats
+        from cobre_bridge.newave.converters.stochastic import convert_load_stats
 
         result = convert_load_stats(case, id_map)
         assert isinstance(result, pa.Table)
@@ -1378,7 +1378,7 @@ class TestConvertLoadStats:
         )
         id_map = _make_id_map_buses([1, 2])
 
-        from cobre_bridge.converters.stochastic import convert_load_stats
+        from cobre_bridge.newave.converters.stochastic import convert_load_stats
 
         result = convert_load_stats(case, id_map)
         assert result.column_names == ["bus_id", "stage_id", "mean_mw", "std_mw"]
@@ -1391,7 +1391,7 @@ class TestConvertLoadStats:
         )
         id_map = _make_id_map_buses([1, 2])
 
-        from cobre_bridge.converters.stochastic import convert_load_stats
+        from cobre_bridge.newave.converters.stochastic import convert_load_stats
 
         result = convert_load_stats(case, id_map)
         assert result.schema.field("bus_id").type == pa.int32()
@@ -1407,7 +1407,7 @@ class TestConvertLoadStats:
         )
         id_map = _make_id_map_buses([1, 2, 3, 4])
 
-        from cobre_bridge.converters.stochastic import convert_load_stats
+        from cobre_bridge.newave.converters.stochastic import convert_load_stats
 
         result = convert_load_stats(case, id_map)
         assert result.num_rows == 4 * 60
@@ -1420,7 +1420,7 @@ class TestConvertLoadStats:
         )
         id_map = _make_id_map_buses([1, 2, 3, 4])
 
-        from cobre_bridge.converters.stochastic import convert_load_stats
+        from cobre_bridge.newave.converters.stochastic import convert_load_stats
 
         result = convert_load_stats(case, id_map)
         std_vals = result.column("std_mw").to_pylist()
@@ -1434,7 +1434,7 @@ class TestConvertLoadStats:
         )
         id_map = _make_id_map_buses([1, 2])
 
-        from cobre_bridge.converters.stochastic import convert_load_stats
+        from cobre_bridge.newave.converters.stochastic import convert_load_stats
 
         result = convert_load_stats(case, id_map)
         df = result.to_pydict()
@@ -1479,7 +1479,7 @@ class TestConvertLoadStats:
         )
         id_map = _make_id_map_buses([1, 2])
 
-        from cobre_bridge.converters.stochastic import convert_load_stats
+        from cobre_bridge.newave.converters.stochastic import convert_load_stats
 
         result = convert_load_stats(case, id_map)
         df = result.to_pydict()
@@ -1500,11 +1500,11 @@ def _make_cadic_mock(rows: list[dict]) -> MagicMock:
 class TestParseCadical:
     """``parse_cadical`` aggregates inewave's ``Cadic.cargas`` into a lookup."""
 
-    @patch("cobre_bridge.converters.stochastic.Cadic")
+    @patch("cobre_bridge.newave.converters.stochastic.Cadic")
     def test_sums_razoes_per_subsystem_year_month(
         self, mock_cadic_cls, tmp_path
     ) -> None:
-        from cobre_bridge.converters.stochastic import parse_cadical
+        from cobre_bridge.newave.converters.stochastic import parse_cadical
 
         # Two razões for (sub 1, 2024-01) sum; sub 2 and POS (year 9999) distinct.
         mock_cadic_cls.read.return_value = _make_cadic_mock(
@@ -1544,9 +1544,9 @@ class TestParseCadical:
         assert result[(2, 2024, 1)] == pytest.approx(7.0)
         assert result[(1, 9999, 6)] == pytest.approx(4.0)
 
-    @patch("cobre_bridge.converters.stochastic.Cadic")
+    @patch("cobre_bridge.newave.converters.stochastic.Cadic")
     def test_skips_nan_values(self, mock_cadic_cls, tmp_path) -> None:
-        from cobre_bridge.converters.stochastic import parse_cadical
+        from cobre_bridge.newave.converters.stochastic import parse_cadical
 
         mock_cadic_cls.read.return_value = _make_cadic_mock(
             [
@@ -1561,17 +1561,17 @@ class TestParseCadical:
         )
         assert parse_cadical(tmp_path / "c_adic.dat") == {}
 
-    @patch("cobre_bridge.converters.stochastic.Cadic")
+    @patch("cobre_bridge.newave.converters.stochastic.Cadic")
     def test_empty_cargas_returns_empty(self, mock_cadic_cls, tmp_path) -> None:
-        from cobre_bridge.converters.stochastic import parse_cadical
+        from cobre_bridge.newave.converters.stochastic import parse_cadical
 
         mock_cadic_cls.read.return_value = _make_cadic_mock([])  # cargas is None
         assert parse_cadical(tmp_path / "c_adic.dat") == {}
 
-    @patch("cobre_bridge.converters.stochastic.Cadic")
+    @patch("cobre_bridge.newave.converters.stochastic.Cadic")
     def test_cadic_additions_reach_load(self, mock_cadic_cls, tmp_path) -> None:
         """C_ADIC must-take energy is added to the per-(subsystem, stage) load."""
-        from cobre_bridge.converters.stochastic import convert_load_stats
+        from cobre_bridge.newave.converters.stochastic import convert_load_stats
 
         rows = [
             {
@@ -1699,7 +1699,7 @@ class TestBuildUpstreamPostosNonExistingBypass:
     plant's natural inflow."""
 
     def test_nc_plant_between_two_ex_plants_keeps_posto_edge(self) -> None:
-        from cobre_bridge.converters.stochastic import _build_upstream_postos
+        from cobre_bridge.newave.converters.stochastic import _build_upstream_postos
 
         # A (EX, posto 100) -> B (NC, posto 200) -> C (EX, posto 300)
         confhd = pd.DataFrame(
@@ -1713,7 +1713,7 @@ class TestBuildUpstreamPostosNonExistingBypass:
         assert upstream.get(300) == [100]
 
     def test_ne_plant_between_two_ex_plants_keeps_posto_edge(self) -> None:
-        from cobre_bridge.converters.stochastic import _build_upstream_postos
+        from cobre_bridge.newave.converters.stochastic import _build_upstream_postos
 
         confhd = pd.DataFrame(
             [
@@ -1726,7 +1726,7 @@ class TestBuildUpstreamPostosNonExistingBypass:
         assert upstream.get(300) == [100]
 
     def test_consecutive_absent_plants_collapse_to_single_edge(self) -> None:
-        from cobre_bridge.converters.stochastic import _build_upstream_postos
+        from cobre_bridge.newave.converters.stochastic import _build_upstream_postos
 
         confhd = pd.DataFrame(
             [
@@ -1743,7 +1743,7 @@ class TestBuildUpstreamPostosNonExistingBypass:
         assert 300 not in upstream
 
     def test_absent_at_chain_end_yields_no_edge(self) -> None:
-        from cobre_bridge.converters.stochastic import _build_upstream_postos
+        from cobre_bridge.newave.converters.stochastic import _build_upstream_postos
 
         # A (EX) -> B (NC) -> 0 (terminal); A has no downstream edge.
         confhd = pd.DataFrame(
@@ -1756,7 +1756,7 @@ class TestBuildUpstreamPostosNonExistingBypass:
         assert upstream == {}
 
     def test_direct_ex_to_ex_edge_preserved(self) -> None:
-        from cobre_bridge.converters.stochastic import _build_upstream_postos
+        from cobre_bridge.newave.converters.stochastic import _build_upstream_postos
 
         confhd = pd.DataFrame(
             [
@@ -1775,7 +1775,7 @@ class TestBuildUpstreamPostosFillingAdmission:
     (code 309, posto 226, ``NE``) is the live exemplar."""
 
     def test_posto_map_includes_filling_node(self) -> None:
-        from cobre_bridge.converters.stochastic import _build_upstream_postos
+        from cobre_bridge.newave.converters.stochastic import _build_upstream_postos
 
         # Upstream EX (posto 100) -> JURUENA code 309 (NE, posto 226) -> 0.
         confhd = pd.DataFrame(
@@ -1789,7 +1789,7 @@ class TestBuildUpstreamPostosFillingAdmission:
         assert 226 in upstream
 
     def test_posto_map_unchanged_without_filling_codes(self) -> None:
-        from cobre_bridge.converters.stochastic import _build_upstream_postos
+        from cobre_bridge.newave.converters.stochastic import _build_upstream_postos
 
         # Same cascade: with the NE plant walked through, the EX upstream has
         # no downstream EX node, so no edge survives.
@@ -1808,7 +1808,7 @@ class TestBuildUpstreamPostosFillingAdmission:
         assert 226 not in baseline
 
     def test_posto_edge_to_filling_plant(self) -> None:
-        from cobre_bridge.converters.stochastic import _build_upstream_postos
+        from cobre_bridge.newave.converters.stochastic import _build_upstream_postos
 
         # Upstream EX (posto 100) -> JURUENA code 309 (NE-filling, posto 226).
         confhd = pd.DataFrame(
@@ -1822,7 +1822,7 @@ class TestBuildUpstreamPostosFillingAdmission:
         assert upstream.get(226) == [100]
 
     def test_filling_plant_with_nan_posto_is_skipped(self) -> None:
-        from cobre_bridge.converters.stochastic import _build_upstream_postos
+        from cobre_bridge.newave.converters.stochastic import _build_upstream_postos
 
         # JURUENA admitted but its posto is NaN — same pd.isna guard as the
         # EX path: it is skipped, so the upstream edge does not resolve to it.

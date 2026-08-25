@@ -47,7 +47,7 @@ def _hreg(**overrides: object) -> pd.Series:
 
 
 def test_hydro_aliases_point_to_public_functions() -> None:
-    from cobre_bridge.converters.hydro import (
+    from cobre_bridge.newave.converters.hydro import (
         _compute_integrated_productivity,
         _compute_productivity,
         _equivalent_productivity,
@@ -60,8 +60,8 @@ def test_hydro_aliases_point_to_public_functions() -> None:
 
 def test_constraints_and_fict_cascade_import_public_names() -> None:
     # Cross-boundary callers must no longer reach into hydro privates.
-    import cobre_bridge.converters.constraints as c
-    import cobre_bridge.converters.fict_cascade as fc
+    import cobre_bridge.newave.converters.constraints as c
+    import cobre_bridge.newave.converters.fict_cascade as fc
 
     assert c.compute_productivity is compute_productivity
     assert c.stored_energy_productivity is stored_energy_productivity

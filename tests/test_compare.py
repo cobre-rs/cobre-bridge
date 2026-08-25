@@ -1172,7 +1172,8 @@ class TestCompareResultsReturnsDataset:
             lambda _case: ({}, {}, {}),
         )
         monkeypatch.setattr(
-            "cobre_bridge.converters.hydro.read_cadastro", lambda _case: empty_pd()
+            "cobre_bridge.newave.converters.hydro.read_cadastro",
+            lambda _case: empty_pd(),
         )
 
         # Generic-constraint loaders (case dir resolves under tmp_path).

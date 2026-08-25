@@ -763,7 +763,7 @@ def resolve_libs_electrical_path(deck_dir: Path) -> Path | None:
     ``lib_restricao-eletrica-especial*.csv`` glob in *deck_dir* when
     ``indices.csv`` is absent, carries no such entry, or the entry's own path
     does not resolve to an existing file — mirroring
-    :func:`~cobre_bridge.decomp.pipeline.discover_decomp_files`'s own
+    :func:`~cobre_bridge.decomp.files.discover_decomp_files`'s own
     ``find`` fallback idiom for the deck's other optional files.
 
     Parameters

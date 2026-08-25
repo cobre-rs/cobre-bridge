@@ -39,6 +39,7 @@ from cobre_bridge.core.errors import (
     diagnostic_from_exception,
 )
 from cobre_bridge.core.preflight import PreflightVerdict
+from cobre_bridge.decomp.files import discover_decomp_files
 
 # noqa: F401 below -- re-exported so `cli._NULL_HANDLER` keeps resolving for the
 # ``test_configure_logging_levels`` import + the ``cli._configure_logging`` spy sites.
@@ -968,7 +969,6 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
         DECOMP_CONVERSION_PHASE_LABELS,
         FcfInputs,
         convert_decomp_case,
-        discover_decomp_files,
     )
 
     out_console = args.out_console()

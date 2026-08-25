@@ -101,7 +101,7 @@ def test_hash_input_files_hashes_decomp_files_and_skips_revision(
     """``hash_input_files`` also serves ``DecompFiles``: the ``revision`` str
     field and the absent optionals are skipped; the three required paths are
     hashed."""
-    from cobre_bridge.decomp.pipeline import DecompFiles
+    from cobre_bridge.decomp.files import DecompFiles
 
     dadger_bytes = b"dadger-stub-\x00\x01"
     vazoes_bytes = b"vazoes-stub-\xff\xfe"

@@ -344,7 +344,7 @@ def convert_irrigation_withdrawal(
     and is unavailable for generation downstream — so it maps 1:1 to cobre's
     ``hydro_bounds`` ``water_withdrawal_m3s`` column, the DECOMP counterpart of
     the source model's ``dsvagua`` water-withdrawal file
-    (:func:`cobre_bridge.converters.hydro.convert_water_withdrawal`). Omitting it
+    (:func:`cobre_bridge.newave.converters.hydro.convert_water_withdrawal`). Omitting it
     leaves that flow in the balance, so cobre turbines it and over-generates.
 
     The ``TI`` rate is already a positive withdrawal, matching cobre's positive

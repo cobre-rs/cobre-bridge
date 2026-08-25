@@ -34,14 +34,15 @@ from cobre_bridge.core.preflight import (
 )
 from cobre_bridge.decomp import constraint_registers
 from cobre_bridge.decomp.cadastro import APPLIED_AC_CLASSES, UNINGESTABLE_AC_CLASSES
+from cobre_bridge.decomp.files import discover_decomp_files
 
 if TYPE_CHECKING:
     from idecomp.decomp import Dadger, Vazoes
 
     from cobre_bridge.decomp.cadastro import CadastroResolutionReport
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.files import DecompFiles
     from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import DecompFiles
     from cobre_bridge.decomp.temporal import OperativeStage
 
 _CONTEXT = "Preflight"
@@ -490,7 +491,6 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
 
     from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import discover_decomp_files
 
     try:
         files = discover_decomp_files(src)

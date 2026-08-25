@@ -11,22 +11,22 @@ import math
 import pandas as pd
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.converters.hydro.bounds import (
-    _compute_max_turbined_head_corrected,
-    _compute_max_turbined_rated,
-    _per_stage_turbined_envelope,
-)
-from cobre_bridge.converters.hydro.geometry import (
-    _EVAP_MONTHS,
-    _read_volref_saz,
-    fpha_eligible_codes,
-)
-from cobre_bridge.converters.hydro.overrides import _apply_permanent_overrides
 from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
 from cobre_bridge.core.hydro_units import build_mirror_unit_group
 from cobre_bridge.core.pandas_utils import is_na
 from cobre_bridge.core.productivity import fpha_efficiency
 from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.converters.hydro.bounds import (
+    _compute_max_turbined_head_corrected,
+    _compute_max_turbined_rated,
+    _per_stage_turbined_envelope,
+)
+from cobre_bridge.newave.converters.hydro.geometry import (
+    _EVAP_MONTHS,
+    _read_volref_saz,
+    fpha_eligible_codes,
+)
+from cobre_bridge.newave.converters.hydro.overrides import _apply_permanent_overrides
 from cobre_bridge.newave.filling import (
     filling_completion_date,
     filling_min_rate_m3s,
@@ -134,8 +134,8 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # Resolve the FICT-cascade for every real plant.  Provides the effective
     # next-real-plant downstream and the sum of any FICT-chain ρ_eq that must
     # be folded back into the upstream real plant's effective ρ_eq.  See
-    # ``cobre_bridge.converters.fict_cascade`` for the resolution rules.
-    from cobre_bridge.converters.fict_cascade import resolve_cascade
+    # ``cobre_bridge.newave.converters.fict_cascade`` for the resolution rules.
+    from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
     fict_cascade = resolve_cascade(confhd_df, cadastro, filling_codes=filling_codes)
 

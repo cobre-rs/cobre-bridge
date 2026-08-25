@@ -22,7 +22,7 @@ raw incremental lag state:
 
 The upstream set is built in **posto space** off the *effective* operated
 cascade (mirroring the source-model side's
-:func:`cobre_bridge.converters.stochastic._build_upstream_postos`): every
+:func:`cobre_bridge.newave.converters.stochastic._build_upstream_postos`): every
 operated plant's ``posto -> downstream-operated posto`` edge, deduplicated (plants
 sharing a station collapse to one node) and self-loops skipped. DECOMP operates
 every plant (no fictitious/non-operated intermediates), so the operated cascade
@@ -89,7 +89,7 @@ def _posto_upstream(
     direct operated-upstream sibling, add the edge ``upstream_posto ->
     downstream_posto`` (self-loops — a plant sharing its upstream's station —
     skipped, and duplicate edges collapsed by the ``set``). Mirrors the
-    source-model side's :func:`cobre_bridge.converters.stochastic.
+    source-model side's :func:`cobre_bridge.newave.converters.stochastic.
     _build_upstream_postos`, minus its NE/NC walk-through step (DECOMP operates
     every plant, so no non-inflow intermediates sit between operated nodes).
     """

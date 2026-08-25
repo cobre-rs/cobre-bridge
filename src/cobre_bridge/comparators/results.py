@@ -1063,7 +1063,7 @@ def compare_results(
         read_pmo_cost_breakdown,
         read_pmo_productivity_detail,
     )
-    from cobre_bridge.converters.hydro import read_cadastro
+    from cobre_bridge.newave.converters.hydro import read_cadastro
 
     results: list[ResultComparison] = []
 
@@ -1238,7 +1238,7 @@ def compare_results(
         nw_cadastro = pd.DataFrame()
     if not nw_cadastro.empty:
         try:
-            from cobre_bridge.converters.constraints import (
+            from cobre_bridge.newave.converters.constraints import (
                 compute_accumulated_integrated_productivities,
             )
 

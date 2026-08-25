@@ -14,15 +14,6 @@ import pyarrow as pa
 from cobre_bridge.cobre import scalar_parameters as scalar_params_conv
 from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.cobre.case_writer import CaseWriter
-from cobre_bridge.converters import constraints as constraints_conv
-from cobre_bridge.converters import hydro as hydro_conv
-from cobre_bridge.converters import inflow_windows
-from cobre_bridge.converters import initial_conditions as ic_conv
-from cobre_bridge.converters import network as network_conv
-from cobre_bridge.converters import stochastic as stochastic_conv
-from cobre_bridge.converters import tailrace as tailrace_conv
-from cobre_bridge.converters import temporal as temporal_conv
-from cobre_bridge.converters import thermal as thermal_conv
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core import emission_checks
 from cobre_bridge.core.bound_merge import merge_bound_tables
@@ -33,6 +24,15 @@ from cobre_bridge.core.conversion import (
 )
 from cobre_bridge.core.generic_constraint_builder import ConstraintIdAllocator
 from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.converters import constraints as constraints_conv
+from cobre_bridge.newave.converters import hydro as hydro_conv
+from cobre_bridge.newave.converters import inflow_windows
+from cobre_bridge.newave.converters import initial_conditions as ic_conv
+from cobre_bridge.newave.converters import network as network_conv
+from cobre_bridge.newave.converters import stochastic as stochastic_conv
+from cobre_bridge.newave.converters import tailrace as tailrace_conv
+from cobre_bridge.newave.converters import temporal as temporal_conv
+from cobre_bridge.newave.converters import thermal as thermal_conv
 
 logger = logging.getLogger(__name__)
 

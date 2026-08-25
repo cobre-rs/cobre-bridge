@@ -33,7 +33,7 @@ class TestConvertThermals:
         dger = MagicMock()
         dger.despacho_antecipado_gnl = 0
         case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
-        from cobre_bridge.converters.thermal import convert_thermals
+        from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
         assert "thermals" in result
@@ -43,7 +43,7 @@ class TestConvertThermals:
         dger = MagicMock()
         dger.despacho_antecipado_gnl = 0
         case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
-        from cobre_bridge.converters.thermal import convert_thermals
+        from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
         assert len(result["thermals"]) == 3
@@ -53,7 +53,7 @@ class TestConvertThermals:
         dger = MagicMock()
         dger.despacho_antecipado_gnl = 0
         case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
-        from cobre_bridge.converters.thermal import convert_thermals
+        from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
         ids = [t["id"] for t in result["thermals"]]
@@ -65,7 +65,7 @@ class TestConvertThermals:
         dger = MagicMock()
         dger.despacho_antecipado_gnl = 0
         case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
-        from cobre_bridge.converters.thermal import convert_thermals
+        from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
         for t in result["thermals"]:
@@ -81,7 +81,7 @@ class TestConvertThermals:
         dger = MagicMock()
         dger.despacho_antecipado_gnl = 0
         case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
-        from cobre_bridge.converters.thermal import convert_thermals
+        from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
         # TERMO_A (code 10) and TERMO_B (code 20) are in submercado 1 -> bus 0.
@@ -96,7 +96,7 @@ class TestConvertThermals:
         dger = MagicMock()
         dger.despacho_antecipado_gnl = 0
         case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
-        from cobre_bridge.converters.thermal import convert_thermals
+        from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
         # TERMO_A: potencia=100, factor=0.9 -> max_mw=90.
@@ -150,7 +150,7 @@ class TestConvertThermalBoundsClastModificacoes:
             dger=self._make_dger(),
         )
 
-        from cobre_bridge.converters.thermal import convert_thermal_bounds
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
 
         table = convert_thermal_bounds(case, self._make_id_map())
         assert table is not None
@@ -212,7 +212,7 @@ class TestConvertThermalBoundsClastModificacoes:
             expt=expt_obj,
         )
 
-        from cobre_bridge.converters.thermal import convert_thermal_bounds
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
 
         table = convert_thermal_bounds(case, self._make_id_map())
         assert table is not None
@@ -266,7 +266,7 @@ class TestConvertThermalBoundsClastModificacoes:
             expt=expt_obj,
         )
 
-        from cobre_bridge.converters.thermal import convert_thermal_bounds
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
 
         table = convert_thermal_bounds(case, self._make_id_map())
         assert table is not None
@@ -305,7 +305,7 @@ class TestConvertThermalBoundsClastModificacoes:
             dger=self._make_dger(),
         )
 
-        from cobre_bridge.converters.thermal import convert_thermal_bounds
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
 
         table = convert_thermal_bounds(case, self._make_id_map())
         assert table is not None
@@ -359,7 +359,7 @@ class TestConvertThermalBoundsClastModificacoes:
             nw, conft=conft, clast=clast, term=term, dger=dger, expt=expt_obj
         )
 
-        from cobre_bridge.converters.thermal import convert_thermal_bounds
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
 
         table = convert_thermal_bounds(case, self._make_id_map())
         assert table is not None
@@ -406,7 +406,7 @@ class TestConvertThermalBoundsClastModificacoes:
 
         case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
 
-        from cobre_bridge.converters.thermal import convert_thermal_bounds
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
 
         table = convert_thermal_bounds(case, self._make_id_map())
         assert table is not None
@@ -458,7 +458,7 @@ class TestConvertThermalBoundsClastModificacoes:
             nw, conft=conft, clast=clast, term=term, dger=dger, expt=expt_obj
         )
 
-        from cobre_bridge.converters.thermal import convert_thermal_bounds
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
 
         table = convert_thermal_bounds(case, self._make_id_map())
         assert table is not None
@@ -490,7 +490,7 @@ class TestThermalBoundStageSteps:
 
     @staticmethod
     def _state(**overrides: float):
-        from cobre_bridge.converters.thermal import _StageInputs
+        from cobre_bridge.newave.converters.thermal import _StageInputs
 
         defaults = {
             "potencia": 100.0,
@@ -503,7 +503,7 @@ class TestThermalBoundStageSteps:
         return _StageInputs(**defaults)
 
     def test_step1_zeroes_ip_before_maintenance_end(self) -> None:
-        from cobre_bridge.converters.thermal import (
+        from cobre_bridge.newave.converters.thermal import (
             _step1_zero_ip_before_maintenance,
         )
 
@@ -516,7 +516,9 @@ class TestThermalBoundStageSteps:
         assert state2.ip == 8.0
 
     def test_step2_nulls_potencia_only_for_potef_after_maint_end(self) -> None:
-        from cobre_bridge.converters.thermal import _step2_null_potencia_for_potef
+        from cobre_bridge.newave.converters.thermal import (
+            _step2_null_potencia_for_potef,
+        )
 
         state = self._state(potencia=100.0)
         _step2_null_potencia_for_potef(state, 5, 5, has_potef=True)
@@ -530,7 +532,7 @@ class TestThermalBoundStageSteps:
         assert s_before.potencia == 100.0
 
     def test_step3_nulls_gen_min_only_for_gtmin_after_maint_end(self) -> None:
-        from cobre_bridge.converters.thermal import _step3_null_gen_min_for_gtmin
+        from cobre_bridge.newave.converters.thermal import _step3_null_gen_min_for_gtmin
 
         state = self._state(gen_min=50.0)
         _step3_null_gen_min_for_gtmin(state, 5, 5, has_gtmin=True)
@@ -542,7 +544,7 @@ class TestThermalBoundStageSteps:
     def test_step4_applies_in_file_order_for_closed_window(self) -> None:
         from datetime import date
 
-        from cobre_bridge.converters.thermal import _step4_apply_expt_overrides
+        from cobre_bridge.newave.converters.thermal import _step4_apply_expt_overrides
 
         state = self._state()
         overrides = [
@@ -572,7 +574,7 @@ class TestThermalBoundStageSteps:
     def test_step4_skips_window_not_covering_ref_date(self) -> None:
         from datetime import date
 
-        from cobre_bridge.converters.thermal import _step4_apply_expt_overrides
+        from cobre_bridge.newave.converters.thermal import _step4_apply_expt_overrides
 
         state = self._state(fcmax=100.0)
         overrides = [
@@ -595,7 +597,7 @@ class TestThermalBoundStageSteps:
     def test_step4_open_ended_override_blankets_post_study_tail(self) -> None:
         from datetime import date
 
-        from cobre_bridge.converters.thermal import _step4_apply_expt_overrides
+        from cobre_bridge.newave.converters.thermal import _step4_apply_expt_overrides
 
         state = self._state(potencia=100.0)
         overrides = [
@@ -618,7 +620,7 @@ class TestThermalBoundStageSteps:
     def test_step4b_zeroes_out_of_window_stage(self) -> None:
         from datetime import date
 
-        from cobre_bridge.converters.thermal import (
+        from cobre_bridge.newave.converters.thermal import (
             _step4b_apply_potef_availability,
         )
 
@@ -641,7 +643,7 @@ class TestThermalBoundStageSteps:
         """
         from datetime import date
 
-        from cobre_bridge.converters.thermal import (
+        from cobre_bridge.newave.converters.thermal import (
             _step4b_apply_potef_availability,
         )
 
@@ -669,7 +671,7 @@ class TestThermalBoundStageSteps:
         """
         from datetime import date
 
-        from cobre_bridge.converters.thermal import (
+        from cobre_bridge.newave.converters.thermal import (
             _step4c_apply_gtmin_availability,
         )
 
@@ -693,7 +695,7 @@ class TestThermalBoundStageSteps:
         """
         from datetime import date
 
-        from cobre_bridge.converters.thermal import (
+        from cobre_bridge.newave.converters.thermal import (
             _step4c_apply_gtmin_availability,
         )
 
@@ -714,7 +716,7 @@ class TestThermalBoundStageSteps:
     def test_step5_subtracts_maint_reduction_before_maint_end(self) -> None:
         import numpy as np
 
-        from cobre_bridge.converters.thermal import _step5_apply_maint_reduction
+        from cobre_bridge.newave.converters.thermal import _step5_apply_maint_reduction
 
         state = self._state(potencia=100.0)
         reduction = np.array([10.0, 20.0, 30.0])
@@ -726,7 +728,7 @@ class TestThermalBoundStageSteps:
         assert s2.potencia == 100.0
 
     def test_step6_normal_case(self) -> None:
-        from cobre_bridge.converters.thermal import _step6_evaluate_bounds
+        from cobre_bridge.newave.converters.thermal import _step6_evaluate_bounds
 
         state = self._state(potencia=200.0, fcmax=100.0, ip=0.0, teif=0.0, gen_min=50.0)
         min_mw, max_mw, exceeded = _step6_evaluate_bounds(state)
@@ -743,7 +745,7 @@ class TestThermalBoundStageSteps:
         GTMIN; now it honors GTMIN. (ANGRA-1-like numbers: capacity 420.88 < GTMIN
         469.62 → bound [469.62, 469.62], not [420.88, 420.88].)
         """
-        from cobre_bridge.converters.thermal import _step6_evaluate_bounds
+        from cobre_bridge.newave.converters.thermal import _step6_evaluate_bounds
 
         state = self._state(
             potencia=420.88, fcmax=100.0, ip=0.0, teif=0.0, gen_min=469.62
@@ -754,7 +756,7 @@ class TestThermalBoundStageSteps:
         assert exceeded is True
 
     def test_step6_clamps_negative_potencia_to_zero(self) -> None:
-        from cobre_bridge.converters.thermal import _step6_evaluate_bounds
+        from cobre_bridge.newave.converters.thermal import _step6_evaluate_bounds
 
         state = self._state(potencia=-5.0, fcmax=100.0, gen_min=10.0)
         min_mw, max_mw, exceeded = _step6_evaluate_bounds(state)
@@ -768,7 +770,7 @@ class TestThermalGenerationBounds:
     """``thermal_generation_bounds`` returns the static ``[min_mw, max_mw]``."""
 
     def test_bounds_from_term_month1(self, tmp_path) -> None:
-        from cobre_bridge.converters.thermal import thermal_generation_bounds
+        from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
 
         term = MagicMock()
         term.usinas = _make_term_df()
@@ -782,7 +784,7 @@ class TestThermalGenerationBounds:
         assert bounds[30] == pytest.approx((5.0, 40.0))
 
     def test_no_usinas_returns_empty(self, tmp_path) -> None:
-        from cobre_bridge.converters.thermal import thermal_generation_bounds
+        from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
 
         term = MagicMock()
         term.usinas = None

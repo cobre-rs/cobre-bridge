@@ -740,7 +740,7 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
     cadical_path = find_case_insensitive(newave_dir, "c_adic.dat")
     if cadical_path is not None:
         try:
-            from cobre_bridge.converters.stochastic import parse_cadical
+            from cobre_bridge.newave.converters.stochastic import parse_cadical
 
             cadical = parse_cadical(cadical_path)
             load_df = load_df.copy()

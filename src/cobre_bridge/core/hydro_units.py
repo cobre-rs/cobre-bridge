@@ -2,7 +2,7 @@
 
 ``build_mirror_unit_group`` is the single builder for cobre's mandatory
 ``unit_groups`` array entries — reused verbatim by the source-model track
-(:mod:`cobre_bridge.converters.hydro.entity`) and the DECOMP track
+(:mod:`cobre_bridge.newave.converters.hydro.entity`) and the DECOMP track
 (:mod:`cobre_bridge.decomp.hydro`).
 """
 

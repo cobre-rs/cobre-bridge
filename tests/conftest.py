@@ -44,8 +44,8 @@ from cobre_bridge.comparators.dataset import (
 from cobre_bridge.comparators.decomp_results import _AlignedDecompFrames
 from cobre_bridge.core.hydro_units import build_mirror_unit_group
 from cobre_bridge.decomp.case import DecompCase
+from cobre_bridge.decomp.files import DecompFiles
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.pipeline import DecompFiles
 from cobre_bridge.newave.case import NewaveCase
 from cobre_bridge.newave.files import NewaveFiles
 from cobre_bridge.newave.id_map import NewaveIdMap

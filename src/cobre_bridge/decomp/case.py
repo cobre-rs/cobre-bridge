@@ -1,13 +1,13 @@
 """Parsed deck case — read each input file once, cache the result.
 
-``DecompFiles`` (:mod:`cobre_bridge.decomp.pipeline`) resolves the *paths* of
+``DecompFiles`` (:mod:`cobre_bridge.decomp.files`) resolves the *paths* of
 a deck revision; this module adds the parsing layer on top. Converters
 historically took a raw ``dadger`` plus several derived params
 (``id_map``, ``calendar``, ``hidr``) computed ad hoc by the pipeline and
 hand-threaded positionally, so a conversion's own orchestrator re-derived
 ``id_map``/``calendar`` from the same ``dadger`` parse at each call site.
 
-:class:`DecompCase` wraps a :class:`~cobre_bridge.decomp.pipeline.DecompFiles`
+:class:`DecompCase` wraps a :class:`~cobre_bridge.decomp.files.DecompFiles`
 and exposes one :func:`functools.cached_property` per input file, mirroring
 :class:`~cobre_bridge.newave.case.NewaveCase` on the source-model track. The first
 access parses via the matching reader; every later access is free. Required
@@ -41,14 +41,16 @@ from idecomp.decomp import Dadger, Dadgnl
 from idecomp.libs import Renovaveis
 from idecomp.libs.restricoes import Restricoes
 
+from cobre_bridge.decomp.files import discover_decomp_files
+
 if TYPE_CHECKING:
     from datetime import date
 
     import pandas as pd
     from idecomp.libs import UsinasHidreletricas
 
+    from cobre_bridge.decomp.files import DecompFiles
     from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import DecompFiles
     from cobre_bridge.decomp.temporal import OperativeStage
 
 
@@ -66,8 +68,6 @@ class DecompCase:
     @classmethod
     def from_directory(cls, directory: Path) -> DecompCase:
         """Discover and bind the deck files in *directory* (no parsing yet)."""
-        from cobre_bridge.decomp.pipeline import discover_decomp_files
-
         return cls(files=discover_decomp_files(directory))
 
     # --- Required files --------------------------------------------------------

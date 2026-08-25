@@ -399,7 +399,7 @@ class TestConversionWarningCapture:
         from cobre_bridge.newave import pipeline
         from cobre_bridge.newave.pipeline import convert_newave_case
 
-        log = logging.getLogger("cobre_bridge.converters.fake")
+        log = logging.getLogger("cobre_bridge.newave.converters.fake")
 
         def fake_impl(
             src: Path,

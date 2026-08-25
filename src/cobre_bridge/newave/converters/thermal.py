@@ -17,7 +17,6 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.core.diagnostics import (
     Diagnostic,
     DiagnosticTable,
@@ -26,6 +25,7 @@ from cobre_bridge.core.diagnostics import (
     format_stage_ranges,
 )
 from cobre_bridge.newave.case import NewaveCase
+from cobre_bridge.newave.converters.anticipated import read_anticipated_dispatch
 from cobre_bridge.newave.horizon import build_stage_dates, historical_start_date
 from cobre_bridge.newave.id_map import NewaveIdMap
 

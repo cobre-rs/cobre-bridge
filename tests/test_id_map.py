@@ -160,9 +160,9 @@ class TestCrossReferenceConsistency:
             nw_files, conft=conft, clast=clast, term=term, dger=dger
         )
 
-        from cobre_bridge.converters.hydro import convert_hydros
-        from cobre_bridge.converters.network import convert_buses
-        from cobre_bridge.converters.thermal import convert_thermals
+        from cobre_bridge.newave.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.network import convert_buses
+        from cobre_bridge.newave.converters.thermal import convert_thermals
 
         # Use a shared id_map that covers both subsystems and all plants.
         id_map = NewaveIdMap(
@@ -193,7 +193,7 @@ class TestCrossReferenceConsistency:
 
     def test_downstream_ids_are_valid(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
-        from cobre_bridge.converters.hydro import convert_hydros
+        from cobre_bridge.newave.converters.hydro import convert_hydros
 
         id_map = NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
         result = convert_hydros(case, id_map)

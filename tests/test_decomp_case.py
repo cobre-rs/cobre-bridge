@@ -148,7 +148,7 @@ class TestFromDirectory:
     ) -> None:
         known_files = make_decomp_files(tmp_path)
         monkeypatch.setattr(
-            "cobre_bridge.decomp.pipeline.discover_decomp_files",
+            "cobre_bridge.decomp.case.discover_decomp_files",
             MagicMock(return_value=known_files),
         )
 

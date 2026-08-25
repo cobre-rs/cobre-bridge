@@ -782,7 +782,7 @@ def effective_storage_range(
     """Per-stage effective storage range for plant *code*, in hm³.
 
     A run-of-river plant (``tipo_regulacao == "D"``) cannot accumulate water
-    across stages — the source model's own precedent (``converters.hydro``'s
+    across stages — the source model's own precedent (``newave.converters.hydro``'s
     ``tipo_reg == "D"`` branch) freezes its operating range at the reference
     volume (``volume_referencia``) rather than the ``hidr`` registry's
     ``(volume_minimo, volume_maximo)`` band, so this collapses to

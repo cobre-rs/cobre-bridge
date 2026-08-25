@@ -29,14 +29,14 @@ class TestConvertBuses:
         )
 
     def test_returns_buses_key(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_buses
+        from cobre_bridge.newave.converters.network import convert_buses
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         result = convert_buses(case, self._make_id_map())
         assert "buses" in result
 
     def test_bus_count_includes_fictitious(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_buses
+        from cobre_bridge.newave.converters.network import convert_buses
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         result = convert_buses(case, self._make_id_map())
@@ -44,7 +44,7 @@ class TestConvertBuses:
         assert len(result["buses"]) == 3
 
     def test_bus_ids_are_zero_based_sorted(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_buses
+        from cobre_bridge.newave.converters.network import convert_buses
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         result = convert_buses(case, self._make_id_map())
@@ -53,7 +53,7 @@ class TestConvertBuses:
         assert ids[0] == 0
 
     def test_bus_has_deficit_segments(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_buses
+        from cobre_bridge.newave.converters.network import convert_buses
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         result = convert_buses(case, self._make_id_map())
@@ -63,7 +63,7 @@ class TestConvertBuses:
             assert len(b["deficit_segments"]) == 2  # 2 patamares
 
     def test_last_deficit_segment_depth_is_null(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_buses
+        from cobre_bridge.newave.converters.network import convert_buses
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         result = convert_buses(case, self._make_id_map())
@@ -92,19 +92,19 @@ class TestConvertLines:
         return make_case(tmp_path, sistema=_make_sistema_mock(), dger=dger)
 
     def test_returns_lines_key(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_lines
+        from cobre_bridge.newave.converters.network import convert_lines
 
         result = convert_lines(self._make_case(tmp_path), self._make_id_map())
         assert "lines" in result
 
     def test_line_count_three_pairs(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_lines
+        from cobre_bridge.newave.converters.network import convert_lines
 
         result = convert_lines(self._make_case(tmp_path), self._make_id_map())
         assert len(result["lines"]) == 3
 
     def test_line_capacity_structure(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_lines
+        from cobre_bridge.newave.converters.network import convert_lines
 
         result = convert_lines(self._make_case(tmp_path), self._make_id_map())
         for line in result["lines"]:
@@ -115,14 +115,14 @@ class TestConvertLines:
             assert "target_bus_id" in line
 
     def test_line_ids_sequential(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_lines
+        from cobre_bridge.newave.converters.network import convert_lines
 
         result = convert_lines(self._make_case(tmp_path), self._make_id_map())
         ids = [ln["id"] for ln in result["lines"]]
         assert ids == list(range(len(ids)))
 
     def test_first_month_used_for_capacity(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_lines
+        from cobre_bridge.newave.converters.network import convert_lines
 
         result = convert_lines(self._make_case(tmp_path), self._make_id_map())
         line_12 = next(
@@ -134,11 +134,11 @@ class TestConvertLines:
         assert line_12["capacity"]["reverse_mw"] == pytest.approx(2500.0)
 
     def test_fictitious_lines_get_half_exchange_cost(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import (
+        from cobre_bridge.core.penalties import PINT
+        from cobre_bridge.newave.converters.network import (
             _PINT_FICTITIOUS_DISCOUNT,
             convert_lines,
         )
-        from cobre_bridge.core.penalties import PINT
 
         id_map = NewaveIdMap(
             subsystem_ids=[1, 2, 99],
@@ -239,7 +239,7 @@ class TestConvertLineBounds:
         )
 
     def test_block_id_column_is_nullable_int32(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_line_bounds
+        from cobre_bridge.newave.converters.network import convert_line_bounds
 
         case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
         table = convert_line_bounds(case, self._make_id_map())
@@ -248,7 +248,7 @@ class TestConvertLineBounds:
         assert field.nullable
 
     def test_stage_level_base_rows_carry_none_block_id(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_line_bounds
+        from cobre_bridge.newave.converters.network import convert_line_bounds
 
         case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
         table = convert_line_bounds(case, self._make_id_map())
@@ -260,7 +260,7 @@ class TestConvertLineBounds:
         assert len(base_rows) == 3 * 24
 
     def test_differing_block_factor_folds_into_absolute_mw(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_line_bounds
+        from cobre_bridge.newave.converters.network import convert_line_bounds
 
         case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
         table = convert_line_bounds(case, self._make_id_map())
@@ -286,7 +286,7 @@ class TestConvertLineBounds:
         assert row_b1.iloc[0]["reverse_mw"] == pytest.approx(1200.0 * 1.0, rel=1e-9)
 
     def test_uniform_block_factor_emits_no_block_row(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_line_bounds
+        from cobre_bridge.newave.converters.network import convert_line_bounds
 
         case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
         table = convert_line_bounds(case, self._make_id_map())
@@ -303,7 +303,7 @@ class TestConvertLineBounds:
         assert rows.empty
 
     def test_block_row_count_matches_differing_combinations(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_line_bounds
+        from cobre_bridge.newave.converters.network import convert_line_bounds
 
         case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
         table = convert_line_bounds(case, self._make_id_map())
@@ -321,7 +321,7 @@ class TestConvertLineBounds:
         assert len(block_rows) == 6
 
     def test_block_id_within_declared_block_count(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_line_bounds
+        from cobre_bridge.newave.converters.network import convert_line_bounds
 
         case = self._make_case(tmp_path, _make_line_bounds_patamar_df())
         table = convert_line_bounds(case, self._make_id_map())
@@ -333,7 +333,7 @@ class TestConvertLineBounds:
         assert (block_rows["block_id"] < 2).all()
 
     def test_no_patamar_data_emits_only_base_rows(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_line_bounds
+        from cobre_bridge.newave.converters.network import convert_line_bounds
 
         case = self._make_case(tmp_path, pd.DataFrame())
         table = convert_line_bounds(case, self._make_id_map())
@@ -470,7 +470,7 @@ class TestConvertLineBoundsRealDeckFidelity:
     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, StudyHorizon]:
         if not _NEWAVE_LINE_BOUNDS_DECK.exists():
             pytest.skip("real deck not present")
-        from cobre_bridge.converters.network import convert_line_bounds
+        from cobre_bridge.newave.converters.network import convert_line_bounds
 
         case = NewaveCase.from_directory(_NEWAVE_LINE_BOUNDS_DECK)
         # convert_line_bounds never consults id_map (verified: no
@@ -599,7 +599,7 @@ class TestConvertLineBoundsZeroCapability:
     def test_zero_block_factor_converts_without_raising(self, tmp_path: Path) -> None:
         import datetime
 
-        from cobre_bridge.converters.network import convert_line_bounds
+        from cobre_bridge.newave.converters.network import convert_line_bounds
 
         d = datetime.datetime(2023, 1, 1)
         patamar_df = pd.DataFrame(
@@ -658,7 +658,7 @@ class TestConvertLineBoundsZeroCapability:
 
 class TestConvertPenalties:
     def test_returns_required_keys(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_penalties
+        from cobre_bridge.newave.converters.network import convert_penalties
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         result = convert_penalties(
@@ -679,7 +679,7 @@ class TestConvertPenalties:
             assert key in result
 
     def test_bus_deficit_uses_first_subsystem_first_tier(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_penalties
+        from cobre_bridge.newave.converters.network import convert_penalties
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         result = convert_penalties(
@@ -701,7 +701,7 @@ class TestConvertPenalties:
         assert seg["cost"] == pytest.approx(500.0)
 
     def test_hydro_has_all_penalty_fields(self, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_penalties
+        from cobre_bridge.newave.converters.network import convert_penalties
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         result = convert_penalties(
@@ -882,10 +882,14 @@ class TestHydroPenaltyCosts:
 class TestConvertHydroPenaltyOverrides:
     """Per-stage, SIN-uniform hydro penalty override parquet."""
 
-    @patch("cobre_bridge.converters.network._read_penalid_costs", return_value={})
+    @patch(
+        "cobre_bridge.newave.converters.network._read_penalid_costs", return_value={}
+    )
     def test_sin_uniform_sparse_per_stage(self, _mock_penalid, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_hydro_penalty_overrides
         from cobre_bridge.core.penalties import _PEVERT, hydro_penalty_costs
+        from cobre_bridge.newave.converters.network import (
+            convert_hydro_penalty_overrides,
+        )
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         # Build the base via the same helper the override diffs against, with
@@ -922,10 +926,14 @@ class TestConvertHydroPenaltyOverrides:
         ordered = df.sort_values(["hydro_id", "stage_id"]).reset_index(drop=True)
         assert df.reset_index(drop=True).equals(ordered)
 
-    @patch("cobre_bridge.converters.network._read_penalid_costs", return_value={})
+    @patch(
+        "cobre_bridge.newave.converters.network._read_penalid_costs", return_value={}
+    )
     def test_returns_none_when_no_stage_differs(self, _mock_penalid, tmp_path) -> None:
-        from cobre_bridge.converters.network import convert_hydro_penalty_overrides
         from cobre_bridge.core.penalties import hydro_penalty_costs
+        from cobre_bridge.newave.converters.network import (
+            convert_hydro_penalty_overrides,
+        )
 
         case = make_case(tmp_path, sistema=_make_sistema_mock())
         # max_deficit_cost from the mocked deficit df (max custo = 500*2 = 1000).

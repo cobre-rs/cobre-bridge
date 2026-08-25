@@ -35,13 +35,14 @@ from cobre_bridge.decomp.constraint_registers import (
     StageBounds,
     resolve_libs_electrical_path,
 )
+from cobre_bridge.decomp.files import DecompFiles
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.libs_electrical import (
     ElectricalRestriction,
     LibsElectricalModel,
 )
 from cobre_bridge.decomp.network import _LINE_BOUNDS_SCHEMA
-from cobre_bridge.decomp.pipeline import ConversionReport, DecompFiles
+from cobre_bridge.decomp.pipeline import ConversionReport
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from cobre_bridge.decomp.thermal import _THERMAL_COST_SCHEMA, ThermalBounds
 from tests.conftest import make_decomp_case
@@ -133,7 +134,7 @@ class TestDiscoverDecompFilesLibsElectrical:
     def test_libs_restricao_eletrica_resolved_via_indices_csv(
         self, tmp_path: Path
     ) -> None:
-        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.decomp.files import discover_decomp_files
 
         self._minimal_deck(tmp_path)
         _write_indices_csv(
@@ -150,7 +151,7 @@ class TestDiscoverDecompFilesLibsElectrical:
         )
 
     def test_libs_restricao_eletrica_none_when_absent(self, tmp_path: Path) -> None:
-        from cobre_bridge.decomp.pipeline import discover_decomp_files
+        from cobre_bridge.decomp.files import discover_decomp_files
 
         self._minimal_deck(tmp_path)
 

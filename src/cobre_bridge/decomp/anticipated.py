@@ -47,7 +47,7 @@ Post-horizon anticipated delivery — the já-comandada (class-4) windows and th
 signaled (class-3) ``thermal_bounds`` this module emits — is a feature of the
 source model with no counterpart in the sibling conversion track: its
 committed-dispatch reader
-(:func:`cobre_bridge.converters.anticipated.read_anticipated_dispatch`)
+(:func:`cobre_bridge.newave.converters.anticipated.read_anticipated_dispatch`)
 truncates any lag past the study horizon rather than surfacing one past it, so
 this asymmetry is registered, not an oversight or a missing port.
 """

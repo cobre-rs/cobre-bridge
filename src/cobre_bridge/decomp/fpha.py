@@ -4,8 +4,8 @@ cobre evaluates reservoir generation with a *computed* FPHA: given the plant
 geometry (a volume→height→area VHA curve), the tailrace curve families, the
 specific productivity ``ρ_esp`` and turbine efficiency, and a volume fitting
 window, cobre fits the production-function hyperplanes itself. This module
-builds the DECOMP-side inputs, mirroring :mod:`cobre_bridge.converters.hydro`
-and :mod:`cobre_bridge.converters.tailrace` on the source-model side and reusing
+builds the DECOMP-side inputs, mirroring :mod:`cobre_bridge.newave.converters.hydro`
+and :mod:`cobre_bridge.newave.converters.tailrace` on the source-model side and reusing
 their shared cores (:func:`~cobre_bridge.core.tailrace.build_tailrace_table`,
 :func:`~cobre_bridge.core.productivity.fpha_efficiency`).
 
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 FPHA_VOLUME_WINDOW_FRACTION = 0.10
 
 #: Number of volume samples per plant in the VHA geometry table — matches
-#: :func:`cobre_bridge.converters.hydro.generate_hydro_geometry`.
+#: :func:`cobre_bridge.newave.converters.hydro.generate_hydro_geometry`.
 _GEOMETRY_N_POINTS = 100
 
 _GEOMETRY_SCHEMA = pa.schema(
@@ -149,7 +149,7 @@ def convert_hydro_geometry(
 ) -> pa.Table:
     """Build ``system/hydro_geometry.parquet`` (volume→height→area VHA curves).
 
-    Mirrors :func:`cobre_bridge.converters.hydro.generate_hydro_geometry` but
+    Mirrors :func:`cobre_bridge.newave.converters.hydro.generate_hydro_geometry` but
     reads the **effective** (post-``AC COTVOL``) volume→cota polynomial and the
     base ``a*_cota_area`` height→area polynomial, sampling
     :data:`_GEOMETRY_N_POINTS` uniform volume points over the stage-0 effective
