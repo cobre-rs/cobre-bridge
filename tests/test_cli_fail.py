@@ -1,4 +1,4 @@
-"""Unit tests for the ``_fail`` CLI failure helper (``cobre_bridge.cli``).
+"""Unit tests for the ``_fail`` CLI failure helper (``cobre_bridge.cli.app``).
 
 Tier 1 — pure Python, imports no cobre. These tests call ``_fail`` directly to
 isolate the helper's own envelope/rendering/exit-code contract from the CLI
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import typer
 
-from cobre_bridge.cli import _fail
+from cobre_bridge.cli.app import _fail
 from cobre_bridge.cli_args import CompareArgs, ConvertArgs, DashboardArgs
 from cobre_bridge.core.errors import SourceFileError
 from cobre_bridge.verdict import convert_summary

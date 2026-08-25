@@ -201,12 +201,12 @@ class TestParseFormats:
     """ticket-016: ``_parse_formats`` token parsing and validation."""
 
     def test_parse_formats_default(self) -> None:
-        from cobre_bridge.cli import _parse_formats
+        from cobre_bridge.cli.app import _parse_formats
 
         assert _parse_formats(None) == {"console", "parquet", "json"}
 
     def test_parse_formats_comma_and_repeat(self) -> None:
-        from cobre_bridge.cli import _parse_formats
+        from cobre_bridge.cli.app import _parse_formats
 
         assert _parse_formats(["csv,json", "parquet"]) == {
             "csv",
@@ -215,7 +215,7 @@ class TestParseFormats:
         }
 
     def test_parse_formats_all_expands(self) -> None:
-        from cobre_bridge.cli import _parse_formats
+        from cobre_bridge.cli.app import _parse_formats
 
         assert _parse_formats(["all"]) == {
             "console",
@@ -226,7 +226,7 @@ class TestParseFormats:
         }
 
     def test_parse_formats_unknown_raises(self) -> None:
-        from cobre_bridge.cli import _parse_formats
+        from cobre_bridge.cli.app import _parse_formats
 
         with pytest.raises(ValueError, match="bogus"):
             _parse_formats(["bogus"])

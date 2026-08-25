@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from cobre_bridge.cli import _run_decomp_conversion, _run_newave_conversion
+from cobre_bridge.cli.app import _run_decomp_conversion, _run_newave_conversion
 from cobre_bridge.cli_args import ConvertArgs
 from tests.conftest import _make_fake_newave_dir, _run_cli_subprocess
 

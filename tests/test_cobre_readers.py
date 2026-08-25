@@ -298,7 +298,7 @@ class TestCliExitCodeTwoOnCobreReadError:
     def test_results_cli_exits_2_when_reader_raises(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from cobre_bridge import cli
+        from cobre_bridge.cli.app import _run_newave_comparison
 
         args = CompareArgs(
             source_dir=tmp_path / "newave",
@@ -335,7 +335,7 @@ class TestCliExitCodeTwoOnCobreReadError:
             ),
         ):
             with pytest.raises(typer.Exit) as excinfo:
-                cli._run_newave_comparison(args)
+                _run_newave_comparison(args)
 
         assert excinfo.value.exit_code == 2
         err = capsys.readouterr().err

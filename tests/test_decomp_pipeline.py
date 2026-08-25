@@ -367,10 +367,10 @@ class TestEmissionCheckWiring:
         self,
     ) -> None:
         """A violation built from DECOMP-shaped artifacts still flips the
-        verdict via ``cli._convert_status`` — the single function both
+        verdict via ``cli.app._convert_status`` — the single function both
         pipelines' convert verdicts key off (AC #3), not a bare inspection of
         the diagnostic."""
-        from cobre_bridge.cli import _convert_status
+        from cobre_bridge.cli.app import _convert_status
         from cobre_bridge.core import diagnostics as dx
         from cobre_bridge.core.emission_checks import check_hydro_bounds_no_raising
 

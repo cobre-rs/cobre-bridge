@@ -10,6 +10,7 @@ Locks in two things: `_compare_newave` / `_compare_decomp` build a typed
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 import typing
 from pathlib import Path
@@ -17,9 +18,13 @@ from unittest.mock import patch
 
 import pytest
 
-from cobre_bridge import cli
 from cobre_bridge.cli_args import CompareArgs
 from cobre_bridge.config_resolution import RESULTS_TOLERANCE_DEFAULT, BridgeConfig
+
+# `cobre_bridge.cli`'s D5 __init__ re-exports `app` (the Typer instance) from
+# this same-named submodule, shadowing `cli.app` as a plain `import ... as`
+# target -- importlib.import_module resolves the submodule instead.
+cli = importlib.import_module("cobre_bridge.cli.app")
 
 
 def _make_args(
@@ -195,7 +200,9 @@ class TestResolveCompareSettings:
         Returns ``(args, resolved)``: the original (untouched) input and the
         new instance the pure resolver returns.
         """
-        import cobre_bridge.cli as cli
+        import importlib
+
+        cli = importlib.import_module("cobre_bridge.cli.app")
 
         args = cls._make_args(tolerance=tolerance, fmt=fmt, out_dir=out_dir)
         with patch.object(cli, "load_config", return_value=config):

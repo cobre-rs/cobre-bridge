@@ -278,7 +278,7 @@ class TestEmissionCheckWiring:
         """The fully-mocked fixture never builds a hydro_bounds table, so rule
         43 is explicitly "not applicable" (INFO), not silently absent, and the
         convert verdict stays clean."""
-        from cobre_bridge.cli import _convert_status
+        from cobre_bridge.cli.app import _convert_status
         from cobre_bridge.core.diagnostics import Severity
 
         src = _make_fake_newave_dir(tmp_path)
@@ -302,7 +302,7 @@ class TestEmissionCheckWiring:
         convert verdict stays "ok" instead of erroring on cobre rule 43."""
         import contextlib
 
-        from cobre_bridge.cli import _convert_status
+        from cobre_bridge.cli.app import _convert_status
         from cobre_bridge.core.diagnostics import Severity
         from cobre_bridge.newave.pipeline import convert_newave_case
 

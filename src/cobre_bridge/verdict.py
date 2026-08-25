@@ -34,7 +34,7 @@ This is a pure leaf: besides :class:`~cobre_bridge.core.diagnostics.Severity` (t
 runtime dependency of ``_convert_status``), it imports stdlib only — the
 cross-module ``Diagnostic`` / ``ConversionReport`` / ``CompareVerdict`` types
 are referenced under ``TYPE_CHECKING``. It reads its inputs, allocates fresh
-dicts/lists, mutates nothing, and does no I/O. The ``cli.py`` layer serializes
+dicts/lists, mutates nothing, and does no I/O. The CLI layer serializes
 the returned dict to stdout.
 """
 

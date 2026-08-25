@@ -61,7 +61,7 @@ class TestVerbosityAndLogFile:
 
     def test_configure_logging_levels(self) -> None:
         """The count maps 0 → warnings-only, 1 → INFO, 2 → DEBUG."""
-        from cobre_bridge.cli import _NULL_HANDLER, _configure_logging
+        from cobre_bridge.cli.app import _NULL_HANDLER, _configure_logging
 
         pkg = logging.getLogger("cobre_bridge")
 
@@ -189,7 +189,11 @@ class TestVerbosityAndLogFile:
         ``verbose=True`` — the ``> 0`` conversion of the count 2 — and returns
         ``False`` so the spinner is suppressed even on a TTY).
         """
-        from cobre_bridge import cli, ui
+        import importlib
+
+        from cobre_bridge import ui
+
+        cli = importlib.import_module("cobre_bridge.cli.app")
 
         case_dir = tmp_path / "case"
         (case_dir / "output" / "simulation").mkdir(parents=True)
