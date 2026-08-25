@@ -329,10 +329,10 @@ _PENDING_SHADOWED_MODULES: frozenset[str] = frozenset(
 # fails this and so does a stale one, so touching one is a conscious act.
 _TYPE_CHECKING_EDGES: frozenset[tuple[str, str]] = frozenset(
     {
-        ("cli.app", "comparators.alignment"),
-        ("cli.app", "comparators.dataset"),
-        ("cli.app", "newave.case"),
-        ("cli.app", "newave.id_map"),
+        ("cli.compare", "comparators.alignment"),
+        ("cli.compare", "comparators.dataset"),
+        ("cli.compare", "newave.case"),
+        ("cli.compare", "newave.id_map"),
         ("cli.conversion_manifest", "core.conversion"),
         ("cli.conversion_manifest", "decomp.files"),
         ("cli.conversion_manifest", "newave.files"),

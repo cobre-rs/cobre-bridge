@@ -22,9 +22,10 @@ from cobre_bridge.cli.args import CompareArgs
 from cobre_bridge.cli.config import RESULTS_TOLERANCE_DEFAULT, BridgeConfig
 
 # `cobre_bridge.cli`'s D5 __init__ re-exports `app` (the Typer instance) from
-# this same-named submodule, shadowing `cli.app` as a plain `import ... as`
-# target -- importlib.import_module resolves the submodule instead.
-cli = importlib.import_module("cobre_bridge.cli.app")
+# a same-named submodule, shadowing a plain `import ... as` target the same
+# way `cli.app` would -- importlib.import_module resolves the submodule
+# instead.
+cli = importlib.import_module("cobre_bridge.cli.compare")
 
 
 def _make_args(
@@ -202,7 +203,7 @@ class TestResolveCompareSettings:
         """
         import importlib
 
-        cli = importlib.import_module("cobre_bridge.cli.app")
+        cli = importlib.import_module("cobre_bridge.cli.compare")
 
         args = cls._make_args(tolerance=tolerance, fmt=fmt, out_dir=out_dir)
         with patch.object(cli, "load_config", return_value=config):
