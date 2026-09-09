@@ -1,4 +1,4 @@
-"""Evaporation comparison tests for ``comparators.decomp_results``.
+"""Evaporation comparison tests for ``comparators.decomp.results``.
 
 Third carve out of the legacy ``test_decomp_results_compare.py`` mega file
 (TST-13): hm³ -> m³/s stage-hours conversion, Cobre stage-hours lookup, the
@@ -18,7 +18,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from cobre_bridge.comparators.decomp_results import (
+from cobre_bridge.comparators.decomp.results import (
     _HM3_TO_M3S_HOUR_FACTOR,
     _AlignedDecompFrames,
     _cobre_stage_hours,
@@ -141,12 +141,12 @@ def _patch_evap_sources(
     :func:`_evap_dec_oper_evap_fixture`, and ``_cobre_stage_hours`` to a
     fixed one-stage 168h lookup unless *stage_hours* overrides it."""
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+        "cobre_bridge.comparators.decomp.results.read_dec_oper_evap",
         lambda *_a, **_k: _evap_dec_oper_evap_fixture(),
     )
     hours = {0: 168.0} if stage_hours is None else stage_hours
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results._cobre_stage_hours",
+        "cobre_bridge.comparators.decomp.results._cobre_stage_hours",
         lambda *_a, **_k: hours,
     )
 
@@ -160,7 +160,7 @@ class TestEvapSide:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_evap",
             lambda *_a, **_k: _evap_dec_oper_evap_fixture(),
         )
 
@@ -178,7 +178,7 @@ class TestEvapSide:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_evap",
             lambda *_a, **_k: _evap_dec_oper_evap_fixture(),
         )
 
@@ -240,13 +240,13 @@ class TestEvaporationResultComparisons:
         comparison and counted."""
         # Source model reports evaporation for plant 10 (cobre id 0) only.
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_evap",
             lambda *_a, **_k: _evap_dec_oper_evap_fixture().filter(
                 pl.col("codigo_usina") == 10
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._cobre_stage_hours",
+            "cobre_bridge.comparators.decomp.results._cobre_stage_hours",
             lambda *_a, **_k: {0: 168.0},
         )
 
@@ -335,11 +335,11 @@ class TestEvaporationResultComparisons:
         """No ``stages.json`` reconciliation denominator -- degrades
         gracefully rather than raising or fabricating a divisor."""
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_evap",
             lambda *_a, **_k: _evap_dec_oper_evap_fixture(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._cobre_stage_hours",
+            "cobre_bridge.comparators.decomp.results._cobre_stage_hours",
             lambda *_a, **_k: {},
         )
 
@@ -408,13 +408,13 @@ class TestBuildDecompDatasetEvaporation:
         _patch_aligned_frames(monkeypatch, _evap_aligned_fixture())
         _patch_shared_case(monkeypatch, id_map=_ree_id_map())
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_evap",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_evap",
             lambda *_a, **_k: _evap_dec_oper_evap_fixture().filter(
                 pl.col("codigo_usina") == 10
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._cobre_stage_hours",
+            "cobre_bridge.comparators.decomp.results._cobre_stage_hours",
             lambda *_a, **_k: {0: 168.0},
         )
 

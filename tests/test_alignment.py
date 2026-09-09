@@ -1,4 +1,4 @@
-"""Branch coverage for ``comparators.alignment``.
+"""Branch coverage for ``comparators.newave.alignment``.
 
 ``read_reference_names`` and ``build_entity_alignment`` are exercised
 directly against a synthetic ``NewaveCase`` (built via the conftest
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from cobre_bridge.comparators.alignment import (
+from cobre_bridge.comparators.newave.alignment import (
     build_entity_alignment,
     read_reference_names,
 )

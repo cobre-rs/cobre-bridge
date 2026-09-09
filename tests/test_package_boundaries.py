@@ -1,13 +1,13 @@
 """Layout direction guard for `src/cobre_bridge`.
 
-A filesystem-driven ``ast`` walk enforcing five package-boundary rules ahead
-of the package-layout-symmetry migration: import direction (A), no private
-name crossing a package boundary (B), no loose modules at the package root
-(C), no module shadowing a stdlib name (D), and that nothing imports `cli`
-(E) -- plus a census of the `TYPE_CHECKING`-only edges exempted from A and B.
-Each rule with an allowlist shrinks it as later moves land; `__main__`
-reprints the live sets so an allowlist is always updated by diff, not by
-hand.
+A filesystem-driven ``ast`` walk enforcing five package-boundary rules:
+import direction (A), no private name crossing a package boundary (B), no
+loose modules at the package root (C), no module shadowing a stdlib name
+(D), and that nothing imports `cli` (E) -- plus a census of the
+`TYPE_CHECKING`-only edges exempted from A and B. Each rule's allowlist is
+held empty as a steady-state regression tripwire, never widened;
+`__main__` reprints the live sets so any change is reviewed by diff, not
+by hand.
 
 Tier-1: pure ``ast``, ``sys`` and ``pathlib`` -- no ``cobre`` import -- so
 this collects and runs even in a cobre-free environment.
@@ -246,87 +246,24 @@ def _scan_imports() -> tuple[
     )
 
 
-# Rule C. Shrinks to empty as loose modules move into a package; never widen.
+# Rule C. Empty; a new loose root module is a regression -- never widen.
 _PENDING_ROOT_MODULES: frozenset[str] = frozenset()
 
-# Rule A. Shrinks to empty as each move corrects its direction; never widen.
-_PENDING_DIRECTION_EDGES: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("comparators.charts._shared", "ui.html"),
-        ("comparators.charts._shared", "ui.plotly_helpers"),
-        ("comparators.charts.constraints", "ui.plotly_helpers"),
-        ("comparators.charts.convergence", "ui.plotly_helpers"),
-        ("comparators.charts.costs", "ui.plotly_helpers"),
-        ("comparators.charts.fpha", "ui.html"),
-        ("comparators.charts.fpha", "ui.plotly_helpers"),
-        ("comparators.charts.hydro", "ui.plotly_helpers"),
-        ("comparators.charts.network", "ui.plotly_helpers"),
-        ("comparators.charts.performance", "ui.plotly_helpers"),
-        ("comparators.charts.productivity", "ui.html"),
-        ("comparators.charts.productivity", "ui.plotly_helpers"),
-        ("comparators.charts.spillage", "ui.plotly_helpers"),
-        ("comparators.charts.system", "ui.plotly_helpers"),
-        ("comparators.charts.thermal", "ui.plotly_helpers"),
-        ("comparators.decomp_results", "decomp.case"),
-        ("comparators.decomp_results", "decomp.constraint_registers"),
-        ("comparators.html_report", "ui.css"),
-        ("comparators.html_report", "ui.html"),
-        ("comparators.html_report", "ui.js"),
-        ("comparators.newave_readers", "newave.converters.stochastic"),
-        ("comparators.report", "ui.console"),
-        ("comparators.report_builder", "ui.plotly_helpers"),
-        ("comparators.results", "newave.converters.constraints"),
-        ("comparators.results", "newave.converters.hydro"),
-        ("dashboard", "ui.css"),
-        ("dashboard", "ui.html"),
-        ("dashboard", "ui.js"),
-        ("dashboard.chart_helpers", "ui.html"),
-        ("dashboard.chart_helpers", "ui.plotly_helpers"),
-        ("dashboard.tabs.constraints", "ui.html"),
-        ("dashboard.tabs.constraints", "ui.plotly_helpers"),
-        ("dashboard.tabs.constraints_utils", "ui.html"),
-        ("dashboard.tabs.costs", "ui.html"),
-        ("dashboard.tabs.costs", "ui.plotly_helpers"),
-        ("dashboard.tabs.energy_balance", "ui.html"),
-        ("dashboard.tabs.energy_balance", "ui.plotly_helpers"),
-        ("dashboard.tabs.network", "ui.html"),
-        ("dashboard.tabs.network", "ui.plotly_helpers"),
-        ("dashboard.tabs.overview", "ui.html"),
-        ("dashboard.tabs.overview", "ui.plotly_helpers"),
-        ("dashboard.tabs.performance", "ui.html"),
-        ("dashboard.tabs.performance", "ui.plotly_helpers"),
-        ("dashboard.tabs.performance_charts", "ui.plotly_helpers"),
-        ("dashboard.tabs.plants", "ui.html"),
-        ("dashboard.tabs.plants", "ui.js"),
-        ("dashboard.tabs.plants", "ui.plotly_helpers"),
-        ("dashboard.tabs.stochastic", "ui.html"),
-        ("dashboard.tabs.stochastic", "ui.js"),
-        ("dashboard.tabs.stochastic", "ui.plotly_helpers"),
-        ("dashboard.tabs.training", "ui.html"),
-        ("dashboard.tabs.training", "ui.plotly_helpers"),
-    }
-)
+# Rule A. Empty; a new import-direction violation is a regression -- never widen.
+_PENDING_DIRECTION_EDGES: frozenset[tuple[str, str]] = frozenset({})
 
-# Rule B. Shrinks to empty as each name is promoted to a public home; never widen.
-_PENDING_PRIVATE_EDGES: frozenset[tuple[str, str, str]] = frozenset(
-    {
-        ("dashboard.tabs.plants", "ui.html", "_sparkline_svg"),
-    }
-)
+# Rule B. Empty; a new private cross-package import is a regression -- never widen.
+_PENDING_PRIVATE_EDGES: frozenset[tuple[str, str, str]] = frozenset({})
 
-# Rule D. Shrinks to empty as the shadowing file becomes a package; never widen.
-_PENDING_SHADOWED_MODULES: frozenset[str] = frozenset(
-    {
-        "cobre_bridge.ui.html",
-    }
-)
+# Rule D. Empty; a new stdlib-shadowing module is a regression -- never widen.
+_PENDING_SHADOWED_MODULES: frozenset[str] = frozenset({})
 
 # TYPE_CHECKING census: exact set, not an upper bound -- an unexpected edge
 # fails this and so does a stale one, so touching one is a conscious act.
 _TYPE_CHECKING_EDGES: frozenset[tuple[str, str]] = frozenset(
     {
-        ("cli.compare", "comparators.alignment"),
         ("cli.compare", "comparators.dataset"),
+        ("cli.compare", "comparators.newave.alignment"),
         ("cli.compare", "newave.case"),
         ("cli.compare", "newave.id_map"),
         ("cli.conversion_manifest", "core.conversion"),
@@ -338,17 +275,22 @@ _TYPE_CHECKING_EDGES: frozenset[tuple[str, str]] = frozenset(
         ("cli.verdict", "comparators.verdict"),
         ("cli.verdict", "core.conversion"),
         ("cli.verdict", "core.diagnostics"),
-        ("comparators.alignment", "newave.case"),
-        ("comparators.alignment", "newave.id_map"),
-        ("comparators.constraints_compare", "newave.id_map"),
-        ("comparators.decomp_results", "decomp.case"),
-        ("comparators.decomp_results", "decomp.constraint_registers"),
-        ("comparators.decomp_results", "decomp.id_map"),
-        ("comparators.results", "newave.case"),
-        ("comparators.results", "newave.id_map"),
+        ("comparators.analyze", "comparators.newave.alignment"),
+        ("comparators.decomp.results", "comparators.dataset"),
+        ("comparators.decomp.results", "decomp.case"),
+        ("comparators.decomp.results", "decomp.constraint_registers"),
+        ("comparators.decomp.results", "decomp.id_map"),
+        ("comparators.newave.alignment", "newave.case"),
+        ("comparators.newave.alignment", "newave.id_map"),
+        ("comparators.newave.constraints", "newave.id_map"),
+        ("comparators.newave.results", "comparators.dataset"),
+        ("comparators.newave.results", "newave.case"),
+        ("comparators.newave.results", "newave.id_map"),
         ("core.provenance", "decomp.files"),
         ("core.provenance", "newave.files"),
         ("decomp.constraints", "core.generic_constraint_builder"),
+        ("ui.compare_summary", "comparators.dataset"),
+        ("ui.compare_summary", "comparators.verdict"),
         ("ui.console", "comparators.verdict"),
         ("ui.console", "core.conversion"),
         ("ui.console", "core.preflight"),
@@ -359,7 +301,7 @@ _TYPE_CHECKING_EDGES: frozenset[tuple[str, str]] = frozenset(
 def test_import_direction() -> None:
     """Every cross-package runtime import's target package is in the
     source package's `_ALLOWED` set, or the pair is on the pending
-    burn-down list."""
+    list."""
     direction, _private, _cli, _tc = _scan_imports()
     offenders = sorted(direction - _PENDING_DIRECTION_EDGES)
     assert offenders == []
@@ -421,8 +363,8 @@ def test_nothing_imports_cli() -> None:
 
 def test_type_checking_edges_match_tree() -> None:
     """The cross-package `TYPE_CHECKING`-only edges, exact set: an
-    unexpected edge fails this the same as a stale one, so widening or
-    shrinking the census is always a conscious diff."""
+    unexpected edge fails this the same as a stale one, so any edit to
+    the census is always a conscious diff."""
     _direction, _private, _cli, type_checking = _scan_imports()
     assert type_checking == _TYPE_CHECKING_EDGES
 

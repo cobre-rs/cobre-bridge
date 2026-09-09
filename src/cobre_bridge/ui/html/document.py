@@ -111,7 +111,7 @@ def collapsible_section(
     )
 
 
-def _sparkline_svg(
+def sparkline_svg(
     values: list[float],
     color: str,
     width: int = 60,
@@ -168,7 +168,7 @@ def metric_card(
         sparkline_color = color if color is not None else "#8B9298"
         sparkline_html = (
             f'<div class="metric-sparkline">'
-            f"{_sparkline_svg(sparkline_values, sparkline_color)}"
+            f"{sparkline_svg(sparkline_values, sparkline_color)}"
             f"</div>"
         )
 

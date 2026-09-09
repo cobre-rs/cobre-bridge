@@ -56,7 +56,7 @@ import polars as pl
 from cobre_bridge.cobre import readers as cobre_readers
 from cobre_bridge.cobre.case_io import case_dir_for
 from cobre_bridge.comparators import fpha
-from cobre_bridge.comparators.decomp_readers import (
+from cobre_bridge.comparators.decomp.readers import (
     read_dec_desvfpha,
     read_dec_estatfpha,
     read_dec_oper_evap,
@@ -73,7 +73,7 @@ from cobre_bridge.comparators.decomp_readers import (
     read_relato_costs,
     read_relato_membership,
 )
-from cobre_bridge.comparators.results import PercentileData, ResultComparison
+from cobre_bridge.comparators.model import PercentileData, ResultComparison
 from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
@@ -89,7 +89,7 @@ _LOG = logging.getLogger(__name__)
 
 #: Minimum turbined flow (m³/s) for the derived gen/turbined productivity
 #: to be meaningful -- mirrors
-#: :data:`cobre_bridge.comparators.results._PRODUCTIVITY_TURB_EPS`: near-zero
+#: :data:`cobre_bridge.comparators.newave.results._PRODUCTIVITY_TURB_EPS`: near-zero
 #: turbining makes generation/turbined an undefined 0/0 on both sides.
 _PRODUCTIVITY_TURBINED_EPS: float = 1.0e-6
 
@@ -329,7 +329,7 @@ def _scenario_probabilities(decomp_dir: Path) -> pl.DataFrame:
 def _result_diff(nw_value: float, cobre_value: float) -> tuple[float, float | None]:
     """Absolute and relative difference for one ``ResultComparison`` row.
 
-    Mirrors :func:`cobre_bridge.comparators.results._compute_diff` exactly, so
+    Mirrors :func:`cobre_bridge.comparators.newave.results._compute_diff` exactly, so
     the two per-variable stat kernels in play here (this module's own tidy
     rows and the shared ``ResultComparison`` one) agree on what "the
     difference" means.
@@ -349,7 +349,7 @@ def _result_comparisons(
     """Join one level's two frames into ``ResultComparison`` rows.
 
     Emits the canonical
-    :class:`~cobre_bridge.comparators.results.ResultComparison` shape
+    :class:`~cobre_bridge.comparators.model.ResultComparison` shape
     :func:`build_decomp_dataset` hands to
     :func:`cobre_bridge.comparators.analyze.build_results_dataset`, keyed by
     :data:`_CANONICAL_VARIABLE`.
@@ -408,7 +408,7 @@ def _hydro_productivity_results(
     rows, the Cobre values from the cobre hydro means, joined on the
     id-map-resolved ``(entity_id, stage_id)`` pair) -- so this reuses that
     exact alignment/restriction instead of a separate lookup or filter.
-    Mirrors :mod:`cobre_bridge.comparators.results`'s own ``_compare_hydros``
+    Mirrors :mod:`cobre_bridge.comparators.newave.results`'s own ``_compare_hydros``
     productivity derivation. TRACKED zero-guard semantics: a plant/stage
     where either side's turbined flow is at/near zero -- or one side's row is
     simply absent -- is DROPPED, never null-kept, matching the NEWAVE-side
@@ -615,7 +615,7 @@ def _bus_side(
 # - ``system/lines.json`` keys endpoints ``source_bus_id``/``target_bus_id``,
 #   not ``from_bus``/``to_bus`` (``convert_lines`` on both tracks).
 # - ``net_flow_mw`` is positive in the line's own ``source_bus_id ->
-#   target_bus_id`` direction (``comparators/alignment.py``'s ``LineEntity``).
+#   target_bus_id`` direction (``comparators/newave/alignment.py``'s ``LineEntity``).
 # - ``dec_oper_interc`` (``idecomp`` 1.14) names its corridor endpoints
 #   ``codigo_submercado_de``/``codigo_submercado_para`` (not
 #   ``submercado_de``/``submercado_para``), plus ``intercambio_origem_MW``/
@@ -1468,9 +1468,9 @@ def _decomp_max_stage(aligned: _AlignedDecompFrames) -> int | None:
     frames (:func:`_hydro_side`/:func:`_thermal_side`/:func:`_bus_side`, via
     :func:`_map_entities`) instead of an extra read -- their ``stage_id`` is
     already 0-based, matching every other Cobre-convention stage-axis field
-    on :class:`~cobre_bridge.comparators.results.PercentileData`. ``None``
+    on :class:`~cobre_bridge.comparators.model.PercentileData`. ``None``
     when every level is empty, mirroring
-    :func:`~cobre_bridge.comparators.results.compare_results`'s own
+    :func:`~cobre_bridge.comparators.newave.results.compare_results`'s own
     ``nw_max_stage_1based is None`` case.
     """
     candidates: list[int] = []
@@ -1791,7 +1791,7 @@ def _fpha_metrics(
     (`id_map` is ``None``), the source model's own deviation table is
     absent/empty, or no realized point resolves onto a Cobre hydro with
     fitted planes. `build_decomp_dataset` passes ``None`` straight through
-    to `~cobre_bridge.comparators.results.PercentileData.fpha_metrics`; the
+    to `~cobre_bridge.comparators.model.PercentileData.fpha_metrics`; the
     report's FPHA section gate (`report_builder`) reads it as the empty
     `RenderInputs.fpha_metrics` default, so the section is omitted, never a
     crash.
@@ -1951,7 +1951,7 @@ def _cobre_ree_sums(
     ``entity_id`` is the REE code (``codigo_ree``), matching the join key
     :func:`_decomp_ree_frame` emits; ``earm_mwh`` is still raw MWh here --
     the ÷730 MWmês reconciliation happens once, at the
-    :class:`~cobre_bridge.comparators.results.ResultComparison` emission site.
+    :class:`~cobre_bridge.comparators.model.ResultComparison` emission site.
     """
     empty = pl.DataFrame(schema=_EMPTY_COBRE_REE_SUMS_SCHEMA)
     if cobre_hydro.is_empty() or not ree_by_cobre_id:
@@ -2348,7 +2348,7 @@ def _evaporation_result_comparisons(
 
 # --- Constraints tab (gc_* metadata, DECOMP-side LHS) ---
 #
-# `constraints_compare` supplies the source-agnostic pieces (the converted
+# `constraints` supplies the source-agnostic pieces (the converted
 # case's own constraint/bounds tables, and `evaluate_lhs_cobre`). Only the
 # DECOMP-side LHS is missing -- `evaluate_lhs_newave` is
 # MEDIAS/NewaveIdMap-coupled and cannot serve DECOMP -- so
@@ -2778,7 +2778,7 @@ def build_decomp_dataset(
     deck parse for the whole dataset build.
 
     Reads and aligns both sides via :func:`_read_aligned_frames`, then emits
-    the canonical :class:`~cobre_bridge.comparators.results.ResultComparison`
+    the canonical :class:`~cobre_bridge.comparators.model.ResultComparison`
     shape and assembles it through the shared, source-agnostic
     :func:`~cobre_bridge.comparators.analyze.build_results_dataset` kernel.
 
@@ -2809,7 +2809,7 @@ def build_decomp_dataset(
       [ASSUMPTION] comment covers why this is fit-fidelity statistics at the
       source model's realized points, not a full grid-reconstructed surface).
     - The Constraints tab's ``gc_constraints``/``gc_bounds``/``gc_lhs_cobre``
-      (verbatim from ``constraints_compare``) and the DECOMP-side
+      (verbatim from ``constraints``) and the DECOMP-side
       ``gc_lhs_newave`` (`_generic_constraint_lhs_decomp`).
 
     ``results`` also carries a derived ``productivity_mw_per_m3s`` hydro row
@@ -2968,19 +2968,19 @@ def build_decomp_dataset(
 
     # --- Constraints tab (gc_* metadata). The cobre-side pieces
     # (constraint/bounds tables, simulation LHS) are source-agnostic and
-    # reused verbatim from `constraints_compare`; only the DECOMP-side LHS
+    # reused verbatim from `constraints`; only the DECOMP-side LHS
     # (`_generic_constraint_lhs_decomp`) is new -- see that function's
     # docstring for the per-family derivation.
     from cobre_bridge.cobre.constraint_expr import load_rho_acum_overrides
-    from cobre_bridge.comparators.constraints_compare import (
-        _load_generic_constraint_bounds,
-        _load_generic_constraints,
+    from cobre_bridge.comparators.constraints import (
         evaluate_lhs_cobre,
+        load_generic_constraint_bounds,
+        load_generic_constraints,
     )
 
     cobre_case_dir = case_dir_for(cobre_output_dir)
-    gc_constraints = _load_generic_constraints(cobre_case_dir)
-    gc_bounds_df = _load_generic_constraint_bounds(cobre_case_dir)
+    gc_constraints = load_generic_constraints(cobre_case_dir)
+    gc_bounds_df = load_generic_constraint_bounds(cobre_case_dir)
     if gc_constraints:
         # RHE's ``@rho_acum_h{id}`` resolves against the LP's per-stage
         # override (same mechanism as VminOP), not the simulation's default

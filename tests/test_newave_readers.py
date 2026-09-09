@@ -16,7 +16,7 @@ from pathlib import Path
 
 import polars as pl
 
-from cobre_bridge.comparators.newave_readers import (
+from cobre_bridge.comparators.newave.readers import (
     read_fpha_grid,
     read_fpha_planes,
     read_medias_hydro,

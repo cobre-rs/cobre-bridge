@@ -1,4 +1,4 @@
-"""Hydro/Thermal detail tab tests for ``comparators.decomp_results``.
+"""Hydro/Thermal detail tab tests for ``comparators.decomp.results``.
 
 Second carve out of the legacy ``test_decomp_results_compare.py`` mega file
 (TST-13): the hydro bus-id merge helper and the Hydro/Thermal detail tabs'
@@ -17,7 +17,7 @@ import pytest
 
 from cobre_bridge.comparators.charts import hydro_slack_aggregate_chart
 from cobre_bridge.comparators.dataset import _metadata_to_json
-from cobre_bridge.comparators.decomp_results import (
+from cobre_bridge.comparators.decomp.results import (
     _merge_hydro_bus_ids,
     build_decomp_dataset,
 )
@@ -75,22 +75,22 @@ def _patch_hydro_detail_readers(
     matching how a Cobre run with no hydro percentile/metadata output
     (e.g. the deterministic 2-node tree) degrades in production."""
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "cobre_bridge.comparators.decomp.results.cobre_readers."
         "read_cobre_hydro_percentiles",
         lambda *_a, **_k: pl.DataFrame() if percentiles is None else percentiles,
     )
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "cobre_bridge.comparators.decomp.results.cobre_readers."
         "read_cobre_hydro_metadata",
         lambda *_a, **_k: {} if metadata is None else metadata,
     )
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "cobre_bridge.comparators.decomp.results.cobre_readers."
         "read_cobre_hydro_bus_labels",
         lambda *_a, **_k: {} if bus_labels is None else bus_labels,
     )
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "cobre_bridge.comparators.decomp.results.cobre_readers."
         "read_cobre_hydro_per_stage_bounds",
         lambda *_a, **_k: (
             pl.DataFrame() if per_stage_bounds is None else per_stage_bounds
@@ -247,7 +247,7 @@ class TestBuildDecompDatasetHydroDetail:
             per_stage_bounds=_hydro_per_stage_bounds_fixture(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_bus_metadata",
             lambda *_a, **_k: {0: {"name": "SUDESTE"}},
         )
@@ -319,7 +319,7 @@ def _patch_thermal_percentiles(
     empty, matching how a Cobre run with no thermal percentile output
     (e.g. the deterministic 2-node tree) degrades in production."""
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "cobre_bridge.comparators.decomp.results.cobre_readers."
         "read_cobre_thermal_percentiles",
         lambda *_a, **_k: pl.DataFrame() if percentiles is None else percentiles,
     )

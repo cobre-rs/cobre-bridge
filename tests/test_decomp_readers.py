@@ -20,7 +20,7 @@ from idecomp.decomp import (
     Relato,
 )
 
-from cobre_bridge.comparators.decomp_readers import (
+from cobre_bridge.comparators.decomp.readers import (
     _read_dec_oper,
     _read_relato_table,
     _resolve_relato,
@@ -42,7 +42,7 @@ from cobre_bridge.comparators.decomp_readers import (
     read_relato_expected_cost,
     read_relato_membership,
 )
-from cobre_bridge.comparators.decomp_results import reconcile_kdollars_to_reais
+from cobre_bridge.comparators.decomp.results import reconcile_kdollars_to_reais
 
 _REDUCED_DECK = Path("example/decomp-mar-26-rv2-reduced")
 

@@ -48,14 +48,16 @@ addopts = "--tb=short"
 
 [tool.coverage.run]
 source = [
-    "cobre_bridge.comparators.newave_readers",
-    "cobre_bridge.comparators.alignment",
-    "cobre_bridge.comparators.constraints_compare",
+    "cobre_bridge.comparators.model",
+    "cobre_bridge.comparators.constraints",
+    "cobre_bridge.comparators.newave.readers",
+    "cobre_bridge.comparators.newave.alignment",
+    "cobre_bridge.comparators.newave.constraints",
 ]
 
 [tool.coverage.report]
 fail_under = 83
-# Ratchet: raise as coverage improves, never lower to dodge a regression — this is the combined aggregate over the 3 `source` modules above, not a per-module threshold.
+# Ratchet: raise as coverage improves, never lower to dodge a regression — this is the combined aggregate over the 5 `source` modules above, not a per-module threshold.
 
 [tool.pyright]
 # Editor aid only — CI gates ruff (ruff.toml, whole tree) and the drift

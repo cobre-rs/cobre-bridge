@@ -6,9 +6,9 @@ collapsible_section() default_collapsed parameter.
 
 from __future__ import annotations
 
-from cobre_bridge.ui.css import DASHBOARD_CSS
-from cobre_bridge.ui.html import collapsible_section
-from cobre_bridge.ui.js import SUB_TAB_JS
+from cobre_bridge.ui.html.css import DASHBOARD_CSS
+from cobre_bridge.ui.html.document import collapsible_section
+from cobre_bridge.ui.html.js import SUB_TAB_JS
 from cobre_bridge.ui.theme import (
     BAND_OPACITY,
     BOUND_LINE_COLOR,

@@ -15,7 +15,7 @@ from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
 )
-from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
+from cobre_bridge.ui.html.plotly import plotly_div as _plotly_div
 
 # Per-category mapping between the source model pmo.dat
 # `custo_operacao_series_simuladas` `parcela` labels and cobre simulation cost-record

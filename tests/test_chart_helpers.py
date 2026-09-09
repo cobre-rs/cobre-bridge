@@ -17,7 +17,7 @@ import pytest
 
 from cobre_bridge.comparators import charts as _cmp_charts
 from cobre_bridge.comparators import report_builder
-from cobre_bridge.comparators.results import PercentileData, ResultComparison
+from cobre_bridge.comparators.model import PercentileData, ResultComparison
 from cobre_bridge.dashboard.chart_helpers import (
     COST_GROUP_COLORS,
     COST_GROUPS,
@@ -274,9 +274,9 @@ def test_add_mean_p50_band_returns_figure(percentile_df: pd.DataFrame) -> None:
 
 
 def test_add_mean_p50_band_is_the_promoted_plotly_helpers_function() -> None:
-    """chart_helpers re-exports the helper promoted to ui.plotly_helpers rather
+    """chart_helpers re-exports the helper promoted to ui.html.plotly rather
     than defining its own copy — the two names must be the same object."""
-    from cobre_bridge.ui.plotly_helpers import add_mean_p50_band as _promoted
+    from cobre_bridge.ui.html.plotly import add_mean_p50_band as _promoted
 
     assert add_mean_p50_band is _promoted
 
@@ -1752,7 +1752,7 @@ def test_build_comparison_report_empty_dataset_has_all_tabs() -> None:
 # ticket-017: facet_grid subplot-domain helper
 #
 # These tests pin the `facet_grid` / `FacetPanel` helper in
-# `cobre_bridge.ui.plotly_helpers` to the legacy gap-based subplot-domain
+# `cobre_bridge.ui.html.plotly` to the legacy gap-based subplot-domain
 # arithmetic hand-copied across `comparators.charts`. They assert the exact
 # domain pairs for the representative call sites (the 2-column grids, the
 # single-column spillage stack, and the unclamped performance stack including
@@ -1764,7 +1764,7 @@ def test_build_comparison_report_empty_dataset_has_all_tabs() -> None:
 
 def test_facet_grid_default_2col_n4() -> None:
     """facet_grid(4) reproduces the 2-column grid domains panel-for-panel."""
-    from cobre_bridge.ui.plotly_helpers import facet_grid
+    from cobre_bridge.ui.html.plotly import facet_grid
 
     panels = facet_grid(4)
     assert len(panels) == 4
@@ -1778,7 +1778,7 @@ def test_facet_grid_default_2col_n4() -> None:
 
 def test_facet_grid_single_col_spillage() -> None:
     """facet_grid(3, ncols=1, row_gap=0.05) matches the spillage layout."""
-    from cobre_bridge.ui.plotly_helpers import facet_grid
+    from cobre_bridge.ui.html.plotly import facet_grid
 
     panels = facet_grid(3, ncols=1, row_gap=0.05)
     assert all(p.x_domain == [0.0, 1.0] for p in panels)
@@ -1791,7 +1791,7 @@ def test_facet_grid_single_col_spillage() -> None:
 
 def test_facet_grid_single_col_unclamped_preserves_neg_zero() -> None:
     """The unclamped performance stack preserves the legacy -0.0 y-domain low."""
-    from cobre_bridge.ui.plotly_helpers import facet_grid
+    from cobre_bridge.ui.html.plotly import facet_grid
 
     panels = facet_grid(2, ncols=1, row_gap=0.10, min_row_h=0.0)
     assert panels[0].y_domain == [0.55, 1.0]
@@ -1805,7 +1805,7 @@ def test_facet_grid_single_col_unclamped_preserves_neg_zero() -> None:
 @pytest.mark.parametrize("n", range(1, 8))
 def test_facet_grid_matches_inline_formula(n: int) -> None:
     """facet_grid(n) matches the legacy inline formula panel-by-panel."""
-    from cobre_bridge.ui.plotly_helpers import facet_grid
+    from cobre_bridge.ui.html.plotly import facet_grid
 
     ncols = 2
     row_gap = 0.06
@@ -1829,14 +1829,14 @@ def test_facet_grid_matches_inline_formula(n: int) -> None:
 
 def test_facet_grid_zero_returns_empty() -> None:
     """facet_grid(0) returns [] per its contract and does not raise."""
-    from cobre_bridge.ui.plotly_helpers import facet_grid
+    from cobre_bridge.ui.html.plotly import facet_grid
 
     assert facet_grid(0) == []
 
 
 def test_facet_panel_is_frozen() -> None:
     """FacetPanel is immutable: assigning a field raises FrozenInstanceError."""
-    from cobre_bridge.ui.plotly_helpers import FacetPanel
+    from cobre_bridge.ui.html.plotly import FacetPanel
 
     panel = FacetPanel(row=0, col=0, x_domain=[0.0, 1.0], y_domain=[0.0, 1.0])
     with pytest.raises(dataclasses.FrozenInstanceError):

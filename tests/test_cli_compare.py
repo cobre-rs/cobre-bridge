@@ -43,7 +43,7 @@ class TestCompareDatasetWiring:
 
     @staticmethod
     def _results() -> object:
-        from cobre_bridge.comparators.results import ResultComparison
+        from cobre_bridge.comparators.model import ResultComparison
 
         return [
             ResultComparison(
@@ -62,7 +62,7 @@ class TestCompareDatasetWiring:
 
     def _patch_results(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cobre_bridge.comparators.analyze import build_results_dataset
-        from cobre_bridge.comparators.results import PercentileData
+        from cobre_bridge.comparators.model import PercentileData
         from tests.conftest import make_nw_files
 
         # ``.files`` must be a real ``NewaveFiles`` dataclass (not a further
@@ -78,7 +78,7 @@ class TestCompareDatasetWiring:
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.alignment.build_entity_alignment",
+            "cobre_bridge.comparators.newave.alignment.build_entity_alignment",
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
@@ -88,7 +88,7 @@ class TestCompareDatasetWiring:
         # ``compare_results`` now returns the canonical ``ComparisonDataset``;
         # build it from the same fixture rows so the CLI path is exercised.
         monkeypatch.setattr(
-            "cobre_bridge.comparators.results.compare_results",
+            "cobre_bridge.comparators.newave.results.compare_results",
             lambda **k: build_results_dataset(self._results(), PercentileData(), 1e-2),
         )
 
@@ -367,7 +367,7 @@ class TestCompareJson:
         derived ``within_tol_rate`` is ``1.0`` and ``all_within_tol`` is True.
         Otherwise the cobre value diverges past the default ``1e-2`` tolerance.
         """
-        from cobre_bridge.comparators.results import ResultComparison
+        from cobre_bridge.comparators.model import ResultComparison
 
         cobre_value = 100.0 if within_tol else 110.0
         abs_diff = 0.0 if within_tol else 10.0
@@ -404,7 +404,7 @@ class TestCompareJson:
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.alignment.build_entity_alignment",
+            "cobre_bridge.comparators.newave.alignment.build_entity_alignment",
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
@@ -419,11 +419,11 @@ class TestCompareJson:
         within_tol: bool,
     ) -> None:
         from cobre_bridge.comparators.analyze import build_results_dataset
-        from cobre_bridge.comparators.results import PercentileData
+        from cobre_bridge.comparators.model import PercentileData
 
         self._patch_common(monkeypatch)
         monkeypatch.setattr(
-            "cobre_bridge.comparators.results.compare_results",
+            "cobre_bridge.comparators.newave.results.compare_results",
             lambda **k: build_results_dataset(
                 self._results(within_tol=within_tol), PercentileData(), 1e-2
             ),
@@ -487,7 +487,7 @@ class TestCompareJson:
             raise CobreReadError("bad parquet")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.results.compare_results",
+            "cobre_bridge.comparators.newave.results.compare_results",
             _raise,
         )
         cobre_dir = tmp_path / "cobre"
@@ -529,7 +529,7 @@ class TestCompareJson:
             return read_cobre_bus_aggregates(cobre_dir)
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.results.compare_results",
+            "cobre_bridge.comparators.newave.results.compare_results",
             _raise,
         )
 
@@ -617,7 +617,7 @@ class TestCompareConfigEnvPrecedence:
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.alignment.build_entity_alignment",
+            "cobre_bridge.comparators.newave.alignment.build_entity_alignment",
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
@@ -630,7 +630,7 @@ class TestCompareConfigEnvPrecedence:
     ) -> dict[str, object]:
         """Patch ``compare_results`` with a recorder; return the captured kwargs."""
         from cobre_bridge.comparators.analyze import build_results_dataset
-        from cobre_bridge.comparators.results import PercentileData
+        from cobre_bridge.comparators.model import PercentileData
 
         captured: dict[str, object] = {}
 
@@ -639,7 +639,7 @@ class TestCompareConfigEnvPrecedence:
             return build_results_dataset([], PercentileData(), 1e-2)
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.results.compare_results", _recorder
+            "cobre_bridge.comparators.newave.results.compare_results", _recorder
         )
         return captured
 

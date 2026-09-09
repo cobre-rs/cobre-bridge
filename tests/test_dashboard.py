@@ -40,7 +40,7 @@ from cobre_bridge.dashboard.tabs import (
     collect_required_js,
     get_renderable_tabs,
 )
-from cobre_bridge.ui.html import build_html
+from cobre_bridge.ui.html.document import build_html
 from tests.conftest import hydro_with_group
 
 # ---------------------------------------------------------------------------

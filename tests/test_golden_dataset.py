@@ -31,7 +31,7 @@ import polars as pl
 
 from cobre_bridge.comparators import export
 from cobre_bridge.comparators.analyze import build_results_dataset
-from cobre_bridge.comparators.results import PercentileData, ResultComparison
+from cobre_bridge.comparators.model import PercentileData, ResultComparison
 from tests.golden_utils import assert_frame_golden, assert_json_golden
 
 

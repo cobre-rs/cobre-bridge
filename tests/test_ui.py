@@ -10,8 +10,8 @@ import plotly.graph_objects as go
 import pytest
 from plotly.offline import get_plotlyjs_version
 
-from cobre_bridge.ui.css import PLANT_EXPLORER_CSS, comparison_css, dashboard_css
-from cobre_bridge.ui.html import (
+from cobre_bridge.ui.html.css import PLANT_EXPLORER_CSS, comparison_css, dashboard_css
+from cobre_bridge.ui.html.document import (
     build_html,
     chart_grid,
     collapsible_section,
@@ -21,8 +21,12 @@ from cobre_bridge.ui.html import (
     section_title,
     wrap_chart,
 )
-from cobre_bridge.ui.js import PLANT_EXPLORER_JS, PLOTLY_TITLE_SHIM_JS, TAB_SWITCH_JS
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.js import (
+    PLANT_EXPLORER_JS,
+    PLOTLY_TITLE_SHIM_JS,
+    TAB_SWITCH_JS,
+)
+from cobre_bridge.ui.html.plotly import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
     fig_to_html,

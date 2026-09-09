@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cobre_bridge.comparators.verdict import build_compare_verdict
 from cobre_bridge.ui.console import (
     compare_row_style,
     get_console,
@@ -17,6 +16,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.comparators.verdict import CompareVerdict
 
 
 def _fmt_metric(x: float) -> str:
@@ -32,17 +32,13 @@ def _fmt_metric(x: float) -> str:
     return f"{x:,.3f}"
 
 
-# Dataset-driven formatting: numbers are single-sourced from dataset.summary rows
-# and dataset.metadata so the console and the file artifacts derive from ONE
-# analysis; the Rich tables only restyle those same numbers.
-
-
 def print_results_summary_from_dataset(
     dataset: ComparisonDataset,
     newave_dir: Path,
     cobre_output_dir: Path,
-    reference_label: str = "NEWAVE",
     *,
+    verdict: CompareVerdict,
+    reference_label: str = "NEWAVE",
     console: Console | None = None,
 ) -> None:
     """Print the results comparison summary (Rich table) from the canonical dataset.
@@ -60,10 +56,14 @@ def print_results_summary_from_dataset(
         Path to the source model case directory.
     cobre_output_dir:
         Path to the Cobre output directory.
+    verdict:
+        The pre-built compare verdict to render at the top of the summary.
+        Built by the caller (``cli/compare.py``) via ``build_compare_verdict``
+        so this ``ui`` module never calls into ``comparators``.
     reference_label:
         Display name for the reference model in the printed header/labels.
-        Defaults to ``"NEWAVE"``; ``compare newave`` (this function's only
-        caller) uses that default.
+        Defaults to ``"NEWAVE"`` (``compare newave``); ``compare decomp``
+        overrides it with ``"DECOMP"``.
     console:
         The stdout console to render through. Defaults to :func:`get_console`
         so direct callers (tests) keep working unchanged; the CLI passes its
@@ -71,7 +71,7 @@ def print_results_summary_from_dataset(
     """
     target = console or get_console()
 
-    render_compare_verdict(build_compare_verdict(dataset), console=target)
+    render_compare_verdict(verdict, console=target)
 
     target.print()
     target.print(
@@ -143,12 +143,7 @@ def print_results_summary_from_dataset(
 def _footer_counts(dataset: ComparisonDataset) -> tuple[int, dict[str, int]]:
     """Return the results footer ``(total, by_entity_type)`` from metadata.
 
-    Args:
-        dataset: The results dataset built by ``build_results_dataset``.
-
-    Returns:
-        A pair of the total comparison count and the per-entity-type count map.
-        Missing/ill-typed metadata yields ``(0, {})``.
+    Missing/ill-typed metadata yields ``(0, {})``.
     """
     raw = dataset.metadata.get("footer_counts")
     if not isinstance(raw, dict):

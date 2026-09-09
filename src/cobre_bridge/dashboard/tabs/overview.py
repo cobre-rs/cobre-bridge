@@ -21,14 +21,14 @@ from cobre_bridge.dashboard.chart_helpers import (
     make_chart_card,
 )
 from cobre_bridge.dashboard.data import _stage_avg_mw
-from cobre_bridge.ui.html import (
+from cobre_bridge.ui.html.document import (
     chart_grid,
     metric_card,
     metrics_grid,
     section_title,
     wrap_chart,
 )
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.plotly import (
     MARGIN_DEFAULTS,
     apply_stage_date_axis,
     apply_standard_layout,

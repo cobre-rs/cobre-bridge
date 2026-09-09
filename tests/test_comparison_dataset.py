@@ -18,7 +18,7 @@ from cobre_bridge.comparators.dataset import (
     _metadata_from_json,
     _metadata_to_json,
 )
-from cobre_bridge.comparators.results import ResultComparison
+from cobre_bridge.comparators.model import ResultComparison
 from tests.golden_utils import _strip_chart_id
 
 if TYPE_CHECKING:

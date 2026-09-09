@@ -7,8 +7,8 @@ import polars as pl
 from cobre_bridge.comparators import analyze
 from cobre_bridge.comparators.charts._shared import _build_interactive_detail_html
 from cobre_bridge.comparators.html_report import COLOR_COBRE
-from cobre_bridge.ui.html import escape_text
-from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
+from cobre_bridge.ui.html.document import escape_text
+from cobre_bridge.ui.html.plotly import plotly_div as _plotly_div
 
 # kind -> (pmo column, cobre-bridge column, pmo label, cobre-bridge label). Each
 # productivity-comparison scatter is a *static* conversion-fidelity check: The source

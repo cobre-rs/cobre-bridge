@@ -1,4 +1,4 @@
-"""Branch coverage for ``comparators.constraints_compare``.
+"""Branch coverage for ``comparators.constraints`` and ``comparators.newave.constraints``.
 
 Uses the committed converted-Cobre-input fixture (``generic_constraints.json``
 + ``generic_constraint_bounds.parquet``) and a NEWAVE ``MEDIAS-USIH.CSV``
@@ -24,18 +24,20 @@ from cobre_bridge.cobre.constraint_expr import (
     load_rho_acum_overrides,
     scales_storage_by_rho_acum,
 )
-from cobre_bridge.comparators.alignment import EntityAlignment
-from cobre_bridge.comparators.constraints_compare import (
-    _load_generic_constraint_bounds,
-    _load_generic_constraints,
-    _load_hydro_min_storage,
+from cobre_bridge.comparators.constraints import (
     _resolve_bound,
-    apply_vminop_useful_energy,
     evaluate_lhs_cobre,
-    evaluate_lhs_newave,
+    load_generic_constraint_bounds,
+    load_generic_constraints,
     per_stage_bounds,
 )
-from cobre_bridge.comparators.newave_readers import read_medias_hydro
+from cobre_bridge.comparators.newave.alignment import EntityAlignment
+from cobre_bridge.comparators.newave.constraints import (
+    _load_hydro_min_storage,
+    apply_vminop_useful_energy,
+    evaluate_lhs_newave,
+)
+from cobre_bridge.comparators.newave.readers import read_medias_hydro
 from cobre_bridge.newave.id_map import NewaveIdMap
 
 _COBRE_INPUT_DIR = (
@@ -131,12 +133,12 @@ def _write_hydros_json(cobre_case_dir: Path) -> None:
 
 class TestLoadGenericConstraints:
     def test_parses_sense_free_constraints(self) -> None:
-        constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
+        constraints = load_generic_constraints(_COBRE_INPUT_DIR)
         assert {c["id"] for c in constraints} == {_NON_VMINOP_ID, _VMINOP_ID}
         assert all("sense" not in c for c in constraints)
 
     def test_degrades_to_empty_list_on_missing_file(self, tmp_path: Path) -> None:
-        assert _load_generic_constraints(tmp_path) == []
+        assert load_generic_constraints(tmp_path) == []
 
     def test_degrades_to_empty_list_and_warns_on_malformed_json(
         self, tmp_path: Path, caplog
@@ -146,7 +148,7 @@ class TestLoadGenericConstraints:
         path.write_text("{not valid json")
 
         with caplog.at_level(logging.WARNING):
-            constraints = _load_generic_constraints(tmp_path)
+            constraints = load_generic_constraints(tmp_path)
 
         assert constraints == []
         assert "could not be parsed" in caplog.text
@@ -154,14 +156,14 @@ class TestLoadGenericConstraints:
 
 class TestLoadGenericConstraintBounds:
     def test_parses_f3_bound_endpoints(self) -> None:
-        df = _load_generic_constraint_bounds(_COBRE_INPUT_DIR)
+        df = load_generic_constraint_bounds(_COBRE_INPUT_DIR)
         assert "bound" not in df.columns
         assert set(df["constraint_id"].to_list()) == {_NON_VMINOP_ID, _VMINOP_ID}
 
     def test_degrades_to_empty_typed_frame_on_missing_file(
         self, tmp_path: Path
     ) -> None:
-        df = _load_generic_constraint_bounds(tmp_path)
+        df = load_generic_constraint_bounds(tmp_path)
         assert df.is_empty()
         assert set(df.columns) == {
             "constraint_id",
@@ -220,7 +222,7 @@ class TestResolveBound:
 
 class TestPerStageBounds:
     def test_resolves_both_constraints_from_fixture(self) -> None:
-        bounds = _load_generic_constraint_bounds(_COBRE_INPUT_DIR)
+        bounds = load_generic_constraint_bounds(_COBRE_INPUT_DIR)
         resolved = per_stage_bounds(bounds)
         assert resolved[_NON_VMINOP_ID][0].shape == "<="
         assert resolved[_NON_VMINOP_ID][0].value == 200.0
@@ -228,7 +230,7 @@ class TestPerStageBounds:
         assert resolved[_VMINOP_ID][0].value == 100.0
 
     def test_max_stage_drops_later_stages(self) -> None:
-        bounds = _load_generic_constraint_bounds(_COBRE_INPUT_DIR)
+        bounds = load_generic_constraint_bounds(_COBRE_INPUT_DIR)
         resolved = per_stage_bounds(bounds, max_stage=0)
         assert set(resolved[_NON_VMINOP_ID]) == {0}
 
@@ -247,12 +249,12 @@ class TestPerStageBounds:
 
 class TestScalesStorageByRhoAcum:
     def test_true_for_rho_acum_scaled_storage(self) -> None:
-        constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
+        constraints = load_generic_constraints(_COBRE_INPUT_DIR)
         vminop = next(c for c in constraints if c["id"] == _VMINOP_ID)
         assert scales_storage_by_rho_acum(vminop) is True
 
     def test_false_for_plain_generation_sum(self) -> None:
-        constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
+        constraints = load_generic_constraints(_COBRE_INPUT_DIR)
         non_vminop = next(c for c in constraints if c["id"] == _NON_VMINOP_ID)
         assert scales_storage_by_rho_acum(non_vminop) is False
 
@@ -264,7 +266,7 @@ class TestScalesStorageByRhoAcum:
 
 class TestEvaluateLhsNewave:
     def test_evaluates_non_vminop_generation_sum(self) -> None:
-        constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
+        constraints = load_generic_constraints(_COBRE_INPUT_DIR)
         nw_hydro = read_medias_hydro(_NEWAVE_DIR)
         lhs = evaluate_lhs_newave(
             constraints, nw_hydro, _EMPTY_LINE_MEANS, EntityAlignment(), _id_map(), 1
@@ -276,7 +278,7 @@ class TestEvaluateLhsNewave:
     def test_vminop_rho_param_constraint_is_skipped(self) -> None:
         """@rho_acum params have no source-model-side productivity handy, so
         the generic evaluator skips those stages entirely (no zero row)."""
-        constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
+        constraints = load_generic_constraints(_COBRE_INPUT_DIR)
         nw_hydro = read_medias_hydro(_NEWAVE_DIR)
         lhs = evaluate_lhs_newave(
             constraints, nw_hydro, _EMPTY_LINE_MEANS, EntityAlignment(), _id_map(), 1
@@ -294,7 +296,7 @@ class TestEvaluateLhsNewave:
 class TestEvaluateLhsCobre:
     def test_evaluates_both_constraints_from_simulation(self, tmp_path: Path) -> None:
         _write_sim_hydros_parquet(tmp_path)
-        constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
+        constraints = load_generic_constraints(_COBRE_INPUT_DIR)
 
         lhs = evaluate_lhs_cobre(constraints, tmp_path)
 
@@ -317,7 +319,7 @@ class TestEvaluateLhsCobre:
     def test_degrades_to_empty_frame_when_no_hydro_simulation(
         self, tmp_path: Path, caplog
     ) -> None:
-        constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
+        constraints = load_generic_constraints(_COBRE_INPUT_DIR)
         with caplog.at_level(logging.WARNING):
             lhs = evaluate_lhs_cobre(constraints, tmp_path)
         assert lhs.is_empty()
@@ -335,7 +337,7 @@ class TestEvaluateLhsCobreRhoAcumOverride:
         self, tmp_path: Path
     ) -> None:
         _write_sim_hydros_parquet(tmp_path)
-        constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
+        constraints = load_generic_constraints(_COBRE_INPUT_DIR)
         # Deliberately different from the sim default (0.5 at stage 0, see
         # _write_sim_hydros_parquet) -- mirrors the real VminOP/RHE gap
         # between cobre's computed default and the LP's per_stage override.
@@ -403,8 +405,8 @@ class TestApplyVminopUsefulEnergy:
         _write_hydros_json(cobre_case_dir)
         _write_sim_hydros_parquet(cobre_output_dir)
 
-        constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
-        gc_bounds = _load_generic_constraint_bounds(_COBRE_INPUT_DIR)
+        constraints = load_generic_constraints(_COBRE_INPUT_DIR)
+        gc_bounds = load_generic_constraint_bounds(_COBRE_INPUT_DIR)
         nw_hydro = read_medias_hydro(_NEWAVE_DIR)
         id_map = _id_map()
         gc_lhs_nw = evaluate_lhs_newave(
@@ -477,8 +479,8 @@ class TestApplyVminopUsefulEnergy:
     def test_missing_rho_or_vmin_or_sim_degrades_with_warning(
         self, tmp_path: Path, caplog
     ) -> None:
-        constraints = _load_generic_constraints(_COBRE_INPUT_DIR)
-        gc_bounds = _load_generic_constraint_bounds(_COBRE_INPUT_DIR)
+        constraints = load_generic_constraints(_COBRE_INPUT_DIR)
+        gc_bounds = load_generic_constraint_bounds(_COBRE_INPUT_DIR)
         nw_hydro = read_medias_hydro(_NEWAVE_DIR)
         id_map = _id_map()
         # No generic_parameters.json / hydros.json / simulation written under

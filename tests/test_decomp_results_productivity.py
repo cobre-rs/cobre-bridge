@@ -1,4 +1,4 @@
-"""Productivity tab tests for ``comparators.decomp_results``.
+"""Productivity tab tests for ``comparators.decomp.results``.
 
 Third carve out of the legacy ``test_decomp_results_compare.py`` mega file
 (TST-13): per-(plant, stage) realized productivity derivation and the
@@ -16,14 +16,14 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from cobre_bridge.comparators.decomp_results import (
+from cobre_bridge.comparators.decomp.results import (
     _PRODUCTIVITY_TURBINED_EPS,
     _AlignedDecompFrames,
     _hydro_productivity_results,
     build_decomp_dataset,
 )
+from cobre_bridge.comparators.model import ResultComparison
 from cobre_bridge.comparators.report_builder import build_comparison_report
-from cobre_bridge.comparators.results import ResultComparison
 from tests.conftest import _aligned_fixture, _extract_tab_content, _patch_aligned_frames
 
 
@@ -31,7 +31,7 @@ class TestHydroProductivityResults:
     """``_hydro_productivity_results`` derives per-(plant, stage) realized
     productivity = generation / turbined from the E1 hydro
     ``ResultComparison`` rows, mirroring
-    ``cobre_bridge.comparators.results``'s own ``_compare_hydros``
+    ``cobre_bridge.comparators.newave.results``'s own ``_compare_hydros``
     productivity derivation (same ratio, same zero-guard)."""
 
     @staticmethod

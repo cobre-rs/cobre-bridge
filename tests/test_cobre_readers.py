@@ -326,11 +326,11 @@ class TestCliExitCodeTwoOnCobreReadError:
                 return_value=MagicMock(),
             ),
             patch(
-                "cobre_bridge.comparators.alignment.build_entity_alignment",
+                "cobre_bridge.comparators.newave.alignment.build_entity_alignment",
                 return_value=object(),
             ),
             patch(
-                "cobre_bridge.comparators.results.compare_results",
+                "cobre_bridge.comparators.newave.results.compare_results",
                 side_effect=_raise,
             ),
         ):

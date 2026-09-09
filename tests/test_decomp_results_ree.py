@@ -1,4 +1,4 @@
-"""REE energy rollup tests for ``comparators.decomp_results``.
+"""REE energy rollup tests for ``comparators.decomp.results``.
 
 Third carve out of the legacy ``test_decomp_results_compare.py`` mega file
 (TST-13): the REE membership map, Cobre-side and DECOMP-side per-REE
@@ -17,7 +17,7 @@ import polars as pl
 import pytest
 
 from cobre_bridge.comparators.charts import ree_energy_chart
-from cobre_bridge.comparators.decomp_results import (
+from cobre_bridge.comparators.decomp.results import (
     _EARM_MWH_TO_MWMES,
     _cobre_ree_sums,
     _decomp_ree_frame,
@@ -25,8 +25,8 @@ from cobre_bridge.comparators.decomp_results import (
     _ree_result_comparisons,
     build_decomp_dataset,
 )
+from cobre_bridge.comparators.model import ResultComparison
 from cobre_bridge.comparators.report_builder import build_comparison_report
-from cobre_bridge.comparators.results import ResultComparison
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.decomp.id_map import DecompIdMap
 from tests.conftest import (
@@ -137,7 +137,7 @@ class TestDecompReeFrame:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_ree",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_ree",
             lambda *_a, **_k: _ree_dec_oper_ree_fixture(),
         )
 
@@ -267,7 +267,7 @@ class TestReeResultComparisons:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_membership",
+            "cobre_bridge.comparators.decomp.results.read_relato_membership",
             lambda *_a, **_k: _ree_membership_fixture(),
         )
         # ``read_dec_oper_ree`` left unmocked -> raises FileNotFoundError.

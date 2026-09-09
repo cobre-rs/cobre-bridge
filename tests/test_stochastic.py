@@ -34,7 +34,7 @@ from cobre_bridge.dashboard.tabs.stochastic import (
     can_render,
     render,
 )
-from cobre_bridge.ui.css import dashboard_css
+from cobre_bridge.ui.html.css import dashboard_css
 
 # ---------------------------------------------------------------------------
 # Fixtures / factories

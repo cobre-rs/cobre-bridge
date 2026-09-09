@@ -16,10 +16,10 @@ import polars as pl
 import pytest
 
 from cobre_bridge.cobre.readers import read_cobre_fpha_planes
-from cobre_bridge.comparators.alignment import HydroEntity
 from cobre_bridge.comparators.analyze import build_fpha_comparison
 from cobre_bridge.comparators.fpha import dense_grid
-from cobre_bridge.comparators.newave_readers import read_fpha_grid, read_fpha_planes
+from cobre_bridge.comparators.newave.alignment import HydroEntity
+from cobre_bridge.comparators.newave.readers import read_fpha_grid, read_fpha_planes
 
 # --------------------------------------------------------------------------- #
 # Readers — absence gate                                                       #

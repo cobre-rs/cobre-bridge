@@ -143,7 +143,7 @@ def read_dec_oper_rhesoft(case_dir: Path) -> pl.DataFrame:
 
     This is the RHE (soft minimum-stored-energy) constraints'
     own achieved LHS, straight from the source model -- the Constraints tab's
-    DECOMP-side LHS derivation (`decomp_results._rhe_lhs_lookup`) reads
+    DECOMP-side LHS derivation (`results._rhe_lhs_lookup`) reads
     ``valor_MW``/``violacao_absoluta_MW`` from here rather than re-deriving
     the register's ρ_acum-weighted cascade sum a second time."""
     return _read_dec_oper(case_dir, "dec_oper_rhesoft.csv", DecOperRheSoft)
@@ -170,7 +170,7 @@ def read_dec_oper_evap(case_dir: Path) -> pl.DataFrame:
     Unlike `read_dec_oper_usih`/`read_dec_oper_ree`, this table carries no
     ``patamar`` column -- it is already one row per (stage, node, scenario,
     plant), with no sub-stage block breakdown to fold. The
-    source for the evaporation comparison (`decomp_results.
+    source for the evaporation comparison (`results.
     _evaporation_result_comparisons`), which reconciles
     ``evaporacao_calculada_hm3`` (hm³) against Cobre's ``evaporation_m3s``
     (m³/s) via the stage's own hours."""
@@ -184,7 +184,7 @@ def read_dec_oper_ree(case_dir: Path) -> pl.DataFrame:
     row per (stage, node, scenario, REE). The DECOMP-side source
     for the REE energy rollup -- Cobre has no REE entity, so its counterpart
     is a membership-weighted sum of plant output (see
-    `decomp_results._ree_result_comparisons`)."""
+    `results._ree_result_comparisons`)."""
     return _read_dec_oper(case_dir, "dec_oper_ree.csv", DecOperRee)
 
 
@@ -277,7 +277,7 @@ def read_relato_costs(case_dir: Path) -> pl.DataFrame:
     the per-submarket marginal cost) from the general report.
 
     Costs are **native k$**, unconverted -- converted once in the analysis
-    layer, see `decomp_results.reconcile_kdollars_to_reais`.
+    layer, see `results.reconcile_kdollars_to_reais`.
     """
     return _read_relato_table(case_dir, "relatorio_operacao_custos")
 
@@ -301,7 +301,7 @@ def read_relato2_costs(case_dir: Path) -> pl.DataFrame:
     unlike the mandatory ``relato``/``dec_oper_*`` readers.
 
     Costs are **native k$**, unconverted -- converted once in the analysis
-    layer, see `decomp_results.reconcile_kdollars_to_reais`.
+    layer, see `results.reconcile_kdollars_to_reais`.
     """
     path = _resolve_relato2(case_dir)
     if path is None:
@@ -317,7 +317,7 @@ def read_relato_expected_cost(case_dir: Path) -> pl.DataFrame:
     column per stage) from the general report.
 
     Costs are **native k$**, unconverted -- converted once in the analysis
-    layer, see `decomp_results.reconcile_kdollars_to_reais`.
+    layer, see `results.reconcile_kdollars_to_reais`.
     """
     return _read_relato_table(case_dir, "custo_operacao_valor_esperado")
 
@@ -330,7 +330,7 @@ def read_relato_membership(case_dir: Path) -> pl.DataFrame:
 
     The sole source that attributes a hydro plant to its REE --
     neither `DecompIdMap` nor any ``dec_oper_*`` table carries that
-    membership, so `decomp_results._ree_result_comparisons` rolls Cobre's
+    membership, so `results._ree_result_comparisons` rolls Cobre's
     per-plant energy up to the REE level through this table instead.
     """
     return _read_relato_table(case_dir, "uhes_rees_submercados")
@@ -346,7 +346,7 @@ def read_relato_membership(case_dir: Path) -> pl.DataFrame:
 # no per-hydro/stage key). None of the three carries the fitted PLANE
 # coefficients themselves (those live in a fourth, undeclared file,
 # `avl_cortesfpha.rvN` / idecomp's `AvlCortesFpha`) -- see
-# `decomp_results._fpha_metrics`'s docstring for how it works
+# `results._fpha_metrics`'s docstring for how it works
 # around that gap.
 
 
@@ -402,7 +402,7 @@ def read_dec_estatfpha(case_dir: Path) -> pl.DataFrame:
     of total generation, split reservoir vs. run-of-river) -- unlike every
     other reader in this module, it carries no per-hydro or per-stage key,
     so it cannot join into a per-(hydro, stage) frame; it is surfaced as
-    deck-wide context only (see `decomp_results._log_decomp_fpha_deck_summary`).
+    deck-wide context only (see `results._log_decomp_fpha_deck_summary`).
     """
     path = _resolve_revisioned_file(case_dir, "dec_estatfpha")
     if path is None:

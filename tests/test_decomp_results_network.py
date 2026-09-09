@@ -1,4 +1,4 @@
-"""Network-tab tests for ``comparators.decomp_results``.
+"""Network-tab tests for ``comparators.decomp.results``.
 
 Second carve out of the legacy ``test_decomp_results_compare.py`` mega file
 (TST-13): corridor/line alignment, the DECOMP interchange side, line entity
@@ -18,7 +18,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from cobre_bridge.comparators.decomp_results import (
+from cobre_bridge.comparators.decomp.results import (
     _corridor_line_alignment,
     _interc_side,
     _line_bounds_and_meta,
@@ -178,7 +178,7 @@ class TestIntercSide:
         self, monkeypatch: pytest.MonkeyPatch, frame: pl.DataFrame
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_interc",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_interc",
             lambda *_args, **_kwargs: frame,
         )
 
@@ -431,7 +431,7 @@ class TestLineResultComparisons:
             raise FileNotFoundError("dec_oper_interc.csv not found")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_interc", _boom
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_interc", _boom
         )
 
         results, unresolved = _line_result_comparisons(tmp_path, tmp_path, id_map, [])
@@ -446,13 +446,13 @@ class TestLineResultComparisons:
         line_meta = [_line_entry(0, 0, 1, name="SE-S")]
         output_dir = _write_lines_json(tmp_path, line_meta)
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_interc",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_interc",
             lambda *_args, **_kwargs: _dec_oper_interc_frame(
                 de=1, para=2, origem_mw=250.0
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_line_means",
             lambda *_args, **_kwargs: pl.DataFrame(
                 {"entity_id": [0], "stage_id": [0], "net_flow_mw": [240.0]}
@@ -486,7 +486,7 @@ class TestLineResultComparisons:
         id_map = _decomp_id_map_three_subsystems()
         output_dir = _write_lines_json(tmp_path, [_line_entry(0, 0, 1)])
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_interc",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_interc",
             lambda *_args, **_kwargs: _dec_oper_interc_frame(
                 de=1, para=3, origem_mw=90.0
             ),
@@ -555,16 +555,16 @@ def _patch_network(
     ``_patch_aligned_frames``'s "patch at the seam" convention."""
     _patch_shared_case(monkeypatch, id_map=id_map)
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.read_dec_oper_interc",
+        "cobre_bridge.comparators.decomp.results.read_dec_oper_interc",
         lambda *_args, **_kwargs: interc_frame,
     )
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.cobre_readers.read_cobre_line_means",
+        "cobre_bridge.comparators.decomp.results.cobre_readers.read_cobre_line_means",
         lambda *_args, **_kwargs: cobre_line_means,
     )
     if cobre_line_pct is not None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_line_percentiles",
             lambda *_args, **_kwargs: cobre_line_pct,
         )

@@ -23,14 +23,14 @@ from cobre_bridge.dashboard.tabs.constraints_utils import (
     build_constraints_summary_table,
     derive_constraint_shape,
 )
-from cobre_bridge.ui.html import (
+from cobre_bridge.ui.html.document import (
     escape_attr,
     json_for_script,
     metric_card,
     metrics_grid,
     section_title,
 )
-from cobre_bridge.ui.plotly_helpers import stage_x_dates, stage_x_labels
+from cobre_bridge.ui.html.plotly import stage_x_dates, stage_x_labels
 
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData

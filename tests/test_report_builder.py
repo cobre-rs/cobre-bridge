@@ -42,9 +42,10 @@ from typer.testing import CliRunner
 
 from cobre_bridge.comparators.analyze import build_results_dataset
 from cobre_bridge.comparators.dataset import ComparisonDataset
-from cobre_bridge.comparators.report import print_results_summary_from_dataset
+from cobre_bridge.comparators.model import PercentileData, ResultComparison
 from cobre_bridge.comparators.report_builder import build_comparison_report
-from cobre_bridge.comparators.results import PercentileData, ResultComparison
+from cobre_bridge.comparators.verdict import build_compare_verdict
+from cobre_bridge.ui.compare_summary import print_results_summary_from_dataset
 from tests.conftest import _extract_tab_content
 from tests.golden_utils import assert_html_golden
 from tests.test_chart_helpers import _report_fixture_pct, _report_fixture_results
@@ -151,7 +152,13 @@ def test_print_results_summary_default_label_unchanged() -> None:
     """No ``reference_label`` argument prints the pre-ticket "NEWAVE" header/labels."""
     dataset = _build_dataset()
 
-    text = _capture(print_results_summary_from_dataset, dataset, _NW_DIR, _COBRE_DIR)
+    text = _capture(
+        print_results_summary_from_dataset,
+        dataset,
+        _NW_DIR,
+        _COBRE_DIR,
+        verdict=build_compare_verdict(dataset),
+    )
 
     assert "Cobre vs NEWAVE Results Comparison" in text
     assert f"NEWAVE case:  {_NW_DIR}" in text
@@ -162,15 +169,21 @@ def test_print_results_summary_explicit_newave_label_matches_default() -> None:
     """Explicitly passing ``reference_label="NEWAVE"`` matches the default text."""
     dataset = _build_dataset()
 
+    verdict = build_compare_verdict(dataset)
     text_default = _capture(
-        print_results_summary_from_dataset, dataset, _NW_DIR, _COBRE_DIR
+        print_results_summary_from_dataset,
+        dataset,
+        _NW_DIR,
+        _COBRE_DIR,
+        verdict=verdict,
     )
     text_explicit = _capture(
         print_results_summary_from_dataset,
         dataset,
         _NW_DIR,
         _COBRE_DIR,
-        "NEWAVE",
+        verdict=verdict,
+        reference_label="NEWAVE",
     )
 
     assert text_default == text_explicit
@@ -185,7 +198,8 @@ def test_print_results_summary_decomp_label_relabels_header() -> None:
         dataset,
         _NW_DIR,
         _COBRE_DIR,
-        "DECOMP",
+        verdict=build_compare_verdict(dataset),
+        reference_label="DECOMP",
     )
 
     assert "Cobre vs DECOMP Results Comparison" in text
@@ -208,6 +222,7 @@ def test_print_results_summary_decomp_label_keeps_newave_dir_param_name() -> Non
         dataset,
         newave_dir=_NW_DIR,
         cobre_output_dir=_COBRE_DIR,
+        verdict=build_compare_verdict(dataset),
         reference_label="DECOMP",
     )
 
@@ -241,7 +256,7 @@ def _patch_compare_context(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        "cobre_bridge.comparators.alignment.build_entity_alignment",
+        "cobre_bridge.comparators.newave.alignment.build_entity_alignment",
         lambda *a, **k: MagicMock(),
     )
 
@@ -273,7 +288,7 @@ def _invoke_compare_newave(
 
     _patch_compare_context(monkeypatch)
     monkeypatch.setattr(
-        "cobre_bridge.comparators.results.compare_results",
+        "cobre_bridge.comparators.newave.results.compare_results",
         lambda **_k: _one_row_results_dataset(),
     )
     argv = [
@@ -314,7 +329,7 @@ def test_compare_newave_no_color_summary_has_no_ansi_escapes(
         original(*args, **kwargs)
 
     monkeypatch.setattr(
-        "cobre_bridge.comparators.report.print_results_summary_from_dataset", _spy
+        "cobre_bridge.ui.compare_summary.print_results_summary_from_dataset", _spy
     )
 
     no_color_result = _invoke_compare_newave(
@@ -360,7 +375,7 @@ class TestReportBuilderProductivityGateDecoupling:
             _PRODUCTIVITY_DETAIL_SCHEMA,
             build_results_dataset,
         )
-        from cobre_bridge.comparators.results import PercentileData
+        from cobre_bridge.comparators.model import PercentileData
 
         results = [
             ResultComparison(
@@ -428,7 +443,7 @@ class TestReportBuilderProductivityGateDecoupling:
         the realized section must NOT render. Proves the two gates are
         independent, not still coupled to one another."""
         from cobre_bridge.comparators.analyze import build_results_dataset
-        from cobre_bridge.comparators.results import PercentileData
+        from cobre_bridge.comparators.model import PercentileData
 
         detail_only = self._both_frames_dataset()
         pct = PercentileData(productivity_detail=detail_only.render.productivity_detail)
@@ -448,7 +463,7 @@ class TestReportBuilderReeSectionByteIdentityGuard:
 
     def test_newave_shaped_dataset_has_no_ree_section(self) -> None:
         from cobre_bridge.comparators.analyze import build_results_dataset
-        from cobre_bridge.comparators.results import PercentileData
+        from cobre_bridge.comparators.model import PercentileData
 
         results = [
             ResultComparison(

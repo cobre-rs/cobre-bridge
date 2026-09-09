@@ -1,4 +1,4 @@
-"""Constraints tab tests for ``comparators.decomp_results``.
+"""Constraints tab tests for ``comparators.decomp.results``.
 
 Third carve out of the legacy ``test_decomp_results_compare.py`` mega file
 (TST-13): the register-term lookup helpers (stage-frame, storage, term
@@ -16,7 +16,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from cobre_bridge.comparators.decomp_results import (
+from cobre_bridge.comparators.decomp.results import (
     _CONSTRAINT_NAME_RE,
     _GC_LHS_SCHEMA,
     _UNSUPPORTED_TERM_VARIABLES,
@@ -265,7 +265,7 @@ class TestGenericConstraintLhsDecomp:
             lambda *_a, **_k: census,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usih",
             lambda *_a, **_k: _usih_frame(
                 [
                     {"codigo_usina": 155, "estagio": 1, "geracao_MW": 3000.0},
@@ -274,11 +274,11 @@ class TestGenericConstraintLhsDecomp:
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usit",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_rhesoft",
             lambda *_a, **_k: pl.DataFrame(),
         )
 
@@ -309,21 +309,21 @@ class TestGenericConstraintLhsDecomp:
             lambda *_a, **_k: census,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usih",
             lambda *_a, **_k: _usih_frame(
                 [{"codigo_usina": 10, "estagio": 1, "volume_util_final_hm3": 120.0}]
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usit",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_rhesoft",
             lambda *_a, **_k: pl.DataFrame(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_hydro_metadata",
             lambda *_a, **_k: {0: {"min_storage_hm3": 30.0}},
         )
@@ -350,15 +350,15 @@ class TestGenericConstraintLhsDecomp:
             id_map=DecompIdMap(bus_codes=(), bus_names=()),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usih",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usit",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_rhesoft",
             lambda *_a, **_k: pl.DataFrame(
                 {
                     "estagio": [4],
@@ -411,17 +411,17 @@ class TestGenericConstraintLhsDecomp:
             lambda *_a, **_k: census,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usih",
             lambda *_a, **_k: _usih_frame(
                 [{"codigo_usina": 141, "estagio": 1, "geracao_MW": 1000.0}]
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usit",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_rhesoft",
             lambda *_a, **_k: pl.DataFrame(),
         )
 
@@ -438,15 +438,15 @@ class TestGenericConstraintLhsDecomp:
             id_map=DecompIdMap(bus_codes=(), bus_names=()),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usih",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usit",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_rhesoft",
             lambda *_a, **_k: pl.DataFrame(),
         )
 
@@ -468,17 +468,17 @@ class TestGenericConstraintLhsDecomp:
             id_map=DecompIdMap(bus_codes=(), bus_names=()),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usih",
             lambda *_a, **_k: _usih_frame(
                 [{"codigo_usina": 155, "estagio": 1, "geracao_MW": 3000.0}]
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usit",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_rhesoft",
             lambda *_a, **_k: pl.DataFrame(),
         )
 
@@ -490,7 +490,7 @@ class TestGenericConstraintLhsDecomp:
 class TestBuildDecompDatasetConstraints:
     """ticket-019: fills ``gc_constraints``/``gc_bounds``/``gc_lhs_newave``/
     ``gc_lhs_cobre`` -- the cobre-side pieces reused verbatim from
-    `constraints_compare`, the DECOMP-side LHS newly derived."""
+    `constraints`, the DECOMP-side LHS newly derived."""
 
     def test_no_generic_constraints_case_renders_empty_no_error(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -533,15 +533,15 @@ class TestBuildDecompDatasetConstraints:
         ]
         output_dir = _write_generic_constraints_case(case_dir, constraints, bound_rows)
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usih",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usit",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_rhesoft",
             lambda *_a, **_k: pl.DataFrame(
                 {
                     "estagio": [1],
@@ -554,7 +554,7 @@ class TestBuildDecompDatasetConstraints:
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.constraints_compare.evaluate_lhs_cobre",
+            "cobre_bridge.comparators.constraints.evaluate_lhs_cobre",
             lambda *_a, **_k: pl.DataFrame(
                 {"constraint_id": [0], "stage_id": [0], "lhs_value": [3000.0]}
             ),
@@ -609,15 +609,15 @@ class TestBuildDecompDatasetConstraints:
         ]
         output_dir = _write_generic_constraints_case(case_dir, constraints, bound_rows)
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usih",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usih",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_usit",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_usit",
             _no_dec_oper,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_rhesoft",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_rhesoft",
             lambda *_a, **_k: pl.DataFrame(
                 {
                     "estagio": [1],
@@ -638,7 +638,7 @@ class TestBuildDecompDatasetConstraints:
             )
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.constraints_compare.evaluate_lhs_cobre",
+            "cobre_bridge.comparators.constraints.evaluate_lhs_cobre",
             _capturing_evaluate_lhs_cobre,
         )
 

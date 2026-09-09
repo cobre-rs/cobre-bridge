@@ -26,7 +26,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from cobre_bridge.comparators.decomp_results import build_decomp_dataset
+from cobre_bridge.comparators.decomp.results import build_decomp_dataset
 from cobre_bridge.comparators.report_builder import build_comparison_report
 from tests.conftest import _extract_tab_content
 

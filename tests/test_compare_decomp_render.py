@@ -4,7 +4,7 @@ Point ``compare decomp`` at the same ``print_results_summary_from_dataset``
 renderer ``compare newave`` uses (``reference_label="DECOMP"``), console-
 threaded and ``--quiet``-gated. Tier 1 -- pure Python, no ``cobre`` import, no
 ``example/`` deck: the dataset build is stubbed via the same
-``cobre_bridge.comparators.decomp_results.build_decomp_dataset`` monkeypatch
+``cobre_bridge.comparators.decomp.results.build_decomp_dataset`` monkeypatch
 seam ``TestCompareDecompCommand`` below and ``TestCompareDiagnosticsWiring``
 (``tests/test_compare.py``) already use.
 """
@@ -31,7 +31,7 @@ def _two_variable_dataset() -> ComparisonDataset:
     ``build_decomp_dataset`` does), so ``footer_counts`` metadata and the
     per-variable ``summary`` rows the renderer reads are both populated."""
     from cobre_bridge.comparators.analyze import build_results_dataset
-    from cobre_bridge.comparators.results import PercentileData, ResultComparison
+    from cobre_bridge.comparators.model import PercentileData, ResultComparison
 
     results = [
         ResultComparison(
@@ -78,7 +78,7 @@ def _invoke(argv_tail: list[str], monkeypatch: pytest.MonkeyPatch, deck: Path) -
         classmethod(lambda cls, _dir: make_decomp_case(Path("decomp"))),
     )
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+        "cobre_bridge.comparators.decomp.results.build_decomp_dataset",
         lambda *_args, **_kwargs: _two_variable_dataset(),
     )
     argv = ["compare", "decomp", str(deck), str(deck), *argv_tail]
@@ -147,7 +147,7 @@ class TestCompareDecompCommand:
         )
         resolved_dataset = dataset if dataset is not None else _fake_dataset()
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+            "cobre_bridge.comparators.decomp.results.build_decomp_dataset",
             lambda *_args, **_kwargs: resolved_dataset,
         )
         return CliRunner().invoke(app, argv)
@@ -277,7 +277,7 @@ class TestCompareDecompCommand:
         from cobre_bridge.cli import app
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.build_decomp_dataset", _boom
+            "cobre_bridge.comparators.decomp.results.build_decomp_dataset", _boom
         )
         result = CliRunner().invoke(
             app, ["compare", "decomp", str(tmp_path), str(tmp_path)]
@@ -303,7 +303,7 @@ class TestCompareDecompCommand:
         from cobre_bridge.cli import app
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.build_decomp_dataset", _boom
+            "cobre_bridge.comparators.decomp.results.build_decomp_dataset", _boom
         )
         result = CliRunner().invoke(
             app, ["compare", "decomp", str(tmp_path), str(tmp_path)]
@@ -428,7 +428,7 @@ class TestCompareDecompCommand:
         from cobre_bridge.cli import app
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.build_decomp_dataset", _boom
+            "cobre_bridge.comparators.decomp.results.build_decomp_dataset", _boom
         )
         result = CliRunner().invoke(
             app, ["compare", "decomp", str(tmp_path), str(tmp_path)]

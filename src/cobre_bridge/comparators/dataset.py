@@ -21,7 +21,7 @@ import polars as pl
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cobre_bridge.comparators.results import ResultComparison
+    from cobre_bridge.comparators.model import ResultComparison
 
 
 class SchemaError(ValueError):
@@ -322,6 +322,37 @@ class ComparisonDataset:
         return dataset
 
 
+def footer_counts(dataset: ComparisonDataset) -> tuple[int, dict[str, int]]:
+    """Return the results footer ``(total, by_entity_type)`` from metadata.
+
+    Args:
+        dataset: The results dataset built by ``build_results_dataset``.
+
+    Returns:
+        A pair of the total comparison count and the per-entity-type count map.
+        Missing/ill-typed metadata yields ``(0, {})``.
+    """
+    raw = dataset.metadata.get("footer_counts")
+    if not isinstance(raw, dict):
+        return 0, {}
+    total = raw.get("total", 0)
+    return (
+        int(total) if isinstance(total, int) else 0,
+        _as_int_counts(raw.get("by_entity_type")),
+    )
+
+
+def _as_int_counts(value: object) -> dict[str, int]:
+    """Coerce a metadata mapping into a ``dict[str, int]`` (empty on mismatch)."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: count
+        for key, count in value.items()
+        if isinstance(key, str) and isinstance(count, int)
+    }
+
+
 def _metadata_to_json(meta: dict[str, object]) -> dict[str, object]:
     """Build the JSON-serializable view of a metadata dict.
 
@@ -454,7 +485,7 @@ def _render_from_json(view: dict[str, object]) -> RenderInputs:
             wrapped frame entry declares an unknown frame type; the message
             names the offending key.
     """
-    from cobre_bridge.comparators.results import ResultComparison
+    from cobre_bridge.comparators.model import ResultComparison
 
     raw = _metadata_from_json(view)
 

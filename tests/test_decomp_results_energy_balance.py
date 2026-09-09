@@ -1,4 +1,4 @@
-"""Energy Balance tab tests for ``comparators.decomp_results``.
+"""Energy Balance tab tests for ``comparators.decomp.results``.
 
 Second carve out of the legacy ``test_decomp_results_compare.py`` mega file
 (TST-13): the System tab's cobre bus percentile metadata and the Energy
@@ -15,7 +15,7 @@ import polars as pl
 import pytest
 
 from cobre_bridge.comparators.charts import _BALANCE_VARS
-from cobre_bridge.comparators.decomp_results import (
+from cobre_bridge.comparators.decomp.results import (
     _energy_balance_frames,
     build_decomp_dataset,
 )
@@ -47,7 +47,7 @@ class TestSystemTabMetadata:
     ) -> None:
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_bus_percentiles",
             lambda *_args, **_kwargs: self._bus_percentiles(),
         )
@@ -85,7 +85,7 @@ class TestSystemTabMetadata:
     ) -> None:
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_bus_percentiles",
             lambda *_args, **_kwargs: self._bus_percentiles(),
         )
@@ -149,7 +149,7 @@ class TestEnergyBalanceFrames:
 
     def _patch_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_sist",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_sist",
             lambda *_args, **_kwargs: _dec_oper_sist_frame(),
         )
 
@@ -259,7 +259,7 @@ class TestEnergyBalanceFrames:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_sist",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_sist",
             lambda *_args, **_kwargs: pl.DataFrame(),
         )
 
@@ -317,17 +317,17 @@ class TestBuildDecompDatasetEnergyBalance:
     def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_aligned_frames(monkeypatch, _balance_fixture())
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_bus_aggregates",
             lambda *_args, **_kwargs: _bus_aggregates_fixture(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_bus_metadata",
             lambda *_args, **_kwargs: {0: {"name": "SE"}},
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_hydro_means",
             lambda *_args, **_kwargs: _cobre_hydro_means_fixture(),
         )

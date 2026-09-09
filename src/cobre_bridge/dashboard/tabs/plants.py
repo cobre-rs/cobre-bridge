@@ -13,8 +13,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import polars as pl
 
-from cobre_bridge.ui.html import (
-    _sparkline_svg,
+from cobre_bridge.ui.html.document import (
     chart_grid,
     collapsible_section,
     escape_attr,
@@ -22,10 +21,11 @@ from cobre_bridge.ui.html import (
     json_for_script,
     plant_explorer_table,
     section_title,
+    sparkline_svg,
     wrap_chart,
 )
-from cobre_bridge.ui.js import PLANT_EXPLORER_JS, SUB_TAB_JS
-from cobre_bridge.ui.plotly_helpers import stage_x_dates
+from cobre_bridge.ui.html.js import PLANT_EXPLORER_JS, SUB_TAB_JS
+from cobre_bridge.ui.html.plotly import stage_x_dates
 
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
@@ -586,7 +586,7 @@ def build_thermal_explorer(
         cost_per_mwh: float = d.get("cost_per_mwh", 0)
         gen_p50: list[float] = d.get("gen_p50", [])
         gen_spark = (
-            _sparkline_svg(gen_p50, "#F5A623")
+            sparkline_svg(gen_p50, "#F5A623")
             if len(gen_p50) >= 2 and any(v != 0 for v in gen_p50)
             else ""
         )
@@ -811,7 +811,7 @@ def build_hydro_explorer(
         vol_max: float = d.get("vol_max", 0)
         gen_p50: list[float] = d.get("gen_p50", [])
         gen_spark = (
-            _sparkline_svg(gen_p50, "#2196F3")
+            sparkline_svg(gen_p50, "#2196F3")
             if len(gen_p50) >= 2 and any(v != 0 for v in gen_p50)
             else ""
         )

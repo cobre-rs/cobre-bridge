@@ -7,7 +7,7 @@ import re
 import pandas as pd
 import plotly.graph_objects as go
 
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.plotly import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
     _normalize_plotly_titles,
@@ -134,7 +134,7 @@ def _percentile_df() -> pd.DataFrame:
 
 def test_add_mean_p50_band_builds_traces_from_promoted_home() -> None:
     """The band helper, promoted from dashboard.chart_helpers, still builds the
-    mean/p50/band trace triple from its new ``ui.plotly_helpers`` home."""
+    mean/p50/band trace triple from its new ``ui.html.plotly`` home."""
     fig = go.Figure()
     result = add_mean_p50_band(fig, _percentile_df(), "stage_id", "Hydro", "#3B82F6")
 

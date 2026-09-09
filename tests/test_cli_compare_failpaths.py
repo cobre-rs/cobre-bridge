@@ -64,7 +64,7 @@ def _patch_compare_context(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        "cobre_bridge.comparators.alignment.build_entity_alignment",
+        "cobre_bridge.comparators.newave.alignment.build_entity_alignment",
         lambda *a, **k: MagicMock(),
     )
     monkeypatch.setattr("cobre_bridge.cobre.readers.read_cobre_lines", lambda _dir: [])
@@ -73,7 +73,7 @@ def _patch_compare_context(monkeypatch: pytest.MonkeyPatch) -> None:
 def _fake_results_dataset() -> object:
     """A one-row within-tol dataset built through the shared assembly kernel."""
     from cobre_bridge.comparators.analyze import build_results_dataset
-    from cobre_bridge.comparators.results import PercentileData, ResultComparison
+    from cobre_bridge.comparators.model import PercentileData, ResultComparison
 
     results = [
         ResultComparison(
@@ -150,7 +150,7 @@ class TestCompareNewaveBadFormat:
     ) -> None:
         _patch_compare_context(monkeypatch)
         monkeypatch.setattr(
-            "cobre_bridge.comparators.results.compare_results",
+            "cobre_bridge.comparators.newave.results.compare_results",
             lambda **k: _fake_results_dataset(),
         )
         cobre_dir = tmp_path / "cobre"
@@ -185,7 +185,7 @@ class TestCompareNewaveBadFormat:
         to stderr. Mirrors the pre-existing ``bogus`` stderr/exit-2 assertions."""
         _patch_compare_context(monkeypatch)
         monkeypatch.setattr(
-            "cobre_bridge.comparators.results.compare_results",
+            "cobre_bridge.comparators.newave.results.compare_results",
             lambda **k: _fake_results_dataset(),
         )
         cobre_dir = tmp_path / "cobre"
@@ -221,7 +221,7 @@ class TestCompareDecompReadError:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+            "cobre_bridge.comparators.decomp.results.build_decomp_dataset",
             self._raise_read_error,
         )
 
@@ -241,7 +241,7 @@ class TestCompareDecompReadError:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+            "cobre_bridge.comparators.decomp.results.build_decomp_dataset",
             self._raise_read_error,
         )
 
@@ -263,7 +263,7 @@ class TestCompareNewaveSuccessStillExitsZero:
     ) -> None:
         _patch_compare_context(monkeypatch)
         monkeypatch.setattr(
-            "cobre_bridge.comparators.results.compare_results",
+            "cobre_bridge.comparators.newave.results.compare_results",
             lambda **k: _fake_results_dataset(),
         )
         cobre_dir = tmp_path / "cobre"

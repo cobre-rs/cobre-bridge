@@ -33,7 +33,7 @@ from cobre_bridge.comparators.fpha import (
     FPHA_SURFACE_SCHEMA,
     dense_grid,
 )
-from cobre_bridge.comparators.results import build_results_summary
+from cobre_bridge.comparators.model import build_results_summary
 from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
 
 if TYPE_CHECKING:
@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 
     import pandas as pd
 
-    from cobre_bridge.comparators.alignment import EntityAlignment, HydroEntity
-    from cobre_bridge.comparators.results import PercentileData, ResultComparison
+    from cobre_bridge.comparators.model import PercentileData, ResultComparison
+    from cobre_bridge.comparators.newave.alignment import EntityAlignment, HydroEntity
 
 _LOG = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ def summary_frame_from_results(
 ) -> pl.DataFrame:
     """Project the existing per-variable summary into a ``SUMMARY_SCHEMA`` frame.
 
-    Calls the canonical :func:`cobre_bridge.comparators.results.build_results_summary`
+    Calls the canonical :func:`cobre_bridge.comparators.model.build_results_summary`
     and turns its ``by_variable`` mapping into one row per variable. The numbers
     are carried verbatim from that summary — no statistic is recomputed here, so
     console and HTML aggregates derive from the same analysis.
@@ -255,7 +255,8 @@ def results_footer_counts(
     """Compute the results-summary footer counts as JSON-native metadata.
 
     Mirrors the footer of
-    :func:`cobre_bridge.comparators.report.print_results_summary`, which prints
+    :func:`cobre_bridge.ui.compare_summary.print_results_summary_from_dataset`,
+    which prints
     ``summary.total`` and the per-entity-type comparison counts. The counts are
     derived here inline (one increment per comparison row) so the console footer
     can be rendered from the dataset metadata without reaching back into
@@ -293,7 +294,7 @@ def build_results_dataset(
     :class:`~cobre_bridge.comparators.dataset.RenderInputs` the report reads
     (the raw ``results`` list plus every non-tidy artifact drained from
     ``pct``). Both the NEWAVE track (this function) and the DECOMP track
-    (``decomp_results.build_decomp_dataset``, which calls this function with
+    (``decomp.results.build_decomp_dataset``, which calls this function with
     its own populated ``pct``) construct ``render`` through this single
     shared path, so the two tracks can never drift apart on the render
     surface. Validates before returning.

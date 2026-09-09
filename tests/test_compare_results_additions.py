@@ -10,9 +10,9 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from cobre_bridge.comparators.alignment import EntityAlignment, LineEntity
-from cobre_bridge.comparators.results import (
-    ResultComparison,
+from cobre_bridge.comparators.model import ResultComparison
+from cobre_bridge.comparators.newave.alignment import EntityAlignment, LineEntity
+from cobre_bridge.comparators.newave.results import (
     _build_gen_max_overlay,
     _compare_lines,
     _compare_system_spillage,
@@ -211,10 +211,10 @@ class TestCompareLines:
 class TestHtmlReportNewSections:
     def test_renders_new_tab_and_sections(self) -> None:
         from cobre_bridge.comparators.analyze import build_results_dataset
+        from cobre_bridge.comparators.model import PercentileData
         from cobre_bridge.comparators.report_builder import (
             build_comparison_report,
         )
-        from cobre_bridge.comparators.results import PercentileData
 
         results = [
             ResultComparison(

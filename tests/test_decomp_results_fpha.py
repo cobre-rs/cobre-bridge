@@ -1,4 +1,4 @@
-"""FPHA fit-fidelity tests for ``comparators.decomp_results``.
+"""FPHA fit-fidelity tests for ``comparators.decomp.results``.
 
 Third carve out of the legacy ``test_decomp_results_compare.py`` mega file
 (TST-13): the "Fitted production functions (FPHA)" fallback-(b) metrics --
@@ -17,7 +17,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from cobre_bridge.comparators.decomp_results import _fpha_metrics, build_decomp_dataset
+from cobre_bridge.comparators.decomp.results import _fpha_metrics, build_decomp_dataset
 from cobre_bridge.comparators.report_builder import build_comparison_report
 from cobre_bridge.decomp.id_map import DecompIdMap
 from tests.conftest import _aligned_fixture, _patch_aligned_frames, _patch_shared_case
@@ -82,12 +82,12 @@ def _patch_fpha_planes_and_deviations(monkeypatch: pytest.MonkeyPatch) -> None:
     sources (``n_v`` stays null; the deck-wide summary is only logged).
     """
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.cobre_readers.read_cobre_fpha_planes",
+        "cobre_bridge.comparators.decomp.results.cobre_readers.read_cobre_fpha_planes",
         lambda *_a, **_k: _fpha_cobre_planes_fixture(),
     )
     _patch_shared_case(monkeypatch, id_map=_fpha_id_map())
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.read_dec_desvfpha",
+        "cobre_bridge.comparators.decomp.results.read_dec_desvfpha",
         lambda *_a, **_k: _fpha_deviations_fixture(),
     )
 
@@ -102,12 +102,12 @@ class TestFphaMetrics:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_fpha_planes",
             lambda *_a, **_k: _fpha_cobre_planes_fixture(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_desvfpha",
+            "cobre_bridge.comparators.decomp.results.read_dec_desvfpha",
             lambda *_a, **_k: _fpha_deviations_fixture(),
         )
 
@@ -139,7 +139,7 @@ class TestFphaMetrics:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_fpha_planes",
             lambda *_a, **_k: _fpha_cobre_planes_fixture(),
         )
@@ -149,7 +149,7 @@ class TestFphaMetrics:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_fpha_planes",
             lambda *_a, **_k: _fpha_cobre_planes_fixture(),
         )
@@ -163,12 +163,12 @@ class TestFphaMetrics:
         all (no hydro codes declared) never reaches the Cobre planes it
         would otherwise match."""
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_fpha_planes",
             lambda *_a, **_k: _fpha_cobre_planes_fixture(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_desvfpha",
+            "cobre_bridge.comparators.decomp.results.read_dec_desvfpha",
             lambda *_a, **_k: _fpha_deviations_fixture(),
         )
         no_hydros = DecompIdMap(bus_codes=(1,), bus_names=("SE",))

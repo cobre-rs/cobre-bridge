@@ -23,7 +23,7 @@ from cobre_bridge.comparators.dataset import (
     TIDY_SCHEMA,
     ComparisonDataset,
 )
-from cobre_bridge.comparators.results import PercentileData, ResultComparison
+from cobre_bridge.comparators.model import PercentileData, ResultComparison
 
 
 def _newave_dataset(*, all_within_tol: bool) -> ComparisonDataset:
@@ -107,7 +107,7 @@ def _patch_newave_context(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        "cobre_bridge.comparators.alignment.build_entity_alignment",
+        "cobre_bridge.comparators.newave.alignment.build_entity_alignment",
         lambda *a, **k: MagicMock(),
     )
     monkeypatch.setattr("cobre_bridge.cobre.readers.read_cobre_lines", lambda _dir: [])
@@ -118,7 +118,7 @@ def _invoke_newave(
 ) -> Any:
     _patch_newave_context(monkeypatch)
     monkeypatch.setattr(
-        "cobre_bridge.comparators.results.compare_results",
+        "cobre_bridge.comparators.newave.results.compare_results",
         lambda **_kwargs: dataset,
     )
     cobre_dir = tmp_path / "cobre"
@@ -141,7 +141,7 @@ def _invoke_decomp(
         classmethod(lambda cls, _dir: make_decomp_case(Path("decomp"))),
     )
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+        "cobre_bridge.comparators.decomp.results.build_decomp_dataset",
         lambda *_args, **_kwargs: dataset,
     )
     return CliRunner().invoke(

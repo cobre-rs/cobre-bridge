@@ -52,7 +52,7 @@ from cobre_bridge.dashboard.tabs.performance_charts import (
     chart_timing_waterfall,
     chart_worker_wall_time_distribution,
 )
-from cobre_bridge.ui.html import (
+from cobre_bridge.ui.html.document import (
     chart_grid,
     collapsible_section,
     metric_card,
@@ -60,7 +60,7 @@ from cobre_bridge.ui.html import (
     section_title,
     wrap_chart,
 )
-from cobre_bridge.ui.plotly_helpers import fig_to_html
+from cobre_bridge.ui.html.plotly import fig_to_html
 from cobre_bridge.ui.theme import COLORS
 
 if TYPE_CHECKING:

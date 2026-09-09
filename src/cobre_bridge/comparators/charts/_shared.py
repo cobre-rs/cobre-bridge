@@ -1,7 +1,7 @@
 """Cross-subject chart render helpers: layer 0 of the ``charts`` package.
 
-Imports only external modules (``analyze``, ``ui.html``, ``html_report``
-colors, ``ui.plotly_helpers``) — never a sibling subject submodule, so every
+Imports only external modules (``analyze``, ``ui.html.document``, ``html_report``
+colors, ``ui.html.plotly``) — never a sibling subject submodule, so every
 subject can depend on this module without risking a cycle.
 """
 
@@ -14,10 +14,10 @@ from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
 )
-from cobre_bridge.comparators.results import ResultComparison
-from cobre_bridge.ui.html import escape_text, json_for_script
-from cobre_bridge.ui.plotly_helpers import LEGEND_DEFAULTS as _LEGEND
-from cobre_bridge.ui.plotly_helpers import MARGIN_DEFAULTS as _MARGIN
+from cobre_bridge.comparators.model import ResultComparison
+from cobre_bridge.ui.html.document import escape_text, json_for_script
+from cobre_bridge.ui.html.plotly import LEGEND_DEFAULTS as _LEGEND
+from cobre_bridge.ui.html.plotly import MARGIN_DEFAULTS as _MARGIN
 from cobre_bridge.ui.theme import BAND_FILL, BAND_LINE
 
 _BAND_FILL = BAND_FILL

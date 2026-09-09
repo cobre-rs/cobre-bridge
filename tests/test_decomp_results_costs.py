@@ -1,4 +1,4 @@
-"""Cost-frame tests for ``comparators.decomp_results``.
+"""Cost-frame tests for ``comparators.decomp.results``.
 
 Second carve out of the legacy ``test_decomp_results_compare.py`` mega file
 (TST-13): the DECOMP-side NPV/cost frames, scenario probabilities and
@@ -17,7 +17,7 @@ import polars as pl
 import pytest
 
 from cobre_bridge.comparators.charts import _COST_MAP
-from cobre_bridge.comparators.decomp_results import (
+from cobre_bridge.comparators.decomp.results import (
     _DEVIATION_VIOLATION_LABEL,
     _NW_COST_LABELS,
     _bus_side,
@@ -93,12 +93,12 @@ class TestCostFrames:
 
     def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato_costs",
             lambda *_args, **_kwargs: _relato_costs_frame(),
         )
         # No scenario-fan stage by default -- relato2 is optional.
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato2_costs",
             lambda *_args, **_kwargs: pl.DataFrame(),
         )
 
@@ -131,11 +131,11 @@ class TestCostFrames:
         stages, and its expected cost uses the real (unequal) tree
         probabilities -- not a 50/50 mean."""
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato_costs",
             lambda *_args, **_kwargs: _relato_costs_frame(),  # weekly stages 1, 2
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato2_costs",
             lambda *_args, **_kwargs: _relato2_costs_frame(),  # fan stage 3
         )
 
@@ -262,7 +262,7 @@ class TestCostFrames:
             raise FileNotFoundError("no relato.rvN found")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_costs", _boom
+            "cobre_bridge.comparators.decomp.results.read_relato_costs", _boom
         )
 
         with pytest.raises(FileNotFoundError):
@@ -304,11 +304,11 @@ class TestScenarioProbabilities:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato_costs",
             lambda *_a, **_k: _relato_costs_frame(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato2_costs",
             lambda *_a, **_k: _relato2_costs_frame(),
         )
 
@@ -331,11 +331,11 @@ class TestScenarioProbabilities:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato_costs",
             lambda *_a, **_k: _relato_costs_with_overlapping_fan_stage(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato2_costs",
             lambda *_a, **_k: _relato2_costs_frame(),
         )
 
@@ -355,10 +355,10 @@ class TestScenarioProbabilities:
             raise FileNotFoundError("no relato.rvN found")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_costs", _boom
+            "cobre_bridge.comparators.decomp.results.read_relato_costs", _boom
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato2_costs",
             lambda *_a, **_k: pl.DataFrame(),
         )
 
@@ -377,10 +377,10 @@ class TestScenarioProbabilities:
             raise FileNotFoundError("no relato.rvN found")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_costs", _boom
+            "cobre_bridge.comparators.decomp.results.read_relato_costs", _boom
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato2_costs",
             lambda *_a, **_k: _relato2_costs_frame(),
         )
 
@@ -481,15 +481,15 @@ class TestScenarioWeightingIntegration:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_sist",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_sist",
             lambda *_a, **_k: _bus_fan_stage_frame(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato_costs",
             lambda *_a, **_k: _relato_costs_frame(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato2_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato2_costs",
             lambda *_a, **_k: _relato2_costs_frame(),
         )
 
@@ -512,7 +512,7 @@ class TestScenarioWeightingIntegration:
         degrades to empty, and `_bus_side` must reproduce the exact
         pre-existing unweighted-mean value on the fan stage."""
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_dec_oper_sist",
+            "cobre_bridge.comparators.decomp.results.read_dec_oper_sist",
             lambda *_a, **_k: _bus_fan_stage_frame(),
         )
 
@@ -594,19 +594,19 @@ class TestBuildDecompDatasetCosts:
         # unaffected by that stub) so patching ``read_relato_costs`` below
         # actually takes effect through it.
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results._cost_frames", _cost_frames
+            "cobre_bridge.comparators.decomp.results._cost_frames", _cost_frames
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_costs",
+            "cobre_bridge.comparators.decomp.results.read_relato_costs",
             lambda *_args, **_kwargs: _relato_costs_frame(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_cost_breakdown",
             lambda *_args, **_kwargs: _cobre_cost_breakdown_fixture(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_stage_costs",
             lambda *_args, **_kwargs: _cobre_stage_costs_fixture(),
         )

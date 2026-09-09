@@ -19,8 +19,8 @@ from cobre_bridge.ui.console import print_status, render_diagnostics, spinner
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cobre_bridge.comparators.alignment import EntityAlignment
     from cobre_bridge.comparators.dataset import ComparisonDataset
+    from cobre_bridge.comparators.newave.alignment import EntityAlignment
     from cobre_bridge.newave.case import NewaveCase
     from cobre_bridge.newave.id_map import NewaveIdMap
 
@@ -43,7 +43,7 @@ def _load_compare_context(
     missing (``FileNotFoundError`` from ``NewaveCase.from_directory``).
     """
     from cobre_bridge.cobre.readers import read_cobre_lines
-    from cobre_bridge.comparators.alignment import build_entity_alignment
+    from cobre_bridge.comparators.newave.alignment import build_entity_alignment
     from cobre_bridge.newave.case import NewaveCase
 
     try:
@@ -209,11 +209,11 @@ def _run_newave_comparison(args: CompareArgs) -> None:
     args = _resolve_compare_settings(args)
 
     from cobre_bridge.cobre.readers import CobreReadError
-    from cobre_bridge.comparators.report import print_results_summary_from_dataset
-    from cobre_bridge.comparators.results import compare_results
+    from cobre_bridge.comparators.newave.results import compare_results
     from cobre_bridge.comparators.verdict import build_compare_verdict, compare_status
     from cobre_bridge.core import diagnostics as dx
     from cobre_bridge.core.errors import CobrePartitionMissingError
+    from cobre_bridge.ui.compare_summary import print_results_summary_from_dataset
 
     newave_dir: Path = args.source_dir
     cobre_output_dir: Path = args.cobre_output_dir
@@ -245,13 +245,19 @@ def _run_newave_comparison(args: CompareArgs) -> None:
         except (CobreReadError, CobrePartitionMissingError) as exc:
             _fail("compare newave", args, exc, 2)
 
+    verdict = build_compare_verdict(dataset)
+
     # Print text summary (sourced from the dataset). Under --json the Rich tables
     # are suppressed in favour of a single machine-readable verdict on stdout;
     # under --quiet the summary is suppressed too, but diagnostics still render.
     if not args.json_output:
         if not args.quiet:
             print_results_summary_from_dataset(
-                dataset, newave_dir, cobre_output_dir, console=args.out_console()
+                dataset,
+                newave_dir,
+                cobre_output_dir,
+                verdict=verdict,
+                console=args.out_console(),
             )
         render_diagnostics(
             compare_diagnostics, console=args.err_console(), quiet=args.quiet
@@ -278,7 +284,6 @@ def _run_newave_comparison(args: CompareArgs) -> None:
         # ``status`` is DECOUPLED from the exit code (this command always
         # exits 0) and uses the shared ``compare_status`` vocabulary, so an
         # empty dataset reports "no-comparable-rows", not "mismatch".
-        verdict = build_compare_verdict(dataset)
         status = compare_status(dataset)
         _emit_convert_json(
             build_verdict(
@@ -299,12 +304,12 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
     not read would be worse than stopping.
     """
     from cobre_bridge.cobre.readers import CobreReadError
-    from cobre_bridge.comparators.decomp_results import build_decomp_dataset
-    from cobre_bridge.comparators.report import print_results_summary_from_dataset
-    from cobre_bridge.comparators.verdict import compare_status
+    from cobre_bridge.comparators.decomp.results import build_decomp_dataset
+    from cobre_bridge.comparators.verdict import build_compare_verdict, compare_status
     from cobre_bridge.core import diagnostics as dx
     from cobre_bridge.core.errors import CobrePartitionMissingError, FieldParseError
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.ui.compare_summary import print_results_summary_from_dataset
 
     # Resolved before the read (unlike the pre-dataset ordering) so
     # ``build_decomp_dataset`` below gets a concrete tolerance rather than the
@@ -331,12 +336,15 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
         ) as exc:
             _fail("compare decomp", args, exc, 2)
 
+    verdict = build_compare_verdict(dataset)
+
     if not args.json_output:
         if not args.quiet:
             print_results_summary_from_dataset(
                 dataset,
                 args.source_dir,
                 args.cobre_output_dir,
+                verdict=verdict,
                 reference_label="DECOMP",
                 console=args.out_console(),
             )

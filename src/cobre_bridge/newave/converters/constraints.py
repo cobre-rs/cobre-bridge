@@ -188,7 +188,7 @@ def compute_accumulated_integrated_productivities(
     """Cascade-sum of per-plant stored-energy (EARM) productivity.
 
     Public, stable seam: the results comparator
-    (:mod:`cobre_bridge.comparators.results`) calls this to build its
+    (:mod:`cobre_bridge.comparators.newave.results`) calls this to build its
     productivity-detail tab, so the ``(cadastro, confhd_df) -> {code: rho}``
     contract is shared across the converter↔comparator boundary. It is *not*
     interchangeable with :func:`compute_accumulated_productivities` (which uses

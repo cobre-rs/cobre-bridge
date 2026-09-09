@@ -18,7 +18,7 @@ import pyarrow as pa
 import pytest
 from plotly.offline import get_plotlyjs_version
 
-from cobre_bridge.comparators.results import (
+from cobre_bridge.comparators.model import (
     PercentileData,
     ResultComparison,
     build_results_summary,
@@ -108,14 +108,18 @@ class TestReportFormatting:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         from cobre_bridge.comparators.analyze import build_results_dataset
-        from cobre_bridge.comparators.report import (
+        from cobre_bridge.comparators.model import PercentileData
+        from cobre_bridge.comparators.verdict import build_compare_verdict
+        from cobre_bridge.ui.compare_summary import (
             print_results_summary_from_dataset,
         )
-        from cobre_bridge.comparators.results import PercentileData
 
         dataset = build_results_dataset([], PercentileData(), 1e-2)
         print_results_summary_from_dataset(
-            dataset, Path("/fake/nw"), Path("/fake/cobre")
+            dataset,
+            Path("/fake/nw"),
+            Path("/fake/cobre"),
+            verdict=build_compare_verdict(dataset),
         )
         out = capsys.readouterr().out
         assert "Results Comparison" in out
@@ -124,12 +128,13 @@ class TestReportFormatting:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         from cobre_bridge.comparators.analyze import build_results_dataset
-        from cobre_bridge.comparators.report import (
-            print_results_summary_from_dataset,
-        )
-        from cobre_bridge.comparators.results import (
+        from cobre_bridge.comparators.model import (
             PercentileData,
             ResultComparison,
+        )
+        from cobre_bridge.comparators.verdict import build_compare_verdict
+        from cobre_bridge.ui.compare_summary import (
+            print_results_summary_from_dataset,
         )
 
         results = [
@@ -159,7 +164,12 @@ class TestReportFormatting:
             ),
         ]
         dataset = build_results_dataset(results, PercentileData(), 1e-2)
-        print_results_summary_from_dataset(dataset, Path("/nw"), Path("/cobre"))
+        print_results_summary_from_dataset(
+            dataset,
+            Path("/nw"),
+            Path("/cobre"),
+            verdict=build_compare_verdict(dataset),
+        )
         out = capsys.readouterr().out
         assert "generation_mw" in out
         assert "2" in out  # the per-variable Count cell
@@ -193,7 +203,8 @@ class TestToleranceRowColouring:
 
     def test_results_row_colour_green_for_within_tol_red_otherwise(self) -> None:
         from cobre_bridge.comparators.analyze import build_results_dataset
-        from cobre_bridge.comparators.report import (
+        from cobre_bridge.comparators.verdict import build_compare_verdict
+        from cobre_bridge.ui.compare_summary import (
             print_results_summary_from_dataset,
         )
         from cobre_bridge.ui.console import compare_row_style
@@ -228,8 +239,13 @@ class TestToleranceRowColouring:
         dataset = build_results_dataset(results, PercentileData(), 1e-2)
 
         spy = _MakeTableSpy()
-        with patch("cobre_bridge.comparators.report.make_table", side_effect=spy):
-            print_results_summary_from_dataset(dataset, Path("/nw"), Path("/cobre"))
+        with patch("cobre_bridge.ui.compare_summary.make_table", side_effect=spy):
+            print_results_summary_from_dataset(
+                dataset,
+                Path("/nw"),
+                Path("/cobre"),
+                verdict=build_compare_verdict(dataset),
+            )
 
         # Rows are sorted by variable; derive the expected colour FROM the dataset
         # summary (never recompute tolerance) so the source-of-truth stays single.
@@ -326,7 +342,7 @@ class TestCompareVerdictExitCodes:
             ),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.alignment.build_entity_alignment",
+            "cobre_bridge.comparators.newave.alignment.build_entity_alignment",
             lambda *a, **k: MagicMock(),
         )
         monkeypatch.setattr(
@@ -355,7 +371,7 @@ class TestCompareVerdictExitCodes:
             ),
         ]
         monkeypatch.setattr(
-            "cobre_bridge.comparators.results.compare_results",
+            "cobre_bridge.comparators.newave.results.compare_results",
             lambda **k: build_results_dataset(results, PercentileData(), 1e-2),
         )
         cobre_dir = tmp_path / "cobre"
@@ -458,7 +474,7 @@ class TestCompareDiagnosticsWiring:
             return _fake_results_dataset()
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.results.compare_results",
+            "cobre_bridge.comparators.newave.results.compare_results",
             _compare_results_with_diagnostic,
         )
         cobre_dir = tmp_path / "cobre"
@@ -488,7 +504,7 @@ class TestCompareDiagnosticsWiring:
             return _fake_decomp_dataset()
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+            "cobre_bridge.comparators.decomp.results.build_decomp_dataset",
             _build_decomp_dataset_with_diagnostic,
         )
 
@@ -514,7 +530,7 @@ class TestCompareDiagnosticsWiring:
             return _fake_results_dataset()
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.results.compare_results",
+            "cobre_bridge.comparators.newave.results.compare_results",
             _compare_results_with_diagnostic,
         )
         cobre_dir = tmp_path / "cobre"
@@ -542,7 +558,7 @@ class TestCompareDiagnosticsWiring:
             return _fake_decomp_dataset()
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.build_decomp_dataset",
+            "cobre_bridge.comparators.decomp.results.build_decomp_dataset",
             _build_decomp_dataset_with_diagnostic,
         )
 
@@ -574,10 +590,10 @@ class TestHtmlReport:
 
     def test_build_comparison_report_no_crash(self) -> None:
         from cobre_bridge.comparators.analyze import build_results_dataset
+        from cobre_bridge.comparators.model import PercentileData
         from cobre_bridge.comparators.report_builder import (
             build_comparison_report,
         )
-        from cobre_bridge.comparators.results import PercentileData
 
         pct = PercentileData()
         dataset = build_results_dataset([], pct, 0.05)
@@ -587,10 +603,10 @@ class TestHtmlReport:
 
     def test_build_comparison_report_with_data(self) -> None:
         from cobre_bridge.comparators.analyze import build_results_dataset
+        from cobre_bridge.comparators.model import PercentileData
         from cobre_bridge.comparators.report_builder import (
             build_comparison_report,
         )
-        from cobre_bridge.comparators.results import PercentileData
 
         results = [
             ResultComparison(
@@ -618,7 +634,7 @@ class TestCompareHydrosProductivity:
 
     @staticmethod
     def _run():
-        from cobre_bridge.comparators.results import _compare_hydros
+        from cobre_bridge.comparators.newave.results import _compare_hydros
 
         # stage column min = 9 → offset 9 → stages map to 0 (turb>0) and 1
         # (turb==0, must be filtered out of the productivity comparison).
@@ -850,7 +866,7 @@ class TestEdgeCases:
 
     def test_newave_readers_missing_dir(self, tmp_path: Path) -> None:
         """The source model readers return empty DataFrames when dir missing."""
-        from cobre_bridge.comparators.newave_readers import (
+        from cobre_bridge.comparators.newave.readers import (
             read_medias_hydro,
             read_medias_system,
             read_medias_thermal,
@@ -939,10 +955,10 @@ class TestEdgeCases:
     def test_html_report_with_empty_results(self) -> None:
         """HTML report renders without error on empty results."""
         from cobre_bridge.comparators.analyze import build_results_dataset
+        from cobre_bridge.comparators.model import PercentileData
         from cobre_bridge.comparators.report_builder import (
             build_comparison_report,
         )
-        from cobre_bridge.comparators.results import PercentileData
 
         pct = PercentileData()
         dataset = build_results_dataset([], pct, 0.05)
@@ -1108,7 +1124,7 @@ class TestCompareResultsReturnsDataset:
         import pandas as pd
 
         cr = "cobre_bridge.cobre.readers."
-        nr = "cobre_bridge.comparators.newave_readers."
+        nr = "cobre_bridge.comparators.newave.readers."
         empty_pl = pl.DataFrame
         empty_pd = lambda *a, **k: pd.DataFrame()  # noqa: E731
 
@@ -1168,7 +1184,7 @@ class TestCompareResultsReturnsDataset:
 
         # Names / cadastro.
         monkeypatch.setattr(
-            "cobre_bridge.comparators.alignment.read_reference_names",
+            "cobre_bridge.comparators.newave.alignment.read_reference_names",
             lambda _case: ({}, {}, {}),
         )
         monkeypatch.setattr(
@@ -1181,12 +1197,11 @@ class TestCompareResultsReturnsDataset:
             "cobre_bridge.cobre.case_io.case_dir_for", lambda _d: tmp_path
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.constraints_compare._load_generic_constraints",
+            "cobre_bridge.comparators.constraints.load_generic_constraints",
             lambda _d: [],
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.constraints_compare."
-            "_load_generic_constraint_bounds",
+            "cobre_bridge.comparators.constraints.load_generic_constraint_bounds",
             lambda _d: empty_pl(),
         )
 
@@ -1194,7 +1209,7 @@ class TestCompareResultsReturnsDataset:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from cobre_bridge.comparators.dataset import ComparisonDataset
-        from cobre_bridge.comparators.results import compare_results
+        from cobre_bridge.comparators.newave.results import compare_results
 
         self._patch_all_readers(monkeypatch, tmp_path)
 
@@ -1302,7 +1317,7 @@ class TestProductivityDetail:
         assert read_cobre_productivity_detail(tmp_path / "nope") == {}
 
     def test_pmo_productivity_detail_missing_pmo(self, tmp_path: Path) -> None:
-        from cobre_bridge.comparators.newave_readers import (
+        from cobre_bridge.comparators.newave.readers import (
             read_pmo_productivity_detail,
         )
 
@@ -1358,11 +1373,11 @@ class TestProductivityDetail:
         """cb_point/equivalent/accumulated come from the converter, not Cobre."""
         import pandas as pd
 
-        from cobre_bridge.comparators.alignment import (
+        from cobre_bridge.comparators.analyze import build_productivity_detail
+        from cobre_bridge.comparators.newave.alignment import (
             EntityAlignment,
             HydroEntity,
         )
-        from cobre_bridge.comparators.analyze import build_productivity_detail
         from cobre_bridge.core.productivity import compute_productivity
 
         alignment = EntityAlignment(
@@ -1436,11 +1451,11 @@ class TestProductivityDetail:
         the dead-storage volume_minimo/maximo the converter freezes them off."""
         import pandas as pd
 
-        from cobre_bridge.comparators.alignment import (
+        from cobre_bridge.comparators.analyze import build_productivity_detail
+        from cobre_bridge.comparators.newave.alignment import (
             EntityAlignment,
             HydroEntity,
         )
-        from cobre_bridge.comparators.analyze import build_productivity_detail
 
         alignment = EntityAlignment(
             hydros=[HydroEntity(newave_code=4, cobre_id=7, name="ROR")]
@@ -1505,7 +1520,7 @@ class TestProductivityDetail:
     @staticmethod
     def _per_stage_results():
         """Per-stage productivity_mw_per_m3s ResultComparison rows, 2 plants."""
-        from cobre_bridge.comparators.results import ResultComparison
+        from cobre_bridge.comparators.model import ResultComparison
 
         rows: list[ResultComparison] = []
         for name, code, cid, base in (("ALPHA", 1, 0, 0.78), ("BETA", 2, 1, 0.40)):
@@ -1600,7 +1615,7 @@ class TestEvaluateLhsCobre:
 
     def test_evaluates_lhs_from_a_real_simulation_lazyframe(self) -> None:
         """A present simulation (LazyFrame, not None) must evaluate, not raise."""
-        from cobre_bridge.comparators.constraints_compare import evaluate_lhs_cobre
+        from cobre_bridge.comparators.constraints import evaluate_lhs_cobre
 
         hydros = pl.DataFrame(
             {
@@ -1617,7 +1632,7 @@ class TestEvaluateLhsCobre:
             return hydros if entity == "hydros" else None
 
         with patch(
-            "cobre_bridge.comparators.constraints_compare.scan_simulation_entity",
+            "cobre_bridge.comparators.constraints.scan_simulation_entity",
             side_effect=fake_scan,
         ):
             result = evaluate_lhs_cobre(self._storage_constraint(), Path("/out"))
@@ -1631,17 +1646,17 @@ class TestEvaluateLhsCobre:
 
     def test_missing_simulation_returns_empty(self) -> None:
         """Both entities absent (None) → empty frame, no error."""
-        from cobre_bridge.comparators.constraints_compare import evaluate_lhs_cobre
+        from cobre_bridge.comparators.constraints import evaluate_lhs_cobre
 
         with patch(
-            "cobre_bridge.comparators.constraints_compare.scan_simulation_entity",
+            "cobre_bridge.comparators.constraints.scan_simulation_entity",
             return_value=None,
         ):
             result = evaluate_lhs_cobre(self._storage_constraint(), Path("/out"))
         assert result.is_empty()
 
     def test_no_constraints_returns_empty_without_scanning(self) -> None:
-        from cobre_bridge.comparators.constraints_compare import evaluate_lhs_cobre
+        from cobre_bridge.comparators.constraints import evaluate_lhs_cobre
 
         result = evaluate_lhs_cobre([], Path("/out"))
         assert result.is_empty()
@@ -1688,19 +1703,19 @@ class TestGenericConstraintF3Loaders:
     def test_bounds_loader_missing_file_has_no_bound_column(
         self, tmp_path: Path
     ) -> None:
-        from cobre_bridge.comparators.constraints_compare import (
-            _load_generic_constraint_bounds,
+        from cobre_bridge.comparators.constraints import (
+            load_generic_constraint_bounds,
         )
 
-        df = _load_generic_constraint_bounds(tmp_path)
+        df = load_generic_constraint_bounds(tmp_path)
         assert "bound" not in df.columns
         assert {"bound_lower", "bound_upper"}.issubset(set(df.columns))
 
     def test_bounds_loader_reads_f3_parquet_endpoints(self, tmp_path: Path) -> None:
         import pyarrow.parquet as pq
 
-        from cobre_bridge.comparators.constraints_compare import (
-            _load_generic_constraint_bounds,
+        from cobre_bridge.comparators.constraints import (
+            load_generic_constraint_bounds,
         )
 
         constraints_dir = tmp_path / "constraints"
@@ -1718,14 +1733,14 @@ class TestGenericConstraintF3Loaders:
             constraints_dir / "generic_constraint_bounds.parquet",
         )
 
-        df = _load_generic_constraint_bounds(tmp_path)
+        df = load_generic_constraint_bounds(tmp_path)
         assert "bound" not in df.columns
         assert df["bound_lower"].to_list() == [10.0]
         assert df["bound_upper"].to_list() == [None]
 
     def test_constraints_loader_parses_sense_free_json(self, tmp_path: Path) -> None:
-        from cobre_bridge.comparators.constraints_compare import (
-            _load_generic_constraints,
+        from cobre_bridge.comparators.constraints import (
+            load_generic_constraints,
         )
 
         constraints_dir = tmp_path / "constraints"
@@ -1745,7 +1760,7 @@ class TestGenericConstraintF3Loaders:
             )
         )
 
-        constraints = _load_generic_constraints(tmp_path)
+        constraints = load_generic_constraints(tmp_path)
         assert len(constraints) == 1
         assert "sense" not in constraints[0]
         assert constraints[0]["name"] == "RE_1"
@@ -1771,7 +1786,7 @@ class TestPerStageBoundsResolution:
         )
 
     def test_resolves_ge_from_lower_endpoint(self) -> None:
-        from cobre_bridge.comparators.constraints_compare import per_stage_bounds
+        from cobre_bridge.comparators.constraints import per_stage_bounds
 
         resolved = per_stage_bounds(self._f3_bounds())
         assert resolved[0][0].value == 500.0
@@ -1779,7 +1794,7 @@ class TestPerStageBoundsResolution:
         assert resolved[0][1].value == 520.0
 
     def test_resolves_le_from_upper_endpoint(self) -> None:
-        from cobre_bridge.comparators.constraints_compare import per_stage_bounds
+        from cobre_bridge.comparators.constraints import per_stage_bounds
 
         resolved = per_stage_bounds(self._f3_bounds())
         assert resolved[1][0].value == 200.0
@@ -1787,7 +1802,7 @@ class TestPerStageBoundsResolution:
         assert resolved[1][1].value == 210.0
 
     def test_resolves_eq_from_either_endpoint(self) -> None:
-        from cobre_bridge.comparators.constraints_compare import per_stage_bounds
+        from cobre_bridge.comparators.constraints import per_stage_bounds
 
         resolved = per_stage_bounds(self._f3_bounds())
         assert resolved[2][0].value == 300.0
@@ -1803,8 +1818,8 @@ class TestAC3NumericRegressionAcrossF3Migration:
     def test_f3_limits_and_verdicts_match_pre_f3_content(self, tmp_path: Path) -> None:
         import pyarrow.parquet as pq
 
-        from cobre_bridge.comparators.constraints_compare import (
-            _load_generic_constraint_bounds,
+        from cobre_bridge.comparators.constraints import (
+            load_generic_constraint_bounds,
             per_stage_bounds,
         )
         from cobre_bridge.core.generic_constraint_format import sense_to_interval
@@ -1848,7 +1863,7 @@ class TestAC3NumericRegressionAcrossF3Migration:
             constraints_dir / "generic_constraint_bounds.parquet",
         )
 
-        gc_bounds = _load_generic_constraint_bounds(tmp_path)
+        gc_bounds = load_generic_constraint_bounds(tmp_path)
         assert "bound" not in gc_bounds.columns
         resolved = per_stage_bounds(gc_bounds)
 
@@ -1875,7 +1890,7 @@ class TestConstraintsChartShapeLabelFromBounds:
 
     def test_chart_title_uses_shape_derived_from_bounds(self) -> None:
         from cobre_bridge.comparators.charts import constraints_comparison_chart
-        from cobre_bridge.comparators.constraints_compare import ResolvedBound
+        from cobre_bridge.comparators.constraints import ResolvedBound
 
         constraints = [{"id": 0, "name": "VminOP_X"}]  # sense-free (F3)
         lhs_newave = pl.DataFrame(
@@ -1933,14 +1948,15 @@ class TestNoSenseOrSingleBoundColumnRemainsInComparators:
     @pytest.mark.parametrize(
         "relative_path",
         [
-            "src/cobre_bridge/comparators/constraints_compare.py",
+            "src/cobre_bridge/comparators/constraints.py",
+            "src/cobre_bridge/comparators/newave/constraints.py",
             "src/cobre_bridge/comparators/charts/__init__.py",
             "src/cobre_bridge/comparators/charts/_shared.py",
             "src/cobre_bridge/comparators/charts/costs.py",
             "src/cobre_bridge/comparators/charts/convergence.py",
             "src/cobre_bridge/comparators/charts/performance.py",
             "src/cobre_bridge/comparators/charts/spillage.py",
-            "src/cobre_bridge/comparators/results.py",
+            "src/cobre_bridge/comparators/newave/results.py",
         ],
     )
     def test_module_has_no_sense_or_bound_column_access(

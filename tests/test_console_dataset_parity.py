@@ -33,13 +33,14 @@ from pathlib import Path
 import polars as pl
 
 from cobre_bridge.comparators.analyze import build_results_dataset
-from cobre_bridge.comparators.report import (
-    _fmt_metric,
-    print_results_summary_from_dataset,
-)
-from cobre_bridge.comparators.results import (
+from cobre_bridge.comparators.model import (
     PercentileData,
     ResultComparison,
+)
+from cobre_bridge.comparators.verdict import build_compare_verdict
+from cobre_bridge.ui.compare_summary import (
+    _fmt_metric,
+    print_results_summary_from_dataset,
 )
 
 _NW = Path("/fake/nw")
@@ -142,11 +143,11 @@ def _one_hydro_pct() -> PercentileData:
     )
 
 
-def _capture(func: object, *args: object) -> str:
+def _capture(func: object, *args: object, **kwargs: object) -> str:
     """Run a stdout-writing printer and return the captured text."""
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        func(*args)  # type: ignore[operator]
+        func(*args, **kwargs)  # type: ignore[operator]
     return buffer.getvalue()
 
 
@@ -237,7 +238,13 @@ def _expected_results_cells(row: dict[str, object]) -> list[str]:
 
 def test_results_table_cells_equal_dataset_summary() -> None:
     dataset = build_results_dataset(_make_results(), _one_hydro_pct(), _RESULTS_TOL)
-    text = _capture(print_results_summary_from_dataset, dataset, _NW, _COBRE)
+    text = _capture(
+        print_results_summary_from_dataset,
+        dataset,
+        _NW,
+        _COBRE,
+        verdict=build_compare_verdict(dataset),
+    )
 
     parsed = _parse_results_table(text)
     summary_rows = {row["variable"]: row for row in dataset.summary.to_dicts()}
@@ -254,7 +261,13 @@ def test_results_table_cells_equal_dataset_summary() -> None:
 
 def test_results_footer_equals_dataset_footer_counts() -> None:
     dataset = build_results_dataset(_make_results(), _one_hydro_pct(), _RESULTS_TOL)
-    text = _capture(print_results_summary_from_dataset, dataset, _NW, _COBRE)
+    text = _capture(
+        print_results_summary_from_dataset,
+        dataset,
+        _NW,
+        _COBRE,
+        verdict=build_compare_verdict(dataset),
+    )
 
     total, by_entity_type = _parse_results_footer(text)
     footer_counts = dataset.metadata["footer_counts"]
@@ -278,7 +291,13 @@ def test_results_correlation_none_renders_na_from_dataset() -> None:
     )
 
     # Act: render the dataset-driven printer and parse the variable's row.
-    text = _capture(print_results_summary_from_dataset, dataset, _NW, _COBRE)
+    text = _capture(
+        print_results_summary_from_dataset,
+        dataset,
+        _NW,
+        _COBRE,
+        verdict=build_compare_verdict(dataset),
+    )
     parsed = _parse_results_table(text)
 
     # Assert: the printed ``r`` cell is "N/A", and "N/A" is exactly what the

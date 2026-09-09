@@ -41,7 +41,7 @@ from cobre_bridge.comparators.dataset import (
     TIDY_SCHEMA,
     ComparisonDataset,
 )
-from cobre_bridge.comparators.decomp_results import _AlignedDecompFrames
+from cobre_bridge.comparators.decomp.results import _AlignedDecompFrames
 from cobre_bridge.core.hydro_units import build_mirror_unit_group
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.files import DecompFiles
@@ -401,7 +401,7 @@ def _patch_aligned_frames(
     monkeypatch: pytest.MonkeyPatch, aligned: _AlignedDecompFrames
 ) -> None:
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results._read_aligned_frames",
+        "cobre_bridge.comparators.decomp.results._read_aligned_frames",
         lambda *_args, **_kwargs: aligned,
     )
     # ticket-020: the shared ``DecompCase`` build now runs unconditionally at
@@ -421,7 +421,7 @@ def _patch_aligned_frames(
     # against a bare ``tmp_path``; tests that DO care override this again
     # afterwards (monkeypatch's last ``setattr`` wins).
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "cobre_bridge.comparators.decomp.results.cobre_readers."
         "read_cobre_bus_aggregates",
         lambda *_args, **_kwargs: pl.DataFrame(),
     )
@@ -434,7 +434,7 @@ def _patch_aligned_frames(
     # ``tmp_path``; tests that DO care override this again afterwards
     # (monkeypatch's last ``setattr`` wins).
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results._cost_frames",
+        "cobre_bridge.comparators.decomp.results._cost_frames",
         lambda *_args, **_kwargs: ({}, pl.DataFrame()),
     )
     # ticket-014: ``build_decomp_dataset`` also calls
@@ -447,7 +447,7 @@ def _patch_aligned_frames(
     # ``tmp_path``; tests that DO care override this again afterwards
     # (monkeypatch's last ``setattr`` wins).
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.cobre_readers."
+        "cobre_bridge.comparators.decomp.results.cobre_readers."
         "read_cobre_hydro_bus_labels",
         lambda *_args, **_kwargs: {},
     )
@@ -614,11 +614,11 @@ def _patch_ree_sources(monkeypatch: pytest.MonkeyPatch) -> None:
     """Wire ``read_relato_membership``/``read_dec_oper_ree`` -- outside
     ``_read_aligned_frames`` -- to the fixtures above."""
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.read_relato_membership",
+        "cobre_bridge.comparators.decomp.results.read_relato_membership",
         lambda *_a, **_k: _ree_membership_fixture(),
     )
     monkeypatch.setattr(
-        "cobre_bridge.comparators.decomp_results.read_dec_oper_ree",
+        "cobre_bridge.comparators.decomp.results.read_dec_oper_ree",
         lambda *_a, **_k: _ree_dec_oper_ree_fixture(),
     )
 

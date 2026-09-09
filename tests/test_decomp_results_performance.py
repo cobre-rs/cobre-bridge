@@ -1,4 +1,4 @@
-"""Performance tab tests for ``comparators.decomp_results``.
+"""Performance tab tests for ``comparators.decomp.results``.
 
 Second carve out of the legacy ``test_decomp_results_compare.py`` mega file
 (TST-13): the convergence frame, TIM stages/iterations, the max-stage guard,
@@ -19,7 +19,7 @@ import polars as pl
 import pytest
 
 from cobre_bridge.comparators.charts import performance_fwd_bwd_split_chart
-from cobre_bridge.comparators.decomp_results import (
+from cobre_bridge.comparators.decomp.results import (
     _decomp_convergence_frame,
     _decomp_max_stage,
     _decomp_tim_iterations,
@@ -79,7 +79,7 @@ class TestDecompConvergenceFrame:
 
     def _patch(self, monkeypatch: pytest.MonkeyPatch, frame: pl.DataFrame) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_convergence",
+            "cobre_bridge.comparators.decomp.results.read_relato_convergence",
             lambda *_args, **_kwargs: frame,
         )
 
@@ -120,7 +120,7 @@ class TestDecompConvergenceFrame:
             raise FileNotFoundError("no relato.rvN found")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_convergence", _boom
+            "cobre_bridge.comparators.decomp.results.read_relato_convergence", _boom
         )
 
         frame = _decomp_convergence_frame(tmp_path)
@@ -135,7 +135,7 @@ class TestDecompConvergenceFrame:
             raise ValueError("relato.rv0 has no convergencia table")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_convergence", _boom
+            "cobre_bridge.comparators.decomp.results.read_relato_convergence", _boom
         )
 
         frame = _decomp_convergence_frame(tmp_path)
@@ -152,11 +152,11 @@ class TestBuildDecompDatasetConvergence:
     def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_convergence",
+            "cobre_bridge.comparators.decomp.results.read_relato_convergence",
             lambda *_args, **_kwargs: _relato_convergence_frame(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_convergence",
             lambda *_args, **_kwargs: _cobre_convergence_fixture(),
         )
@@ -219,10 +219,10 @@ class TestBuildDecompDatasetConvergence:
             raise FileNotFoundError("no relato.rvN found")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_convergence", _boom
+            "cobre_bridge.comparators.decomp.results.read_relato_convergence", _boom
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_convergence",
             lambda *_args, **_kwargs: _cobre_convergence_fixture(),
         )
@@ -269,7 +269,7 @@ class TestDecompTimStages:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_decomp_tim",
+            "cobre_bridge.comparators.decomp.results.read_decomp_tim",
             lambda *_args, **_kwargs: _decomp_tim_frame(),
         )
 
@@ -290,7 +290,7 @@ class TestDecompTimStages:
             }
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_decomp_tim",
+            "cobre_bridge.comparators.decomp.results.read_decomp_tim",
             lambda *_args, **_kwargs: table,
         )
 
@@ -305,7 +305,7 @@ class TestDecompTimStages:
             raise FileNotFoundError("decomp.tim not found")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_decomp_tim", _boom
+            "cobre_bridge.comparators.decomp.results.read_decomp_tim", _boom
         )
 
         assert _decomp_tim_stages(tmp_path) == {}
@@ -317,7 +317,7 @@ class TestDecompTimStages:
             raise ValueError("decomp.tim parsed empty")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_decomp_tim", _boom
+            "cobre_bridge.comparators.decomp.results.read_decomp_tim", _boom
         )
 
         assert _decomp_tim_stages(tmp_path) == {}
@@ -332,7 +332,7 @@ class TestDecompTimIterations:
 
     def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_convergence",
+            "cobre_bridge.comparators.decomp.results.read_relato_convergence",
             lambda *_args, **_kwargs: _relato_convergence_frame(),
         )
 
@@ -368,7 +368,7 @@ class TestDecompTimIterations:
             raise FileNotFoundError("no relato.rvN found")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_convergence", _boom
+            "cobre_bridge.comparators.decomp.results.read_relato_convergence", _boom
         )
 
         frame = _decomp_tim_iterations(tmp_path)
@@ -383,7 +383,7 @@ class TestDecompTimIterations:
             raise ValueError("relato.rv0 has no convergencia table")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_convergence", _boom
+            "cobre_bridge.comparators.decomp.results.read_relato_convergence", _boom
         )
 
         frame = _decomp_tim_iterations(tmp_path)
@@ -481,20 +481,20 @@ class TestBuildDecompDatasetPerformance:
     def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_decomp_tim",
+            "cobre_bridge.comparators.decomp.results.read_decomp_tim",
             lambda *_args, **_kwargs: _decomp_tim_frame(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_convergence",
+            "cobre_bridge.comparators.decomp.results.read_relato_convergence",
             lambda *_args, **_kwargs: _relato_convergence_frame(),
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_training_duration",
             lambda *_args, **_kwargs: 26.0,
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.cobre_readers."
+            "cobre_bridge.comparators.decomp.results.cobre_readers."
             "read_cobre_iteration_timing",
             lambda *_args, **_kwargs: pl.DataFrame(
                 {
@@ -597,10 +597,10 @@ class TestBuildDecompDatasetPerformance:
             raise FileNotFoundError("no relato.rvN found")
 
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_decomp_tim", _boom_tim
+            "cobre_bridge.comparators.decomp.results.read_decomp_tim", _boom_tim
         )
         monkeypatch.setattr(
-            "cobre_bridge.comparators.decomp_results.read_relato_convergence",
+            "cobre_bridge.comparators.decomp.results.read_relato_convergence",
             _boom_conv,
         )
 

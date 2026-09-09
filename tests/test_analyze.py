@@ -36,7 +36,7 @@ from cobre_bridge.comparators.dataset import (
     TIDY_SCHEMA,
     ComparisonDataset,
 )
-from cobre_bridge.comparators.results import (
+from cobre_bridge.comparators.model import (
     PercentileData,
     ResultComparison,
     build_results_summary,

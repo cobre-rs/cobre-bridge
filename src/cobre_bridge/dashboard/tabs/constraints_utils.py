@@ -11,7 +11,7 @@ from __future__ import annotations
 import pandas as pd
 
 from cobre_bridge.core.generic_constraint_format import shape_from_bounds
-from cobre_bridge.ui.html import escape_text
+from cobre_bridge.ui.html.document import escape_text
 
 
 def derive_constraint_shape(bounds_rows: pd.DataFrame) -> str:

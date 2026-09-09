@@ -5,7 +5,7 @@ from __future__ import annotations
 import polars as pl
 
 from cobre_bridge.comparators.analyze import build_results_dataset
-from cobre_bridge.comparators.results import PercentileData, ResultComparison
+from cobre_bridge.comparators.model import PercentileData, ResultComparison
 from cobre_bridge.comparators.verdict import compare_status
 
 

@@ -17,7 +17,7 @@ from cobre_bridge.dashboard.tabs.timing_phases import (
     active_top_level_phases,
     build_timing_stacked_figure,
 )
-from cobre_bridge.ui.plotly_helpers import fig_to_html
+from cobre_bridge.ui.html.plotly import fig_to_html
 from cobre_bridge.ui.theme import PERFORMANCE_PHASE_COLORS
 
 _EXPECTED_CONFIG: tuple[tuple[str, str, str], ...] = (

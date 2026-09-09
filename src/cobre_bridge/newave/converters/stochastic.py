@@ -592,7 +592,7 @@ def parse_cadical(path: Path) -> dict[tuple[int, int, int], float]:
     """Parse a C_ADIC.DAT file into a lookup of added load values.
 
     Public, stable parsing seam: both this converter and the results
-    comparator (:mod:`cobre_bridge.comparators.newave_readers`) reconstruct the source
+    comparator (:mod:`cobre_bridge.comparators.newave.readers`) reconstruct the source
     model load from C_ADIC via this function, so its signature and the
     ``(subsystem_code, year, cal_month) -> total_mw`` return shape are part of the
     shared contract — change them in lockstep with both callers.
