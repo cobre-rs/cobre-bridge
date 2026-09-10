@@ -1,13 +1,13 @@
 """Tests for the cadastro-override calendar resolver.
 
 Pins the ``(mes, semana, ano)`` -> stage-index resolution rules of
-``cobre_bridge.decomp.cadastro.resolve_effective_stage`` against a synthetic
-two-month operative calendar (two July weekly stages + one August monthly
-stage), mirroring the calendar shape the source model's operative weeks and
-months produce. ``mes`` is exercised in its real representation — a
-3-letter Portuguese month-abbreviation string, with an empty string for a
-blank month, and ``semana``/``ano`` as floats or NaN — plus a synthetic
-int/float ``mes`` back-compat case.
+``cobre_bridge.decomp.converters.cadastro.stage_resolution.resolve_effective_stage``
+against a synthetic two-month operative calendar (two July weekly stages +
+one August monthly stage), mirroring the calendar shape the source model's
+operative weeks and months produce. ``mes`` is exercised in its real
+representation — a 3-letter Portuguese month-abbreviation string, with an
+empty string for a blank month, and ``semana``/``ano`` as floats or NaN —
+plus a synthetic int/float ``mes`` back-compat case.
 """
 
 from __future__ import annotations

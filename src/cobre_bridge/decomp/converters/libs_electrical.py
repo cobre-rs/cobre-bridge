@@ -2071,8 +2071,9 @@ def build_available_power(
     effective: EffectiveCadastro,
 ) -> AvailablePower:
     """Build the :class:`AvailablePower` lookup (Requirement 1) from
-    :func:`~cobre_bridge.decomp.hydro.convert_hydro_group_availability`'s raw
-    per-(hydro_id, hydro_unit_group_id, stage_id) *overlay*.
+    :func:`~cobre_bridge.decomp.converters.hydro.bounds.
+    convert_hydro_group_availability`'s raw per-(hydro_id,
+    hydro_unit_group_id, stage_id) *overlay*.
 
     Sums each entry's ``max_generation_mw`` across a plant's unit-groups per
     stage, re-keying the ``hydro_id`` it is stored under onto the plant's own
@@ -2088,9 +2089,10 @@ def build_available_power(
 
     Precomputes the FALLBACK tier for every declared hydro plant
     (:attr:`~cobre_bridge.decomp.id_map.DecompIdMap.hydro_codes`) via
-    :func:`~cobre_bridge.decomp.hydro._rated_envelope`'s ``max_generation`` —
-    the un-derated rated envelope — so :meth:`AvailablePower.resolve` never
-    needs *hidr*/*effective* itself at resolve time.
+    :func:`~cobre_bridge.decomp.converters.hydro.bounds._rated_envelope`'s
+    ``max_generation`` — the un-derated rated envelope — so
+    :meth:`AvailablePower.resolve` never needs *hidr*/*effective* itself at
+    resolve time.
     """
     hidr = case.hidr
     code_by_hydro_id = {id_map.hydro_id(code): code for code in id_map.hydro_codes}

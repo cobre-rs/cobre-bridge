@@ -60,8 +60,10 @@ def _incremental_context(
 
     Stage-agnostic by design (one cascade for the whole horizon): both the
     station column and the downstream link are read at stage 0
-    (:meth:`~cobre_bridge.decomp.cadastro.EffectiveCadastro.inflow_gauge`/
-    :func:`~cobre_bridge.decomp.hydro._downstream_operated`'s own default).
+    (:meth:`~cobre_bridge.decomp.converters.cadastro.effective.
+    EffectiveCadastro.inflow_gauge`/
+    :func:`~cobre_bridge.decomp.converters.hydro.entity.
+    _downstream_operated`'s own default).
     A plant whose effective gauge varies across stages (a temporal ``AC
     NUMPOS``) gets a tracked-gap warning here; the downstream sibling gap is
     logged inside ``_downstream_operated`` itself, which this function also

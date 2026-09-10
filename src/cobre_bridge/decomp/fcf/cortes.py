@@ -21,8 +21,8 @@ the named layout, not raw byte arithmetic.
 path directly (confirmed against both a non-GNL deck,
 ``example/newave_rodada/cortesh.dat``, and a GNL deck,
 ``example/decomp-set-24-rv0/cortesh.dat``) — the same ``Cortesh.read(str(path))``
-idiom :func:`cobre_bridge.decomp.hydro.read_hidr` uses for ``Hidr.read``, not
-a decoded-text buffer.
+idiom :func:`cobre_bridge.decomp.converters.hydro.entity.read_hidr` uses
+for ``Hidr.read``, not a decoded-text buffer.
 """
 
 from __future__ import annotations

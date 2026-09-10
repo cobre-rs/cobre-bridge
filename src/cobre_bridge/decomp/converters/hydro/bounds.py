@@ -65,12 +65,12 @@ def _conjunto_rated_ac_adjusted(
     call directly for a single conjunto to get one per-frequency group's own
     bounds. Reads ``effective.machine_set(code, conjunto_index,
     stage_index)``: when present, its three fields already reflect
-    :func:`~cobre_bridge.decomp.cadastro.build_effective_cadastro`'s
-    independent per-field densification (a field with no override of its
-    own is the ``hidr`` base, forward-filled flat); ``None`` means the pair
-    carries no override at all, and every field falls back to the
-    ``hidr.dat`` row directly — the same ``.get(..., base)`` fallback the
-    date-blind reader used.
+    :func:`~cobre_bridge.decomp.converters.cadastro.effective.
+    build_effective_cadastro`'s independent per-field densification (a
+    field with no override of its own is the ``hidr`` base, forward-filled
+    flat); ``None`` means the pair carries no override at all, and every
+    field falls back to the ``hidr.dat`` row directly — the same
+    ``.get(..., base)`` fallback the date-blind reader used.
     """
     machine_set = effective.machine_set(code, conjunto_index, stage_index)
     if machine_set is None:
@@ -130,10 +130,11 @@ def _rated_envelope(
     non-split plant (:func:`convert_hydros`) and the per-plant comparison
     base for the B8 availability overlay
     (:func:`convert_hydro_group_availability`) — mirrors
-    :func:`~cobre_bridge.decomp.cadastro.storage_envelope`'s outer-bound
-    construction: the widest each of :func:`_compute_max_turbined_rated_
-    ac_adjusted`'s two components ever reaches over the horizon, taken
-    independently (the two maxima need not land on the same stage). A
+    :func:`~cobre_bridge.decomp.converters.cadastro.effective.
+    storage_envelope`'s outer-bound construction: the widest each of
+    :func:`_compute_max_turbined_rated_ac_adjusted`'s two components ever
+    reaches over the horizon, taken independently (the two maxima need not
+    land on the same stage). A
     constant machine set collapses this to the stage-0 value, matching the
     date-blind value exactly. Not used for the split plant
     (Itaipu): its entity envelope is instead the *sum* of the two groups'

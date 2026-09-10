@@ -393,10 +393,10 @@ def _hv_storage_contributions(
     The source model's ``LV`` limits are relative to the plant's useful
     volume; cobre's ``min/max_storage_hm3`` are absolute. The sign map
     (:func:`_sided_bounds`) runs first, then each surviving side is added to
-    the per-stage effective floor (:func:`~cobre_bridge.decomp.cadastro.
-    effective_storage_range`'s floor element, which honours per-stage ``AC
-    VOLMIN``/``VOLMAX`` overrides and the run-of-river ``D`` collapse) to
-    reach the absolute bound.
+    the per-stage effective floor (:func:`~cobre_bridge.decomp.converters.
+    cadastro.effective.effective_storage_range`'s floor element, which
+    honours per-stage ``AC VOLMIN``/``VOLMAX`` overrides and the
+    run-of-river ``D`` collapse) to reach the absolute bound.
 
     A ``code`` absent from the cadastro (``effective.base.index``) emits a
     ``WARNING`` diagnostic and is skipped entirely rather than crashing or

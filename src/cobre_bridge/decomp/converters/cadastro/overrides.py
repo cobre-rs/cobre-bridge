@@ -101,7 +101,7 @@ APPLIED_AC_CLASSES: frozenset[type] = frozenset(
 #: resolver cannot ingest them at all — reported distinctly from "deferred
 #: (has a value but no consumer)". `ALTEFE` is the sole member (idecomp
 #: 1.13.0); see the `TRACKED COBRE-GAP WORKAROUND` in
-#: `cobre_bridge.decomp.hydro.convert_hydros`.
+#: `cobre_bridge.decomp.converters.hydro.entity.convert_hydros`.
 UNINGESTABLE_AC_CLASSES: frozenset[type] = frozenset({ACALTEFE})
 
 

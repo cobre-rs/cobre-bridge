@@ -2243,8 +2243,9 @@ def _evaporation_result_comparisons(
     TRACKED COBRE-GAP WORKAROUND (C11): Cobre's own evaporation model
     over-scales the volume it deposits on a sub-monthly stage -- it applies
     (pre-fix) a full calendar month's worth of evaporation regardless of the
-    stage's actual duration (see `decomp.hydro.
-    _evaporation_coefficients_mm`'s docstring; its removal condition is
+    stage's actual duration (see
+    `decomp.converters.hydro.entity._evaporation_coefficients_mm`'s
+    docstring; its removal condition is
     registered in the cobre repository's conversion-found-improvements
     registry). The reconciliation below ONLY rescales the source model's own
     hm³ volume into

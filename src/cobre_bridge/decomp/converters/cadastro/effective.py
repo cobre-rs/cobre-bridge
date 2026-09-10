@@ -143,8 +143,8 @@ class EffectiveCadastro:
         carries no ``AC NUMJUS`` override at all (absent from
         :attr:`downstream_links`) — the same "absent means base" convention
         every other accessor here follows. ``0`` is a valid return (the
-        sink); the cascade walk (:func:`~cobre_bridge.decomp.hydro.
-        _downstream_operated`) treats it as such.
+        sink); the cascade walk (:func:`~cobre_bridge.decomp.converters.
+        hydro.entity._downstream_operated`) treats it as such.
         """
         if code not in self.downstream_links:
             return int(self.base.loc[code, "codigo_usina_jusante"])
@@ -153,10 +153,11 @@ class EffectiveCadastro:
     def downstream_plant_varies(self, code: int) -> bool:
         """Whether *code*'s effective downstream link varies across stages
         (a temporal ``AC NUMJUS``) — the tracked-gap trigger:
-        :func:`~cobre_bridge.decomp.hydro._downstream_operated` reads one
-        stage-representative link for the whole horizon (stage 0 by
-        default), so a caller checks this to warn rather than silently
-        picking a stage. ``False`` for a plant with no override at all.
+        :func:`~cobre_bridge.decomp.converters.hydro.entity.
+        _downstream_operated` reads one stage-representative link for the
+        whole horizon (stage 0 by default), so a caller checks this to warn
+        rather than silently picking a stage. ``False`` for a plant with no
+        override at all.
         """
         if code not in self.downstream_links:
             return False
@@ -207,10 +208,11 @@ def effective_storage_range(
     ``(volume_minimo, volume_maximo)`` via :meth:`EffectiveCadastro.value`.
     This is the one place the ``D``-collapse predicate lives; every storage
     consumer (:func:`storage_envelope`, :func:`cobre_bridge.decomp.converters.bounds.
-    convert_storage_bounds`, :func:`cobre_bridge.decomp.hydro.
+    convert_storage_bounds`, :func:`cobre_bridge.decomp.converters.hydro.entity.
     convert_initial_storage`) routes through it. Productivity does **not** —
-    :func:`cobre_bridge.decomp.hydro._equivalent_productivity_mw_per_m3s`
-    keeps reading the full ``(volume_minimo, volume_maximo)`` range directly,
+    :func:`cobre_bridge.decomp.converters.hydro.productivity.
+    _equivalent_productivity_mw_per_m3s` keeps reading the full
+    ``(volume_minimo, volume_maximo)`` range directly,
     validated independently of this collapse.
     """
     row = effective.base.loc[code]
@@ -321,15 +323,15 @@ def build_effective_cadastro(
     code, seeded from the base ``codigo_usina_jusante``/``posto`` columns
     and densified the same way as every other per-stage series. Consumed by
     :meth:`EffectiveCadastro.downstream_plant`/``inflow_gauge`` — the
-    cascade walk (:func:`~cobre_bridge.decomp.hydro._downstream_operated`)
-    and the incremental-inflow gauge attribution
+    cascade walk (:func:`~cobre_bridge.decomp.converters.hydro.entity.
+    _downstream_operated`) and the incremental-inflow gauge attribution
     (:func:`~cobre_bridge.decomp.scenarios._incremental_context`) read one
     stage-representative (stage 0) value off these, never per-stage, so a
     temporal ``NUMJUS``/``NUMPOS`` is a tracked gap
     (:meth:`EffectiveCadastro.downstream_plant_varies`/``inflow_gauge_varies``),
     not a silent per-stage cascade. ``AC JUSENA``/``AC NPOSNW`` are
     deliberately **not** ingested here — no DECOMP consumer; see the
-    deferred-fidelity warning in :mod:`cobre_bridge.decomp.hydro`.
+    deferred-fidelity warning in :mod:`cobre_bridge.decomp.converters.hydro`.
 
     Raises
     ------

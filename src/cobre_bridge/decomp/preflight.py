@@ -257,9 +257,9 @@ def _ac_present(dadger: Dadger, classes: frozenset[type]) -> list[type]:
 
     A class is present iff its ``AC`` frame is a non-empty
     ``pd.DataFrame`` — mirrors the resolver's own guard
-    (:func:`cobre_bridge.decomp.cadastro._read_scalar_overrides` and its
-    siblings), so a ``None``/empty frame (an unregistered mnemonic, or an
-    absent one) contributes nothing.
+    (:func:`cobre_bridge.decomp.converters.cadastro.overrides.
+    _read_scalar_overrides` and its siblings), so a ``None``/empty frame
+    (an unregistered mnemonic, or an absent one) contributes nothing.
     """
     present = [
         cls
@@ -288,8 +288,9 @@ def _ac_coverage(
     *report* (for ``out_of_horizon``) — no file I/O, no calendar, no
     ``hidr``. The three buckets are computed once by set arithmetic against
     the module-level :data:`_ALL_AC_CLASSES` reflection and the resolver's
-    own :data:`~cobre_bridge.decomp.cadastro.APPLIED_AC_CLASSES` /
-    :data:`~cobre_bridge.decomp.cadastro.UNINGESTABLE_AC_CLASSES` registries
+    own :data:`~cobre_bridge.decomp.converters.cadastro.overrides.
+    APPLIED_AC_CLASSES` / :data:`~cobre_bridge.decomp.converters.cadastro.
+    overrides.UNINGESTABLE_AC_CLASSES` registries
     — enumerate-and-diff, never a hand-maintained list, so a newly-applied
     family automatically drops off the deferred bucket and a new idecomp
     class automatically lands in it.

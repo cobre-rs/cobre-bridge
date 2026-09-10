@@ -1,7 +1,7 @@
 """Tests for migrating capacity/availability consumers onto the
 per-stage-effective machine-set view.
 
-``decomp/hydro.py``'s entity/mirror-group capacity (``convert_hydros``) and
+The entity/mirror-group capacity converter (``convert_hydros``) and
 the B8 per-group per-stage availability overlay
 (``convert_hydro_group_availability``) used to read the machine-set
 overrides through a date-blind ``_read_ac_machine_overrides``/

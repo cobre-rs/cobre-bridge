@@ -3,13 +3,13 @@
 the operated-set / cascade-walk helpers they build on.
 
 Imports the capacity-cap helpers from ``.bounds`` and the
-storage-envelope helpers from ``decomp.cadastro``; nothing in the package
+storage-envelope helpers from ``decomp.converters.cadastro``; nothing in the package
 imports from here -- this is the DAG's top seam.
 
 The cascade walk (:func:`_downstream_operated`, shared by this module's own
 ``downstream_id`` entity field and ``scenarios.py``'s incremental-inflow
 attribution) and ``scenarios.py``'s inflow-gauge attribution both read
-:class:`~cobre_bridge.decomp.cadastro.EffectiveCadastro`'s
+:class:`~cobre_bridge.decomp.converters.cadastro.effective.EffectiveCadastro`'s
 ``downstream_plant``/``inflow_gauge`` accessors -- the post-``AC
 NUMJUS``/``NUMPOS`` link/gauge -- rather than the base ``hidr`` columns
 directly. ``AC JUSENA`` (a downstream-energy coupling, not a water-routing
@@ -109,13 +109,14 @@ def _downstream_operated(
     across stages (a temporal ``AC NUMJUS``), a tracked-gap warning is
     logged and the *stage_index* link is used for the whole horizon
     regardless — per-stage cascade topology is not modeled
-    (:meth:`~cobre_bridge.decomp.cadastro.EffectiveCadastro.
-    downstream_plant_varies`). A temporal override on a non-operated
-    intermediate encountered mid-walk is not separately checked here (no
-    rv3 row exercises it — see the module docstring); the pipeline's own
-    relink diagnostic (:func:`cobre_bridge.decomp.pipeline.
-    _topology_relink_diagnostic`) still surfaces a resulting cascade change
-    via a fallback warning rather than dropping it silently.
+    (:meth:`~cobre_bridge.decomp.converters.cadastro.effective.
+    EffectiveCadastro.downstream_plant_varies`). A temporal override on a
+    non-operated intermediate encountered mid-walk is not separately checked
+    here (no rv3 row exercises it — see the module docstring); the
+    pipeline's own relink diagnostic
+    (:func:`cobre_bridge.decomp.pipeline._topology_relink_diagnostic`) still
+    surfaces a resulting cascade change via a fallback warning rather than
+    dropping it silently.
     """
     if effective.downstream_plant_varies(code):
         _LOG.warning(
@@ -445,9 +446,10 @@ def _initial_volume_hm3(effective: EffectiveCadastro, code: int, pct: float) -> 
 
     ``pct`` is a percentage of the *initial stage's* effective useful volume,
     not the plant's outer envelope, so the range is read from
-    :func:`~cobre_bridge.decomp.cadastro.effective_storage_range` at stage
-    ``0``. A run-of-river (``D``) plant's stage-0 range is already the
-    single-point collapse ``(vol_ref, vol_ref)``, so its initial
+    :func:`~cobre_bridge.decomp.converters.cadastro.effective.
+    effective_storage_range` at stage ``0``. A run-of-river (``D``) plant's
+    stage-0 range is already the single-point collapse
+    ``(vol_ref, vol_ref)``, so its initial
     value is ``vol_ref`` regardless of *pct*. Shared by
     :func:`convert_initial_storage` (the initial condition) and
     :func:`_operated_initial_volumes` (the generation-productivity anchor) so

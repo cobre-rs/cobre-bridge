@@ -253,8 +253,8 @@ class _StubDadger:
     ) -> pd.DataFrame:
         # No AC machine-configuration overrides on this synthetic stub — every
         # plant here has teif=ip=0.0 anyway, so the AC-adjusted rated capacity
-        # (decomp/hydro.py::_compute_max_turbined_rated_ac_adjusted) reduces
-        # to the plain registry rated sum regardless.
+        # (_compute_max_turbined_rated_ac_adjusted) reduces to the plain
+        # registry rated sum regardless.
         return pd.DataFrame()
 
 
