@@ -117,7 +117,7 @@ class GroupBoundEntry:
 def _hours_weighted(values: Sequence[float], stage: OperativeStage) -> float:
     """Hours-weighted stage mean of a per-block value list — the same fold
     ``convert_thermal_bounds``/``convert_hydro_bounds`` use for their own
-    base row (``decomp/thermal.py``, ``decomp/bounds.py``).
+    base row (``decomp/converters/thermal.py``, ``decomp/converters/bounds.py``).
 
     Raises
     ------

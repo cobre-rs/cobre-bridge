@@ -1,7 +1,7 @@
 """Shared generic-constraint builder + id allocator for both conversion tracks.
 
-The NEWAVE track (``converters/constraints.py``) and the DECOMP track
-(``decomp/constraints.py``) each assemble cobre F3 generic constraints
+The NEWAVE track (``newave/converters/constraints.py``) and the DECOMP track
+(``decomp/converters/constraints.py``) each assemble cobre F3 generic constraints
 (``generic_constraint_format.py``'s sense-free interval shape). This module is
 the single model-agnostic home both tracks use for that stateful assembly —
 :class:`ConstraintIdAllocator`, :class:`GenericConstraintBuilder`,

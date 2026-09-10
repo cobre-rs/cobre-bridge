@@ -60,7 +60,7 @@ def hours_weighted(values: Sequence[float], stage: OperativeStage) -> float:
     """Hours-weighted mean of per-block *values* over *stage*'s block hours.
 
     Shared by every converter that folds a per-block declaration down to one
-    stage-level number (``decomp/thermal.py``'s ``CT`` base row,
+    stage-level number (``decomp/converters/thermal.py``'s ``CT`` base row,
     ``decomp/anticipated.py``'s ``tg`` registry, ...) — the single canonical
     implementation of the convention.
     """

@@ -189,7 +189,7 @@ def convert_thermal_bounds(
     contribution per block (``block_id = 0..n-1``, no base) carrying each
     block's own exact ``min``/``max`` — when they are not (see the module
     docstring's replace-vs-intersect note). This mirrors ``convert_lines``'
-    sparse base-vs-override convention (``decomp/network.py``), except the
+    sparse base-vs-override convention (``decomp/converters/network.py``), except the
     two never coexist here.
     """
     calendar = case.calendar

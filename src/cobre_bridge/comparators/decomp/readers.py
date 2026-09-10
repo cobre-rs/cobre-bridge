@@ -138,7 +138,7 @@ def read_dec_oper_rhesoft(case_dir: Path) -> pl.DataFrame:
     ``limite_MW``, ``valor_MW``, ``violacao_absoluta_MW``,
     ``violacao_percentual``. ``codigo_restricao`` is the same ``HE``/``CM``
     register id (``constraint_registers.ConstraintRecord.constraint_id``)
-    the conversion-time RHE emitter (``decomp.constraints.
+    the conversion-time RHE emitter (``decomp.converters.constraints.
     emit_rhe_generics``) names its cobre constraint after (``"RHE_<id>"``).
 
     This is the RHE (soft minimum-stored-energy) constraints'

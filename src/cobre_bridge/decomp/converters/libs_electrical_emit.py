@@ -418,7 +418,7 @@ def emit_libs_electrical_generics(
       WARNED) drops the whole restriction — ``deferred["unresolved-bucket-a"]``.
     - A well-formed but undeclared identifier anywhere in the restriction's
       (expanded) formula OR its activation rule (:class:`~cobre_bridge.
-      decomp.libs_electrical.UnrecognizedElectricalToken`, raised from
+      decomp.converters.libs_electrical.UnrecognizedElectricalToken`, raised from
       inside ``active_cells``'s, ``assemble_bound``'s, or
       ``build_electrical_expression``'s own ``parse_linear_expression``
       call) drops **only this restriction** —

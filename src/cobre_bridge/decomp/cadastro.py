@@ -6,7 +6,7 @@ stage forward; a blank triple means the override is effective from the
 initial stage. This module provides the single pure function that resolves
 that triple to a 0-based operative-calendar stage index, the same way the
 source model's own temporal overrides resolve to per-stage effective values
-(see ``converters/hydro.py``'s ``_TEMPORAL_OVERRIDE_TYPES``).
+(see ``newave/converters/hydro.py``'s ``_TEMPORAL_OVERRIDE_TYPES``).
 """
 
 from __future__ import annotations

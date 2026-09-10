@@ -772,7 +772,7 @@ class RheResult(NamedTuple):
     no RHE constraint survives). ``rho_acum_overrides`` maps every cobre
     hydro id *actually referenced* by a surviving RHE expression to its
     per-stage integrated ρ_acum in MWmês/hm³ — the override contract
-    ``decomp.scalar_parameters.build_decomp_scalar_parameters`` consumes so
+    ``decomp.converters.scalar_parameters.build_decomp_scalar_parameters`` consumes so
     the LP's ``@rho_acum_h{id}`` coefficient matches the RHS this emitter
     computes. Empty when ``result`` is ``None``.
     """

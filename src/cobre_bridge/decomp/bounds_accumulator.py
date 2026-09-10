@@ -162,7 +162,7 @@ AXES: Mapping[tuple[str, str], AxisSpec] = {
         upper_column="max_m3s",
         block_eligible=True,
     ),
-    # `convert_lines`/`decomp.network.convert_lines` emit one capacity per
+    # `convert_lines`/`decomp.converters.network.convert_lines` emit one capacity per
     # flow direction, not a min/max pair on one column — each direction is
     # its own upper-only axis (a lower contribution on either loud-fails).
     ("line", "direct"): AxisSpec(
@@ -496,7 +496,8 @@ class BoundTables(NamedTuple):
 
 
 def _empty(schema: pa.Schema) -> pa.Table:
-    """A 0-row table honouring *schema* exactly (mirrors ``decomp/bounds.py``)."""
+    """A 0-row table honouring *schema* exactly (mirrors
+    ``decomp/converters/bounds.py``)."""
     return pa.table(
         {field.name: pa.array([], type=field.type) for field in schema},
         schema=schema,

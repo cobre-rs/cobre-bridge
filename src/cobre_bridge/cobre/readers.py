@@ -924,8 +924,9 @@ def read_cobre_hydro_per_stage_bounds(cobre_output_dir: Path) -> pl.DataFrame:
 
 
 #: The columns the converter's ``constraints/line_bounds.parquet`` carries
-#: (``decomp/network.py::convert_lines``'s and ``converters/network.py::
-#: convert_line_bounds``'s shared ``_LINE_BOUNDS_SCHEMA``): one stage-level
+#: (``decomp/converters/network.py::convert_lines``'s and
+#: ``newave/converters/network.py::convert_line_bounds``'s shared
+#: ``_LINE_BOUNDS_SCHEMA``): one stage-level
 #: base row per (line, stage) with ``block_id`` null, plus per-block
 #: absolute-MW override rows.
 _LINE_BOUNDS_SCHEMA: dict[str, pl.DataType] = {

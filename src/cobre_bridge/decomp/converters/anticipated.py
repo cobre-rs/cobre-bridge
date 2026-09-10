@@ -1,8 +1,8 @@
 """Read the source model's GNL (fuel-constrained) anticipated dispatch.
 
-The source model declares its GNL thermals entirely in ``dadgnl`` — a separate
-file from the ``CT`` thermal registry the main thermal converter reads — so
-these plants are invisible to ``decomp/thermal.py`` and must be modelled here.
+The source model declares its GNL thermals entirely in ``dadgnl`` — a separate file from
+the ``CT`` thermal registry the main thermal converter reads — so these plants are
+invisible to ``decomp/converters/thermal.py`` and must be modelled here.
 The **read/model layer** (:func:`read_gnl_model` and its helpers) is pure: it
 turns ``dadgnl`` into a structured commitment model and does nothing else — no
 ``cobre`` import, no filesystem writes, no clamping, no decision about lead

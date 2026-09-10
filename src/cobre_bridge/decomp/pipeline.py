@@ -890,8 +890,8 @@ def _convert_core_entities(artifacts: DecompCaseArtifacts, writer: CaseWriter) -
     # function around its initial reservoir volume. FPHA-eligible reservoirs get
     # cobre's computed-FPHA model (geometry + tailrace families, fit over a
     # ±window around the initial volume); the rest keep constant productivity,
-    # whose ρ_eq is likewise anchored at the initial volume (not the full-range
-    # mean) — see hydro._equivalent_productivity_mw_per_m3s and decomp/fpha.py.
+    # whose ρ_eq is likewise anchored at the initial volume (not the full-range mean) —
+    # see hydro._equivalent_productivity_mw_per_m3s and decomp/converters/fpha.py.
     initial_volumes = hydro_conv._operated_initial_volumes(case, effective=effective)
     fpha_codes = fpha_conv.fpha_eligible_codes(effective, id_map)
     artifacts.fpha_codes = fpha_codes

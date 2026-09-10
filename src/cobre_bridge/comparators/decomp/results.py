@@ -445,8 +445,6 @@ def _hydro_productivity_results(
         if turb is None:
             continue
         nw_turb, cb_turb = turb
-        # Zero-guard: drop (never null-keep) a plant/stage where either side
-        # turbines at/near zero -- gen/turbined is an undefined 0/0 there.
         if (
             nw_turb <= _PRODUCTIVITY_TURBINED_EPS
             or cb_turb <= _PRODUCTIVITY_TURBINED_EPS
@@ -626,7 +624,7 @@ def _read_cobre_lines_index(cobre_output_dir: Path) -> dict[tuple[int, int], int
     """``{(source_bus_id, target_bus_id): line_id}`` from ``system/lines.json``.
 
     A missing ``system/lines.json`` -- e.g. a case predating the ``IA``
-    exchange-network converter (``decomp/network.py::convert_lines``)
+    exchange-network converter (``decomp/converters/network.py::convert_lines``)
     -- yields an empty index rather than raising: :func:`_corridor_line_alignment`
     then resolves nothing, and :func:`_interc_side` reports every corridor as
     unresolved instead of failing the comparison (the Network tab degrades to
@@ -765,7 +763,7 @@ def _interc_side(
     ``perdas_MW`` (transmission losses) is read as part of the same fold but
     intentionally NOT subtracted from it: a cobre line has no loss model (its
     ``net_flow_mw`` is a single, lossless figure -- see
-    ``decomp/network.py::convert_lines``), so the origin-side reading, not
+    ``decomp/converters/network.py::convert_lines``), so the origin-side reading, not
     the post-loss ``intercambio_destino_MW``, is the one quantity comparable
     to it.
 
@@ -873,7 +871,7 @@ def _interc_side(
 
 def _line_entity_names(line_meta: list[dict], id_map: DecompIdMap) -> dict[int, str]:
     """Display name per cobre line id, straight from ``lines.json``'s own
-    ``name`` field (built by ``decomp/network.py::convert_lines`` as
+    ``name`` field (built by ``decomp/converters/network.py::convert_lines`` as
     ``f"{pair[0]}-{pair[1]}"``).
 
     Falls back to a bus-name pair label when an entry carries no usable
@@ -974,7 +972,7 @@ def _line_bounds_and_meta(cobre_output_dir: Path) -> tuple[pl.DataFrame, list[di
     model's own Network tab, via the shared ``cobre_readers`` readers:
 
     - ``line_bounds``: :func:`cobre_readers.read_cobre_line_bounds` verbatim.
-      This is already per-stage: ``decomp/network.py::convert_lines`` writes
+      This is already per-stage: ``decomp/converters/network.py::convert_lines`` writes
       one base row (``block_id`` null) per ``(line, stage)`` carrying the
       resolved max-of-blocks ``IA`` capacity for that stage, so a case whose
       capacity genuinely never changes across stages naturally produces
@@ -2356,7 +2354,7 @@ def _evaporation_result_comparisons(
 # `dec_oper_usih`/`dec_oper_usit`/`dec_oper_rhesoft`, recovering via the
 # special-constraint register (`decomp.constraint_registers.read_constraints`)
 # the SAME coefficients the conversion-time emitters
-# (`decomp.constraints.emit_re_generics`/`emit_rhq_rhv_generics`/
+# (`decomp.converters.constraints.emit_re_generics`/`emit_rhq_rhv_generics`/
 # `emit_rhe_generics`) used to author each constraint's expression.
 
 
@@ -2504,16 +2502,16 @@ class _DecompConstraintLookups:
     storage: dict[tuple[int, int], float] = field(default_factory=dict)
 
 
-#: Register term variables `_generic_constraint_lhs_decomp` cannot re-derive
-#: from ``dec_oper_*`` output: ``interchange`` (RE ``FI``) needs the bus/line
-#: direction resolution `decomp.constraints.resolve_fi_term` does at conversion
-#: time; ``QBOM`` (HQ pumping) names a pumping-station code (not a hydro code),
-#: and no ``dec_oper_*`` table reports a pumping station's flow. A constraint
-#: carrying either is skipped whole (skip-not-partial), never a partial sum.
+#: Register term variables `_generic_constraint_lhs_decomp` cannot re-derive from
+#: ``dec_oper_*`` output: ``interchange`` (RE ``FI``) needs the bus/line direction
+#: resolution `decomp.converters.constraints.resolve_fi_term` does at conversion time;
+#: ``QBOM`` (HQ pumping) names a pumping-station code (not a hydro code), and no
+#: ``dec_oper_*`` table reports a pumping station's flow. A constraint carrying either
+#: is skipped whole (skip-not-partial), never a partial sum.
 _UNSUPPORTED_TERM_VARIABLES = frozenset({"interchange", "QBOM"})
 
 #: Matches a cobre generic constraint's ``name`` field as authored by the
-#: conversion-time emitters (``decomp.constraints.emit_re_generics`` ->
+#: conversion-time emitters (``decomp.converters.constraints.emit_re_generics`` ->
 #: ``"RE_<id>"``, ``emit_rhq_rhv_generics`` -> ``"HQ_<id>"``/``"HV_<id>"``,
 #: ``emit_rhe_generics`` -> ``"RHE_<id>"``), recovering the special-constraint
 #: register's own family + ``codigo_restricao`` without re-running the
@@ -2545,7 +2543,7 @@ def _rhe_lhs_lookup(
     operation -- the same raw physical quantity cobre's own (slack-free)
     expression evaluation produces, so the two overlaid series compare on
     the same basis. Read it directly rather than re-deriving the
-    ρ_acum-weighted cascade sum ``decomp.constraints.emit_rhe_generics``
+    ρ_acum-weighted cascade sum ``decomp.converters.constraints.emit_rhe_generics``
     computes at conversion time, which would duplicate a large, easily
     drifting piece of machinery.
 
@@ -2862,12 +2860,7 @@ def build_decomp_dataset(
     from cobre_bridge.comparators.analyze import build_results_dataset
     from cobre_bridge.decomp.case import DecompCase
 
-    # The single shared deck parse: every parse site below reads
-    # case.dadger/case.id_map rather than re-discovering and re-parsing the
-    # deck.
     case = DecompCase.from_directory(decomp_dir)
-    # Built once, threaded to every physical-variable _scenario_mean call
-    # site below (never rebuilt per site -- relato2 parsing is not free).
     probabilities = _scenario_probabilities(decomp_dir)
 
     aligned = _read_aligned_frames(case, cobre_output_dir, probabilities=probabilities)
