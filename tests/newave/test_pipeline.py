@@ -99,7 +99,7 @@ class TestConvertNewaweCasePipeline:
         self, tmp_path: Path
     ) -> None:
         """``load_factors.json`` and ``non_controllable_factors.json`` are
-        untouched by the exchange-factors migration (epic 02 draws the line at
+        untouched by the exchange-factors migration (which draws the line at
         authored-vs-sampled data; deleting these by analogy would be wrong)."""
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "cobre_case"
@@ -267,7 +267,7 @@ class TestConvertNewaweCasePipeline:
 
 
 class TestEmissionCheckWiring:
-    """The post-emission self-checks (ticket-016, epic-04) run inside the real
+    """The post-emission self-checks run inside the real
     pipeline body, before the writes, and their findings flip the convert
     verdict through ``_convert_status`` — not merely by inspecting the
     diagnostic."""

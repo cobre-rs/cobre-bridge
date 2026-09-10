@@ -5,8 +5,8 @@ Pins ``_read_machine_set_overrides`` (the ``NUMCON``/``NUMMAQ``/``POTEFE``/
 compound-keyed by ``(codigo_usina, indice_conjunto)`` for the other three)
 and the ``machine_conjunto_count``/``machine_set`` query methods on
 ``EffectiveCadastro`` — against a synthetic ``Dadger`` double, mirroring the
-doubles established in ``tests/test_decomp_cadastro.py``/
-``tests/test_decomp_diversion.py``. No real deck, no calendar resolution
+doubles established in ``tests/decomp/test_cadastro.py``/
+``tests/decomp/test_diversion.py``. No real deck, no calendar resolution
 beyond what ``resolve_effective_stage`` already covers.
 """
 

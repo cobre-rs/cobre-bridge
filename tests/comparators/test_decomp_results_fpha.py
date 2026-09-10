@@ -1,7 +1,7 @@
 """FPHA fit-fidelity tests for ``comparators.decomp.results``.
 
-Third carve out of the legacy ``test_decomp_results_compare.py`` mega file
-(TST-13): the "Fitted production functions (FPHA)" fallback-(b) metrics --
+Third carve out of the legacy ``test_decomp_results_compare.py`` mega file:
+the "Fitted production functions (FPHA)" fallback-(b) metrics --
 Cobre's fitted envelope evaluated at the source model's realized operating
 points, compared to the source model's own realized generation -- and the
 Productivity tab's FPHA metadata in ``build_decomp_dataset``. The remaining
@@ -30,7 +30,7 @@ from tests.comparators.conftest import (
 def _fpha_id_map() -> DecompIdMap:
     """One hydro plant (code 10 -> cobre id 0), matching `_aligned_fixture`'s
     own hydro code/id/name so the SAME `_patch_aligned_frames` fixture can
-    back both the E1 result rows and the ticket-017 FPHA metrics in the same
+    back both the E1 result rows and the FPHA metrics in the same
     ``build_decomp_dataset`` test."""
     return DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(10, 20))
 
@@ -76,7 +76,7 @@ def _fpha_deviations_fixture() -> pl.DataFrame:
 
 
 def _patch_fpha_planes_and_deviations(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Wire `build_decomp_dataset`'s three ticket-017 sources -- outside
+    """Wire `build_decomp_dataset`'s three sources -- outside
     `_read_aligned_frames` -- to the fixtures above: Cobre's planes reader,
     the deck id map (the shared case's ``id_map``, reused verbatim by
     `_fpha_metrics` rather than rebuilt), and the source model's own
@@ -180,13 +180,13 @@ class TestFphaMetrics:
 
 
 class TestBuildDecompDatasetFpha:
-    """ticket-017: fills ``dataset.render.fpha_metrics``;
+    """Fills ``dataset.render.fpha_metrics``;
     ``fpha_surface``/``fpha_spill`` always stay `None` (fallback (b))."""
 
     def test_cobre_has_no_planes_fpha_metrics_absent_no_section(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC: ``read_cobre_fpha_planes`` returns ``None`` (the default on a
+        """``read_cobre_fpha_planes`` returns ``None`` (the default on a
         bare Cobre output dir) -> no FPHA metadata, the report omits the
         section entirely, no exception."""
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
@@ -200,7 +200,7 @@ class TestBuildDecompDatasetFpha:
     def test_both_sides_fitted_planes_fpha_metrics_populated_section_renders(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC: mocked frames on both sides -> a non-empty ``fpha_metrics``
+        """Mocked frames on both sides -> a non-empty ``fpha_metrics``
         with the required columns, and the report renders the FPHA section
         title."""
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
@@ -237,7 +237,7 @@ class TestBuildDecompDatasetFpha:
     def test_report_renders_without_exception_present_and_absent(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC: ``build_comparison_report`` raises no exception whether the
+        """``build_comparison_report`` raises no exception whether the
         FPHA section is present or omitted."""
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
         dataset_absent = build_decomp_dataset(tmp_path, tmp_path)

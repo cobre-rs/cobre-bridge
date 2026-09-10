@@ -1,7 +1,7 @@
 """Evaporation comparison tests for ``comparators.decomp.results``.
 
-Third carve out of the legacy ``test_decomp_results_compare.py`` mega file
-(TST-13): hm³ -> m³/s stage-hours conversion, Cobre stage-hours lookup, the
+Third carve out of the legacy ``test_decomp_results_compare.py`` mega file:
+hm³ -> m³/s stage-hours conversion, Cobre stage-hours lookup, the
 source-model evaporated-volume side, the full evaporation result-comparison
 reconciliation, and the Hydro Plant Detail tab's ``evaporation_m3s`` rows in
 ``build_decomp_dataset``. The remaining classes (report_builder/verdict/CLI
@@ -61,7 +61,7 @@ def _write_stages_json(case_dir: Path, stage_hours: dict[int, list[float]]) -> P
 
 class TestHm3ToM3s:
     """`_hm3_to_m3s`: hm³ (stage volume) -> m³/s (mean flow), driven by the
-    stage's own hours -- ticket-020 requirement 2."""
+    stage's own hours."""
 
     def test_matches_the_fixed_monthly_factor_at_730_hours(self) -> None:
         """1 m³/s sustained over a 730h month deposits exactly
@@ -87,7 +87,7 @@ class TestHm3ToM3s:
 
 class TestCobreStageHours:
     """`_cobre_stage_hours`: per-stage total hours from the Cobre case's own
-    ``stages.json``, via `cobre_readers._load_block_hours` -- ticket-020."""
+    ``stages.json``, via `cobre_readers._load_block_hours`."""
 
     def test_sums_block_hours_per_stage(self, tmp_path: Path) -> None:
         _write_stages_json(tmp_path, {0: [24.0, 144.0], 1: [168.0]})
@@ -200,7 +200,7 @@ class TestEvaporationResultComparisons:
     -- scenario-averaged source-model volume converted to m³/s via the
     stage's own hours, joined against Cobre's ``evaporation_m3s``, with a
     one-sided plant excluded from the pairing and counted rather than
-    silently dropped (ticket-020 requirement 5)."""
+    silently dropped."""
 
     def test_paired_rows_use_the_stage_hours_conversion(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -235,7 +235,7 @@ class TestEvaporationResultComparisons:
     def test_plant_present_only_on_cobre_side_excluded_and_counted(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC: a hydro present in Cobre's ``evaporation_m3s`` but absent from
+        """A hydro present in Cobre's ``evaporation_m3s`` but absent from
         the source model's own evaporation table is excluded from the paired
         comparison and counted."""
         # Source model reports evaporation for plant 10 (cobre id 0) only.
@@ -356,7 +356,7 @@ class TestEvaporationResultComparisons:
 
 
 class TestBuildDecompDatasetEvaporation:
-    """ticket-020: fills ``results`` with per-(hydro, stage)
+    """Fills ``results`` with per-(hydro, stage)
     ``evaporation_m3s`` rows and ``dataset.metadata["unmapped"]["evaporation"]``."""
 
     def test_no_deck_no_evaporation_rows_and_empty_unmapped(
@@ -381,7 +381,7 @@ class TestBuildDecompDatasetEvaporation:
     def test_both_sides_present_tidy_carries_evaporation_rows(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC: ``tidy`` has ``entity_type=="hydro"``/
+        """``tidy`` has ``entity_type=="hydro"``/
         ``variable=="evaporation_m3s"`` rows with ``source`` in
         {"newave", "cobre"}, and ``dataset.summary`` includes the
         ``evaporation_m3s`` variable."""
@@ -425,10 +425,10 @@ class TestBuildDecompDatasetEvaporation:
     def test_hydro_plant_detail_tab_carries_evaporation_content(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC: ``build_comparison_report(dataset)`` renders the Hydro Plant
+        """``build_comparison_report(dataset)`` renders the Hydro Plant
         Details tab's ``evaporation_m3s`` panel content -- the exact token
         ``report_builder._HYDRO_VARIABLES`` already wires into that tab, so no
-        new chart is required (ticket-020 requirement 4)."""
+        new chart is required."""
         _patch_aligned_frames(monkeypatch, _evap_aligned_fixture())
         _patch_shared_case(monkeypatch, id_map=_ree_id_map())
         _patch_evap_sources(monkeypatch)

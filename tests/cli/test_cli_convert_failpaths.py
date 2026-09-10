@@ -3,7 +3,7 @@
 Tier 1 — pure Python, imports no cobre. Locks in the migration of
 ``_run_newave_conversion``/``_run_decomp_conversion`` from ``SimpleNamespace``
 to the typed ``ConvertArgs``, and the routing of the two NEWAVE early-exit
-paths (source-missing, dest-not-empty) through ``_fail`` (CLI-02): a
+paths (source-missing, dest-not-empty) through ``_fail``: a
 ``--json`` run on either condition must now emit a valid error envelope
 instead of empty stdout.
 """

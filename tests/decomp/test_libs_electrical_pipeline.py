@@ -1,15 +1,15 @@
-"""TICKET-013: the LIBs-era electrical-constraint emitter spliced into
+"""The LIBs-era electrical-constraint emitter spliced into
 ``convert_decomp_case`` -- discovery of the deck's ``lib_restricao-eletrica-
 especial.csv`` file, the narrowed ``detect_libs_electrical`` warn, the
 census INFO diagnostic, and the end-to-end ``cobre validate`` smoke.
 
-Tier 1 (the bulk of this module): synthetic stub decks only, mirroring
-``tests/test_decomp_pipeline.py``'s own ``_run_cadastro_pipeline`` convention
+Tier 1 (the bulk of this module): synthetic stub decks only, mirroring the
+``test_pipeline`` module's own ``_run_cadastro_pipeline`` convention
 -- no ``example/`` read, no ``import cobre`` at module scope.
 
 Tier 3 (the tail of this module, ``TestRealDeckValidation``): the real
 ``example/decomp-abr-26-lpp`` deck converted and validated against the local
-``cobre`` binary, guarded exactly like ``tests/test_decomp_fcf_roundtrip.py``.
+``cobre`` binary, guarded exactly like the ``test_fcf_roundtrip`` module.
 """
 
 from __future__ import annotations
@@ -159,9 +159,9 @@ class TestDiscoverDecompFilesLibsElectrical:
         assert files.libs_restricao_eletrica is None
 
     def test_decomp_files_still_constructs_without_the_new_field(self) -> None:
-        """Every pre-existing ``DecompFiles(...)`` call site (other test
-        modules this ticket must not touch) keeps constructing unchanged --
-        the new field defaults to ``None``."""
+        """Every pre-existing ``DecompFiles(...)`` call site in other test
+        modules keeps constructing unchanged -- the new field defaults to
+        ``None``."""
         files = DecompFiles(
             revision="rv0",
             dadger=Path("dadger.rv0"),
@@ -176,7 +176,7 @@ class TestDiscoverDecompFilesLibsElectrical:
 
 # ---------------------------------------------------------------------------
 # Tier-1 pipeline wiring -- a fully synthetic mock deck, mirroring
-# tests/test_decomp_pipeline.py::_run_cadastro_pipeline's own convention.
+# the ``test_pipeline`` module's ``_run_cadastro_pipeline`` convention.
 # ---------------------------------------------------------------------------
 
 
@@ -282,7 +282,7 @@ def _dp_frame() -> pd.DataFrame:
 class _MockDadger:
     """Covers only what the real (unmocked) consumers this fixture exercises
     need: ``.tx.taxa``, ``.uh(df=True)``, ``.vi``, ``.ac(...)``, ``.dp(...)``,
-    ``.ri(...)`` -- mirrors ``tests/test_decomp_pipeline.py``'s own
+    ``.ri(...)`` -- mirrors the ``test_pipeline`` module's own
     ``_CadastroDadger``, extended for ``build_data_context``'s own reads."""
 
     class _Tx:
@@ -333,7 +333,7 @@ def _cap_restriction(code: int, plant_code: int, cap: float) -> ElectricalRestri
     per-(stage,block) data-context lookup, so it isolates the pipeline's own
     wiring (threading ``id_map``/``context_factory``/``big_m``/
     ``next_generic_id`` correctly) from the emitter's own correctness
-    (covered by ``tests/test_decomp_libs_electrical_emit.py``)."""
+    (covered by the ``test_libs_electrical_emit`` module)."""
     return ElectricalRestriction(
         code=code,
         lhs=f"ger_usih({plant_code})",
@@ -390,11 +390,11 @@ def _run_libs_pipeline(
     report_out: list[ConversionReport] | None = None,
 ) -> Path:
     """Run ``convert_decomp_case`` against a fully synthetic mock deck,
-    patching every converter this ticket does not wire to a canned return
-    value -- mirrors ``tests/test_decomp_pipeline.py``'s
+    patching every converter not under test to a canned return
+    value -- mirrors the ``test_pipeline`` module's
     ``_run_cadastro_pipeline`` (duplicated rather than imported, per this
-    codebase's own convention of copying a tier-3/tier-1 fixture verbatim
-    across test modules, e.g. ``test_decomp_fcf_roundtrip.py``'s docstring).
+    codebase's own convention of copying a tier-1/tier-3 fixture verbatim
+    across test modules).
 
     *libs_restricao_eletrica*/*libs_electrical_model* control
     ``files.libs_restricao_eletrica`` and the (patched)
@@ -534,7 +534,7 @@ class TestLibsElectricalPipelineWiring:
     def test_ac1_converted_restrictions_appended_after_rhe_with_dense_ids(
         self, tmp_path: Path
     ) -> None:
-        """AC1: a stub deck whose ``read_libs_electrical`` yields a model
+        """A stub deck whose ``read_libs_electrical`` yields a model
         with convertible restrictions gets ``LIBS_ELEC_<code>`` constraints
         appended AFTER the (empty here) RHQ/RHV/RHE links, sharing the
         allocator with a synthetic RE record so the id space never
@@ -563,9 +563,9 @@ class TestLibsElectricalPipelineWiring:
         assert libs_rows
 
     def test_ac2_no_entry_is_a_no_op(self, tmp_path: Path) -> None:
-        """AC2: no ``RESTRICAO-ELETRICA-ESPECIAL`` entry -- no electrical
+        """No ``RESTRICAO-ELETRICA-ESPECIAL`` entry -- no electrical
         constraint emitted, no libs diagnostic produced, byte-identical to
-        the pre-ticket pipeline for that path."""
+        the pipeline's behavior before the electrical path existed."""
         diagnostics_out: list[dx.Diagnostic] = []
         dst = _run_libs_pipeline(
             tmp_path,
@@ -582,9 +582,8 @@ class TestLibsElectricalPipelineWiring:
         assert "decomp-libs-electrical-converted" not in codes
 
     def test_ac3_short_form_only_still_warns(self, tmp_path: Path) -> None:
-        """AC3: the entry is present but ``read_libs_electrical`` returns
-        ``None`` (short-form-only) -- the narrowed warn IS still emitted
-        (OQ-4 fallback preserved)."""
+        """The entry is present but ``read_libs_electrical`` returns
+        ``None`` (short-form-only) -- the narrowed warn IS still emitted."""
         canned_warning = dx.Diagnostic(
             code="decomp-libs-electrical-present",
             severity=dx.Severity.WARNING,
@@ -608,7 +607,7 @@ class TestLibsElectricalPipelineWiring:
     def test_ac4_census_info_and_suppressed_warning_for_converted_subset(
         self, tmp_path: Path
     ) -> None:
-        """AC4: exactly one INFO census diagnostic reporting the converted
+        """Exactly one INFO census diagnostic reporting the converted
         count and per-reason deferred counts, and NO
         ``decomp-libs-electrical-present`` WARNING for the converted subset
         -- even though ``detect_libs_electrical`` is stubbed to return one,
@@ -648,7 +647,7 @@ class TestLibsElectricalPipelineWiring:
 
 # ---------------------------------------------------------------------------
 # Tier 3: the real deck + the local cobre binary, guarded exactly like
-# tests/test_decomp_fcf_roundtrip.py.
+# the fcf-roundtrip tests.
 # ---------------------------------------------------------------------------
 
 _DECK = Path("example/decomp-abr-26-lpp")
@@ -665,7 +664,7 @@ class TestRealDeckValidation:
     def test_abr_26_lpp_converts_and_validates_with_libs_electrical_generics(
         self, tmp_path: Path
     ) -> None:
-        """AC5: converting the real deck emits >= 1 ``LIBS_ELEC_*`` generic
+        """Converting the real deck emits >= 1 ``LIBS_ELEC_*`` generic
         constraint with matching rows in
         ``generic_constraint_bounds.parquet``, and ``cobre validate`` on the
         converted case exits 0.

@@ -38,8 +38,8 @@ _DIAG_CODE = "dashboard-unweighted-tree-averages"
 #: Repo-internal references that must NEVER leak into this diagnostic's
 #: summary/remediation: a pip-installed user has no repo checkout, no
 #: converter vocabulary, and no file layout to resolve any of these against.
-#: Mirrors ``test_remediation_has_no_repo_internal_references``
-#: (tests/test_decomp_fcf_capability.py).
+#: Mirrors ``test_remediation_has_no_repo_internal_references`` in the
+#: DECOMP boundary-FCF capability tests.
 _REPO_INTERNAL_LEAKS = (
     ".py",
     ".json",
@@ -108,9 +108,9 @@ def _tree_policy_graph() -> dict[str, Any]:
 
 
 class TestLoadTemporalContextAbsentLinesJson:
-    """ticket-029: ``lines.json`` degrades to an empty line set, not a crash.
+    """``lines.json`` degrades to an empty line set, not a crash.
 
-    Before ticket-029 routed this read through
+    Before this read was routed through
     ``cobre_readers.read_cobre_lines``, an absent ``system/lines.json``
     crashed ``load_temporal_context`` with an unguarded ``json.load`` on a
     missing path -- the one sanctioned behaviour change the reader-failure
@@ -130,7 +130,7 @@ class TestLoadTemporalContextAbsentLinesJson:
 
 
 class TestTreeAveragesDiagnosticEmission:
-    """AC #1/#2: emit on a non-empty ``nodes`` list; silent otherwise."""
+    """Emit on a non-empty ``nodes`` list; silent otherwise."""
 
     def test_emits_on_nonempty_nodes(self, tmp_path: Path) -> None:
         case_dir = _minimal_case(tmp_path, policy_graph=_tree_policy_graph())
@@ -183,7 +183,7 @@ class TestTreeAveragesDiagnosticEmission:
 
 
 class TestTreeAveragesDiagnosticMessageHygiene:
-    """AC #3: the message reaches pip-installed end users with no repo checkout."""
+    """The message reaches pip-installed end users with no repo checkout."""
 
     def test_no_repo_internal_references(self, tmp_path: Path) -> None:
         case_dir = _minimal_case(tmp_path, policy_graph=_tree_policy_graph())
@@ -207,15 +207,15 @@ class TestTreeAveragesDiagnosticMessageHygiene:
 
 
 # ---------------------------------------------------------------------------
-# Full synthetic case for the CliRunner surfacing test (AC #4)
+# Full synthetic case for the CliRunner surfacing test
 # ---------------------------------------------------------------------------
 
 
 def _build_full_case(tmp_path: Path, *, tree: bool) -> Path:
     """A complete, self-contained Cobre case directory ``build_dashboard()`` can
-    render end-to-end (mirrors ``TestDashboardIntegration.case_dir`` in
-    ``tests/test_dashboard.py``, proven against the real ``build_dashboard()``
-    pipeline). *tree* adds a non-empty ``policy_graph.nodes`` list.
+    render end-to-end (mirrors ``TestDashboardIntegration.case_dir``, proven
+    against the real ``build_dashboard()`` pipeline). *tree* adds a non-empty
+    ``policy_graph.nodes`` list.
     """
     case = tmp_path / ("tree_case" if tree else "linear_case")
     case.mkdir()
@@ -494,7 +494,7 @@ def _build_full_case(tmp_path: Path, *, tree: bool) -> Path:
 
 
 class TestDashboardCliSurfacesTreeAveragesDiagnostic:
-    """AC #4: the dashboard command surfaces the diagnostic via CliRunner."""
+    """The dashboard command surfaces the diagnostic via CliRunner."""
 
     @staticmethod
     def _invoke(argv: list[str]) -> Any:
@@ -750,7 +750,7 @@ class TestLoadStochasticDataPartialDirectory:
 
 
 class TestLoadPolicyMetadataAbsent:
-    """AC: an absent ``output/policy`` degrades to ``{}`` with no cobre import."""
+    """An absent ``output/policy`` degrades to ``{}`` with no cobre import."""
 
     def test_absent_policy_dir_returns_empty_without_importing_cobre(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -773,7 +773,7 @@ class TestLoadPolicyMetadataAbsent:
 
 
 class TestLoadPolicyMetadataFailureDegrades:
-    """AC: a failing ``cobre.results.load_policy`` degrades to ``{}`` + one warning.
+    """A failing ``cobre.results.load_policy`` degrades to ``{}`` + one warning.
 
     Stubs ``sys.modules['cobre']`` (the ``fcf/bootstrap.py`` test convention)
     so this exercises the failure path without a real cobre install or a
@@ -834,7 +834,7 @@ class TestLoadPolicyMetadataFailureDegrades:
 @requires_cobre_python
 @requires_writer_binding
 class TestLoadPolicyMetadataHappyPath:
-    """AC: a real ``write_policy_checkpoint`` output yields the terminal
+    """A real ``write_policy_checkpoint`` output yields the terminal
     ``state_dimension``.
 
     Mirrors ``decomp.fcf.capability``'s synthetic-checkpoint construction: a

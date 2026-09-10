@@ -28,7 +28,7 @@ _REMEDIATION_MARKERS = (
 
 #: Repo-internal references that must NEVER leak into an end-user-facing
 #: message: a pip-installed user has no repo checkout, so doc paths, developer
-#: worktrees, and internal spec/ticket codes are noise (and, as this message's
+#: worktrees, and internal planning codes are noise (and, as this message's
 #: history proved, actively misleading). This is the regression guard.
 _REPO_INTERNAL_LEAKS = (
     "docs/",
@@ -47,7 +47,7 @@ def test_remediation_names_install_fix_and_escape_hatch() -> None:
 
 def test_remediation_has_no_repo_internal_references() -> None:
     """The remediation reaches pip-installed end users, who have no repo — it
-    must stay self-contained (no doc paths, worktrees, or ticket/spec codes)."""
+    must stay self-contained (no doc paths, worktrees, or planning/spec codes)."""
     for leak in _REPO_INTERNAL_LEAKS:
         assert leak not in REMEDIATION, (
             f"remediation leaks repo-internal reference {leak!r}: {REMEDIATION!r}"

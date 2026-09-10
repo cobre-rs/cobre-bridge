@@ -208,7 +208,7 @@ class TestCrossReferenceConsistency:
 
 
 # ---------------------------------------------------------------------------
-# build_id_map fictitious plant filtering  (ticket-009)
+# build_id_map fictitious plant filtering
 # ---------------------------------------------------------------------------
 
 

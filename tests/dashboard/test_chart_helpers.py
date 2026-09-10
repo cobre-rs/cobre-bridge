@@ -632,7 +632,7 @@ def test_cost_summary_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# compute_cost_summary — ticket-007: p5 and p95 columns
+# compute_cost_summary — p5 and p95 columns
 # ---------------------------------------------------------------------------
 
 
@@ -787,7 +787,7 @@ def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-009: comparators.charts golden-string parity
+# comparators.charts golden-string parity
 #
 # These tests guard that re-pointing the per-stage / percentile-band
 # aggregation in ``cobre_bridge.comparators.charts`` onto the analyze-layer
@@ -798,7 +798,7 @@ def test_chart_cost_bar_error_bars_omitted_when_nan() -> None:
 # The golden files under ``tests/golden/`` were captured from the LEGACY
 # (pre-re-point) ``charts.py`` on the fixtures below. The only non-deterministic
 # part of the output is the random ``chart-<hex>`` div id emitted by
-# ``plotly_div`` (a fresh uuid per render, unrelated to this ticket); it is
+# ``plotly_div`` (a fresh uuid per render, unrelated to the payload); it is
 # normalised away by ``_strip_chart_id`` before comparison so the assertion
 # tests the numeric/structural payload only. Regenerate via
 # ``scripts/regen-goldens.sh``.
@@ -915,7 +915,7 @@ def test_system_comparison_chart_html_matches_golden(
 
 
 # ---------------------------------------------------------------------------
-# ticket-010: per-bus roll-up + per-plant percentile golden-string parity
+# per-bus roll-up + per-plant percentile golden-string parity
 #
 # Guards that re-pointing the per-bus aggregation (hydro_per_bus_chart,
 # hydro_slack_per_bus_chart) and the per-plant percentile extraction
@@ -1029,16 +1029,14 @@ def detail_cobre_hydro() -> pl.DataFrame:
     )
 
 
-# ticket-011 (epic-03): read_cobre_hydro_metadata no longer carries a plant
-# "bus_id" (decision B1); the per-bus roll-up now sources the plant->bus label
+# read_cobre_hydro_metadata no longer carries a plant
+# "bus_id"; the per-bus roll-up now sources the plant->bus label
 # from "bus_ids" (see analyze._bus_name_lookups), merged onto hydro_meta by
 # the results-comparison orchestrator from the hydro_bus_generation
-# partition. ``per_bus_hydro_meta`` was migrated to the "bus_ids" shape by
-# ticket-014, one bus per plant (0->100, 1->101, 2->199), so every plant here
+# partition. ``per_bus_hydro_meta`` uses the "bus_ids" shape,
+# one bus per plant (0->100, 1->101, 2->199), so every plant here
 # still resolves to exactly the bus it did under the legacy "bus_id" shape --
-# a value-preserving migration, confirmed by ticket-014 to render the
-# byte-identical golden HTML (see epic-03/learnings.md for the verified
-# before/after series).
+# a value-preserving migration that renders the byte-identical golden HTML.
 def test_hydro_per_bus_chart_html_matches_golden(
     per_bus_results: list[ResultComparison],
     per_bus_hydro_pct: pl.DataFrame,
@@ -1077,7 +1075,7 @@ def test_hydro_slack_per_bus_chart_html_matches_golden(
 
 
 # ---------------------------------------------------------------------------
-# ticket-011: synthetic two-bus plant coverage (AC5) at the chart-rendering
+# synthetic two-bus plant coverage at the chart-rendering
 # level -- the analyze-layer exclusion/diagnostic behaviour is unit-tested
 # directly in test_analyze.py; these confirm the chart builders that consume
 # it render the single-bus plant's panel and simply omit the ambiguous one,
@@ -1089,7 +1087,7 @@ def test_hydro_slack_per_bus_chart_html_matches_golden(
 def two_bus_hydro_meta() -> dict[int, dict]:
     return {
         0: {"bus_ids": {100}},
-        9: {"bus_ids": {100, 101}},  # synthetic two-bus plant (epic 08 territory).
+        9: {"bus_ids": {100, 101}},  # synthetic two-bus plant.
     }
 
 
@@ -1206,7 +1204,7 @@ def test_line_summary_chart_html_matches_golden(
         line_summary_meta,
     )
     assert_html_golden(html, "line_summary_chart.html")
-    # Anti-silent-blank guard (see ticket-051): the overlay's two capacity
+    # Anti-silent-blank guard: the overlay's two capacity
     # traces must actually be present, not just byte-match an empty chart.
     assert "Upper bound" in html
     assert "Lower bound" in html
@@ -1234,7 +1232,7 @@ def test_build_thermal_detail_tab_html_matches_golden(
 
 
 # ---------------------------------------------------------------------------
-# ticket-011: system/network draw-only golden-string parity
+# system/network draw-only golden-string parity
 #
 # Guards that re-pointing the Cobre-sum + the source-model-SIN fold
 # (cobre_aggregate_chart), the per-bus grouping + per-eid percentile lookup
@@ -1369,7 +1367,7 @@ def test_system_spillage_energy_chart_html_matches_golden(
 
 
 # ---------------------------------------------------------------------------
-# ticket-012: build_comparison_report dataset-seam golden parity
+# build_comparison_report dataset-seam golden parity
 #
 # Guards that re-pointing ``build_comparison_report`` onto the
 # ``ComparisonDataset`` seam (it now takes the dataset plus explicit
@@ -1490,7 +1488,7 @@ def test_build_comparison_report_dataset_golden() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-013: per-tab metadata-drain golden parity
+# per-tab metadata-drain golden parity
 #
 # Guards that re-pointing the Overview / System / Energy-Balance / Network tab
 # blocks of ``build_comparison_report`` to read their frame/dict/list/int args
@@ -1539,7 +1537,7 @@ def test_report_tab_matches_golden(tab_id: str, golden_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-014: Hydro Operation / Hydro Details metadata-drain golden parity
+# Hydro Operation / Hydro Details metadata-drain golden parity
 #
 # Guards that re-pointing the Hydro Operation and Hydro Details tab blocks of
 # ``build_comparison_report`` to read their frame/dict/int args from
@@ -1574,7 +1572,7 @@ def test_report_hydro_tab_matches_golden(tab_id: str, golden_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-021: Thermal Operation / Thermal Details / Productivity drain parity
+# Thermal Operation / Thermal Details / Productivity drain parity
 #
 # Guards that re-pointing the Thermal Operation, Thermal Details and
 # Productivity tab blocks of ``build_comparison_report`` to read their frame
@@ -1613,7 +1611,7 @@ def test_report_thermal_productivity_tab_matches_golden(
 
 
 # ---------------------------------------------------------------------------
-# ticket-022: Constraints / Performance metadata-drain golden parity
+# Constraints / Performance metadata-drain golden parity
 #
 # Guards that re-pointing the Constraints and Performance tab blocks of
 # ``build_comparison_report`` to read their frame/list/int/float/dict args from
@@ -1749,7 +1747,7 @@ def test_build_comparison_report_empty_dataset_has_all_tabs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-017: facet_grid subplot-domain helper
+# facet_grid subplot-domain helper
 #
 # These tests pin the `facet_grid` / `FacetPanel` helper in
 # `cobre_bridge.ui.html.plotly` to the legacy gap-based subplot-domain
@@ -1758,7 +1756,7 @@ def test_build_comparison_report_empty_dataset_has_all_tabs() -> None:
 # single-column spillage stack, and the unclamped performance stack including
 # the intentional `-0.0`), re-derive the legacy formula inline as an oracle for
 # `n` in range(1, 8), and confirm `FacetPanel` is immutable. This is a pure-add
-# guard: ticket-018 re-points the chart functions onto `facet_grid`.
+# guard for re-pointing the chart functions onto `facet_grid`.
 # ---------------------------------------------------------------------------
 
 

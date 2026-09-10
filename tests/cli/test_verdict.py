@@ -20,7 +20,7 @@ from tests.conftest import _empty_fake_dataset, _fake_dataset
 
 
 def _info_diagnostic() -> Diagnostic:
-    """A minimal INFO diagnostic, mirroring the pattern in ``tests/test_cli.py``."""
+    """A minimal INFO diagnostic for exercising the verdict builders."""
     return Diagnostic(
         code="some-info",
         severity=Severity.INFO,

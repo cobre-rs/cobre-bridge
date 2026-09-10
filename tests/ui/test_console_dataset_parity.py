@@ -1,4 +1,4 @@
-"""Console==dataset parity regression tests (epic-07, ticket-020).
+"""Console==dataset parity regression tests.
 
 The compare-data-layer migration's central invariant is single-source-of-truth:
 every number on the console must trace back to ONE ``ComparisonDataset`` analysis
@@ -20,8 +20,8 @@ The summary printer now renders a Rich table, so its single-source invariant is
 enforced solely by the parse-vs-dataset tests below.
 
 Fixtures are hermetic synthetic in-memory data (NO real the source model case, NO
-``inewave`` I/O), copied from ``tests/test_analyze.py`` and
-``tests/test_golden_dataset.py``.
+``inewave`` I/O), copied from ``tests/comparators/test_analyze.py`` and
+``tests/comparators/test_golden_dataset.py``.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ _RESULTS_VALUE_COLS = 6
 
 
 # ---------------------------------------------------------------------------
-# Synthetic fixtures (copied verbatim from tests/test_analyze.py)
+# Synthetic fixtures (copied verbatim from tests/comparators/test_analyze.py)
 # ---------------------------------------------------------------------------
 
 
@@ -125,7 +125,7 @@ def _make_results() -> list[ResultComparison]:
 
 
 def _one_hydro_pct() -> PercentileData:
-    """The one-hydro-frame percentile data (mirrors ticket-019)."""
+    """The one-hydro-frame percentile data."""
     return PercentileData(
         hydro=pl.DataFrame(
             {

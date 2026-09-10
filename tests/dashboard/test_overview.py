@@ -157,7 +157,7 @@ def _make_mock_data(
 
 
 def test_tab_constants() -> None:
-    """Module-level constants must match the ticket specification exactly."""
+    """Module-level constants must match their expected values exactly."""
     assert overview_mod.TAB_ID == "tab-overview"
     assert overview_mod.TAB_LABEL == "Overview"
     assert overview_mod.TAB_ORDER == 0

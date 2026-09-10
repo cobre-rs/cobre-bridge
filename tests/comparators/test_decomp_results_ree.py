@@ -1,7 +1,7 @@
 """REE energy rollup tests for ``comparators.decomp.results``.
 
-Third carve out of the legacy ``test_decomp_results_compare.py`` mega file
-(TST-13): the REE membership map, Cobre-side and DECOMP-side per-REE
+Third carve out of the legacy ``test_decomp_results_compare.py`` mega file:
+the REE membership map, Cobre-side and DECOMP-side per-REE
 ENA/EARM sums, the full REE result-comparison rollup, the Balance tab's REE
 rows in ``build_decomp_dataset``, and the REE energy chart. The remaining
 classes (report_builder/verdict/CLI cross-module tests and the tier-3
@@ -121,7 +121,7 @@ class TestCobreReeSums:
 
     def test_missing_energy_columns_degrades_to_empty_instead_of_raising(self) -> None:
         """A ``cobre_hydro`` frame that carries no ENA/EARM columns at all --
-        e.g. the trimmed ``_aligned_fixture()`` shape other tickets' fixtures
+        e.g. the trimmed ``_aligned_fixture()`` shape other fixtures
         use -- must degrade gracefully rather than raising a Polars
         ``ColumnNotFoundError``."""
         cobre_hydro = pl.DataFrame({"entity_id": [0], "stage_id": [0]})
@@ -163,7 +163,7 @@ class TestReeResultComparisons:
     """``_ree_result_comparisons``: the full REE rollup -- membership map,
     scenario-averaged DECOMP side, membership-weighted Cobre side, the EARM
     MWh -> MWmes reconciliation, and the never-silently-dropped
-    unmapped-plant diagnostic (ticket-018 requirement 4)."""
+    unmapped-plant diagnostic."""
 
     def test_without_stage_hours_ena_is_unscaled_earm_is_divided_by_730(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -224,7 +224,7 @@ class TestReeResultComparisons:
     def test_plant_absent_from_membership_excluded_and_recorded(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC: a hydro code absent from the membership table is excluded
+        """A hydro code absent from the membership table is excluded
         from every REE sum and its code is recorded via the diagnostics
         path, not silently dropped."""
         # The id map declares a THIRD hydro code (30) the membership fixture
@@ -281,7 +281,7 @@ class TestReeResultComparisons:
 
 
 class TestBuildDecompDatasetRee:
-    """ticket-018: fills ``results`` with ``entity_type="ree"`` rows and
+    """Fills ``results`` with ``entity_type="ree"`` rows and
     ``dataset.metadata["unmapped"]["ree"]``."""
 
     def test_no_deck_no_ree_rows_and_empty_unmapped(
@@ -304,7 +304,7 @@ class TestBuildDecompDatasetRee:
     def test_both_sides_present_tidy_carries_ree_rows(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC: ``tidy`` has ``entity_type=="ree"`` rows for ``ena_mwmes`` and
+        """``tidy`` has ``entity_type=="ree"`` rows for ``ena_mwmes`` and
         ``earm_final_mwmes``, with ``source`` in {"newave", "cobre"}."""
         _patch_aligned_frames(monkeypatch, _ree_aligned_fixture())
         _patch_shared_case(monkeypatch, id_map=_ree_id_map())
@@ -323,7 +323,7 @@ class TestBuildDecompDatasetRee:
     def test_report_ree_section_present_for_decomp_dataset(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC: ``build_comparison_report(dataset)`` renders a non-empty REE
+        """``build_comparison_report(dataset)`` renders a non-empty REE
         energy section for a DECOMP dataset."""
         _patch_aligned_frames(monkeypatch, _ree_aligned_fixture())
         _patch_shared_case(monkeypatch, id_map=_ree_id_map())

@@ -1,7 +1,7 @@
 """Constraints tab tests for ``comparators.decomp.results``.
 
-Third carve out of the legacy ``test_decomp_results_compare.py`` mega file
-(TST-13): the register-term lookup helpers (stage-frame, storage, term
+Third carve out of the legacy ``test_decomp_results_compare.py`` mega file:
+the register-term lookup helpers (stage-frame, storage, term
 dispatch, RHE achieved LHS), the DECOMP-side generic-constraint LHS
 derivation (``_generic_constraint_lhs_decomp``), and the Constraints tab's
 ``gc_*`` metadata in ``build_decomp_dataset``. The remaining classes
@@ -57,8 +57,8 @@ def _re_record(
 ) -> ConstraintRecord:
     """A minimal `ConstraintRecord` fixture carrying only the fields
     `_generic_constraint_lhs_decomp` reads (`family`, `constraint_id`,
-    `stage_start`/`stage_end`, `terms`); `bounds` is never read by this
-    ticket's LHS derivation."""
+    `stage_start`/`stage_end`, `terms`); `bounds` is never read by the
+    LHS derivation."""
     return ConstraintRecord(
         family=family,
         constraint_id=constraint_id,
@@ -230,9 +230,9 @@ class TestRheLhsLookup:
 
 
 class TestGenericConstraintLhsDecomp:
-    """`_generic_constraint_lhs_decomp`: the DECOMP-side LHS derivation --
-    this plan's least-certain crux (ticket-019). ticket-020: the census/id
-    map now come from the shared `DecompCase` (`case.dadger`/`case.id_map`)
+    """`_generic_constraint_lhs_decomp`: the DECOMP-side LHS derivation.
+    The census/id map now come from the shared `DecompCase`
+    (`case.dadger`/`case.id_map`)
     instead of a per-call `_decomp_constraint_context` re-parse -- these
     tests build that `case` via `make_decomp_case` and patch the public
     `read_constraints` seam rather than the now-removed private helper."""
@@ -337,7 +337,7 @@ class TestGenericConstraintLhsDecomp:
     def test_rhe_soft_constraint_lhs_is_the_achieved_valor(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC: a soft (RHE) constraint's per-stage ``lhs_value`` is the
+        """A soft (RHE) constraint's per-stage ``lhs_value`` is the
         operation's achieved value (``valor_MW``) -- NOT valor + the shortfall
         (which would be the target/bound ``Meta``). Verified on a constructed
         fixture, independent of any census (RHE reads `DecOperRheSoft`
@@ -488,7 +488,7 @@ class TestGenericConstraintLhsDecomp:
 
 
 class TestBuildDecompDatasetConstraints:
-    """ticket-019: fills ``gc_constraints``/``gc_bounds``/``gc_lhs_newave``/
+    """Fills ``gc_constraints``/``gc_bounds``/``gc_lhs_newave``/
     ``gc_lhs_cobre`` -- the cobre-side pieces reused verbatim from
     `constraints`, the DECOMP-side LHS newly derived."""
 

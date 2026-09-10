@@ -162,7 +162,7 @@ class TestConvertLines:
 
 # ---------------------------------------------------------------------------
 # Line bounds conversion (folds patamar.dat exchange factors into per-block
-# rows — cobre decision 10, epic-02 §7.2)
+# rows — cobre decision 10)
 # ---------------------------------------------------------------------------
 
 
@@ -345,11 +345,11 @@ class TestConvertLineBounds:
 
 
 # ---------------------------------------------------------------------------
-# Ticket 008: line_bounds migration fidelity + zero-capability.
+# line_bounds migration fidelity + zero-capability.
 #
 # The synthetic shape tests above (``TestConvertLineBounds``) pin the folding
 # mechanics on a small hand-built fixture. These tests pin the two claims
-# ticket 008 exists to prove: (1) on a real deck, every per-block row equals
+# they exist to prove: (1) on a real deck, every per-block row equals
 # ``base_direct_mw x direct_factor`` recomputed independently from
 # ``sistema.dat``/``patamar.dat`` -- never by reading back
 # ``convert_line_bounds``'s own ``date_lookup``/``direct_factor_map`` state --
@@ -457,7 +457,7 @@ def _newave_expected_factor(
 
 
 class TestConvertLineBoundsRealDeckFidelity:
-    """Ticket 008 acceptance criteria 1 + 4: every per-block row on a real
+    """Every per-block row on a real
     deck matches an independently recomputed ``base x factor`` to 1e-9
     relative, and the per-block row count is asserted (not just the
     values) against the count of genuinely differing combinations.
@@ -581,8 +581,7 @@ class TestConvertLineBoundsZeroCapability:
     """cobre decision 10 makes ``direct_mw = 0.0`` an ordinary bound. No
     current deck ever records a zero exchange factor (measured: 1152
     factors across the converted example cases, zero zeros, min 0.5582), so
-    only a synthetic fixture can pin the new capability (ticket 008
-    acceptance criterion 3)."""
+    only a synthetic fixture can pin the new capability."""
 
     def _make_id_map(self) -> NewaveIdMap:
         return NewaveIdMap(subsystem_ids=[1, 2, 99], hydro_codes=[], thermal_codes=[])

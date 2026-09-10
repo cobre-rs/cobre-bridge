@@ -1,7 +1,7 @@
 """Energy Balance tab tests for ``comparators.decomp.results``.
 
-Second carve out of the legacy ``test_decomp_results_compare.py`` mega file
-(TST-13): the System tab's cobre bus percentile metadata and the Energy
+Second carve out of the legacy ``test_decomp_results_compare.py`` mega file:
+the System tab's cobre bus percentile metadata and the Energy
 Balance frames feeding ``build_decomp_dataset``. The remaining concern bands
 (network, costs, performance, hydro/thermal detail, productivity, FPHA, REE,
 evaporation, constraints, CLI) stay in the mega file pending their own carve.
@@ -29,7 +29,7 @@ from tests.comparators.conftest import (
 
 
 class TestSystemTabMetadata:
-    """ticket-005: the System tab's cobre bus percentile band + the
+    """The System tab's cobre bus percentile band + the
     exclusion of the transhipment bus from ``results`` bus rows."""
 
     def _bus_percentiles(self) -> pl.DataFrame:
@@ -145,7 +145,7 @@ def _dec_oper_sist_frame() -> pl.DataFrame:
 
 
 class TestEnergyBalanceFrames:
-    """``_energy_balance_frames`` -- ticket-006's Energy Balance tab
+    """``_energy_balance_frames`` -- the Energy Balance tab
     reference frames, built from ``dec_oper_sist``'s stage-aggregate rows."""
 
     def _bus_codes(self) -> dict[int, int]:
@@ -315,7 +315,7 @@ def _cobre_hydro_means_fixture() -> pl.DataFrame:
 
 
 class TestBuildDecompDatasetEnergyBalance:
-    """ticket-006: Energy Balance tab metadata (demand / gen-by-source /
+    """Energy Balance tab metadata (demand / gen-by-source /
     EARM / ENA) filled by ``build_decomp_dataset``."""
 
     def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:

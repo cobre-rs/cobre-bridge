@@ -36,13 +36,12 @@ _LAG_FACTOR = MONTH_HOURS * C_M3S2HM3
 
 # `_make_gnl_ring_fixture` always builds an `n_patamares=3` header; a uniform
 # split of `MONTH_HOURS` across those 3 coupling blocks reproduces the
-# pre-ticket-001 plain-sum-times-total-hours GNL value exactly ÷ 3 (see
+# plain-sum-times-total-hours GNL value exactly ÷ 3 (see
 # `test_map_gnl_uniform_blocks_is_sum_over_n_patamares`).
 _UNIFORM_GNL_BLOCK_HOURS = (MONTH_HOURS / 3, MONTH_HOURS / 3, MONTH_HOURS / 3)
 
-# cobre `policy.fbs` entity_type codes (see ticket-005's Current State) — a
-# stable external contract, restated locally rather than importing the
-# mapper module's private constants.
+# cobre `policy.fbs` entity_type codes — a stable external contract, restated
+# locally rather than importing the mapper module's private constants.
 _HYDRO_STORAGE = 0
 _HYDRO_INFLOW_LAG = 1
 _ANTICIPATED_THERMAL_STATE = 2
@@ -462,8 +461,8 @@ def test_map_gnl_places_chain_rule_sum_on_dated_slots() -> None:
     )
 
     mapped = result.cuts[0]
-    # Uniform per-block hours reproduce the pre-ticket-001 plain sum ÷
-    # n_patamares (3) — see test_map_gnl_uniform_blocks_is_sum_over_n_patamares.
+    # Uniform per-block hours reproduce the plain sum ÷ n_patamares (3) —
+    # see test_map_gnl_uniform_blocks_is_sum_over_n_patamares.
     assert mapped.coefficients[2] == pytest.approx(0.6 * MONTH_HOURS / 3)  # 94 dated
     assert mapped.coefficients[3] == pytest.approx(7.0 * MONTH_HOURS / 3)  # 95 dated
 
@@ -529,7 +528,7 @@ def test_resolve_gnl_targets_docstring_is_month_anchor_not_full_day() -> None:
 
 
 def test_map_gnl_all_dated_slots_covered_drops_nothing() -> None:
-    """Ticket-005 — the post-GAP-2 shape: `post_horizon_start` is enabled
+    """The post-GAP-2 shape: `post_horizon_start` is enabled
     (non-`None`) but both targets' dated slots are `>= post_horizon_start`,
     so the covered-lane filter drops nothing. Locks the invariant that
     enabling the filter on an all-covered ring is a no-op versus
@@ -556,9 +555,9 @@ def test_map_gnl_all_dated_slots_covered_drops_nothing() -> None:
 
 
 def test_map_gnl_post_horizon_start_none_is_old_behavior() -> None:
-    """Ticket-013 AC 2 — `post_horizon_start=None` (the default) disables
-    the covered-lane filter entirely: both dated slots populate exactly as
-    ticket-009's pre-ticket-013 behavior, and no covered-lane drop fires.
+    """`post_horizon_start=None` (the default) disables the covered-lane
+    filter entirely: both dated slots populate exactly as the pre-filter
+    behavior, and no covered-lane drop fires.
     """
     pi_gnl = _gnl_row(24, {1: 0.1, 3: 0.2, 5: 0.3, 12: 1.0, 14: 2.0, 16: 4.0})
     cuts, manifest, id_map, plan = _make_gnl_ring_fixture(

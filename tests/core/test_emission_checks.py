@@ -1,4 +1,4 @@
-"""Unit tests for cobre_bridge.core.emission_checks (ticket-016, epic-04).
+"""Unit tests for cobre_bridge.core.emission_checks.
 
 Each rule gets a positive test (synthetic violation caught) and a negative
 test (the legal shape passes), run against hand-built artifacts — this module
@@ -104,7 +104,7 @@ class TestHydroBoundsNoRaising:
     def test_decomp_shaped_table_without_guarded_columns_is_not_applicable(
         self,
     ) -> None:
-        """DECOMP's hydro_bounds carries only min_outflow_m3s (AC #8)."""
+        """DECOMP's hydro_bounds carries only min_outflow_m3s."""
         hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
         hydro_bounds = pa.table(
             {
@@ -523,7 +523,7 @@ class TestGroupBoundEnvelope:
         """Referential existence (does ``hydro_unit_group_id`` name a
         declared group) is out of scope for this rule — covered-by-
         construction while ``id = 0`` is the only group the bridge ever
-        emits (ticket-025's note)."""
+        emits."""
         hydros = _hydros(_hydro(0, max_turbined_m3s=100.0, max_generation_mw=50.0))
         group_bounds = pa.table(
             {
@@ -626,7 +626,7 @@ class TestBoundRowUniqueness:
 
     def test_stage_wide_row_and_per_block_rows_coexist(self) -> None:
         """A None-block base row plus Some(b) per-block rows on the same
-        (entity, stage, column) is legal usage (epic-02's line_bounds
+        (entity, stage, column) is legal usage (the line_bounds
         convention), not a duplicate."""
         table = pa.table(
             {

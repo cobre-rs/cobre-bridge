@@ -165,7 +165,7 @@ def test_empty_confhd_yields_empty_active_set() -> None:
     assert active_hydro_codes(empty, _cadastro({1: 0.01})) == []
 
 
-# --- Dead-volume filling admission (ticket-004) ------------------------------
+# --- Dead-volume filling admission ------------------------------
 
 
 def _exph(rows: list[dict]) -> pd.DataFrame:

@@ -1,8 +1,8 @@
-"""Tier-1 tests for the bucket-A -> cobre token map (TICKET-011) and the
-E1-E7 ``GenericConstraintBuilder`` emit pipeline (TICKET-012).
+"""Tier-1 tests for the bucket-A -> cobre token map and the
+E1-E7 ``GenericConstraintBuilder`` emit pipeline.
 
-Synthetic-fixture only, mirroring ``tests/test_decomp_libs_electrical.py``'s
-own convention: no ``example/`` read, no ``import cobre`` at module scope.
+Synthetic-fixture only, mirroring the ``test_libs_electrical`` module's own
+convention: no ``example/`` read, no ``import cobre`` at module scope.
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ def test_cobre_token_ener_interc_no_line_warns_and_returns_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _resolve_interc_bus + ener_interc's transshipment (IV) fallback (TICKET-018)
+# _resolve_interc_bus + ener_interc's transshipment (IV) fallback
 # ---------------------------------------------------------------------------
 
 
@@ -128,7 +128,7 @@ def test_resolve_interc_bus_unknown_code_returns_transhipment_bus_id() -> None:
 
 
 def test_cobre_token_ener_interc_transshipment_operand_resolves_direct() -> None:
-    # AC1: code 6 is NOT a declared SB code; with line_map holding the
+    # code 6 is NOT a declared SB code; with line_map holding the
     # transshipment<->SE line, _cobre_token resolves it (not a drop).
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
     line_map = {(id_map.transhipment_bus_id, 0): 7}
@@ -137,7 +137,7 @@ def test_cobre_token_ener_interc_transshipment_operand_resolves_direct() -> None
 
 
 def test_cobre_token_ener_interc_transshipment_operand_resolves_reverse() -> None:
-    # AC2: the reverse-argument-order call resolves the SAME line, with the
+    # the reverse-argument-order call resolves the SAME line, with the
     # opposite orientation token.
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
     line_map = {(id_map.transhipment_bus_id, 0): 7}
@@ -146,7 +146,7 @@ def test_cobre_token_ener_interc_transshipment_operand_resolves_reverse() -> Non
 
 
 def test_cobre_token_ener_interc_declared_codes_fallback_not_taken() -> None:
-    # AC3: both operands are declared SB codes -- the transshipment fallback
+    # both operands are declared SB codes -- the transshipment fallback
     # must never be consulted, even with a decoy line keyed at the
     # transshipment bus that would resolve to a DIFFERENT line id if the
     # fallback wrongly fired for a declared code.
@@ -157,7 +157,7 @@ def test_cobre_token_ener_interc_declared_codes_fallback_not_taken() -> None:
 
 
 def test_cobre_token_ener_interc_unknown_code_no_transshipment_line_drops() -> None:
-    # AC4: a non-SB code resolves to the transshipment bus, but line_map has
+    # a non-SB code resolves to the transshipment bus, but line_map has
     # no line for that pair -- the fallback never fabricates a line; the
     # existing skip-not-partial drop still applies.
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
@@ -239,7 +239,7 @@ def test_build_electrical_expression_all_token_kinds_exact_string() -> None:
 
 
 def test_build_electrical_expression_unresolved_token_drops_whole_expression() -> None:
-    # AC5: ger_usih(999) is absent from id_map.hydro_codes -- the WHOLE
+    # ger_usih(999) is absent from id_map.hydro_codes -- the WHOLE
     # expression drops (None), not a partial one built from ger_usih(66)
     # alone (skip-not-partial).
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(66,))
@@ -279,9 +279,8 @@ def _emit_calendar(n_stages: int, *, n_blocks: int) -> list[OperativeStage]:
 
 
 class _StubDadger:
-    """Return a preset ``pq`` DataFrame (or ``None``) — mirrors ``_StubDadger``
-    in ``tests/test_decomp_ncs.py``, duplicated here since that file is
-    outside this ticket's declared scope."""
+    """Return a preset ``pq`` DataFrame (or ``None``) — mirrors the
+    ``_StubDadger`` in the ncs tests, duplicated rather than shared."""
 
     def __init__(self, pq: pd.DataFrame | None) -> None:
         self._pq = pq
@@ -321,7 +320,7 @@ def _pq_frame(n_series: int, *, n_blocks: int) -> pd.DataFrame:
 
 
 def test_build_pee_ncs_id_map_sorted_offset_matches_pee_series() -> None:
-    # AC6: parks {7, 3} declared after N PQ series -> {3: N, 7: N+1},
+    # parks {7, 3} declared after N PQ series -> {3: N, 7: N+1},
     # sorted-by-code, offset past the PQ series, matching _pee_series' ids.
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",))
     calendar = _emit_calendar(1, n_blocks=1)
@@ -387,14 +386,12 @@ def test_build_pee_ncs_id_map_no_declared_parks_returns_empty() -> None:
 
 # ---------------------------------------------------------------------------
 # emit_libs_electrical_generics -- the E1-E7 _GenericBuilder emit pipeline
-# (TICKET-012, spec §5)
 # ---------------------------------------------------------------------------
 
 
 def _dict_context(values: Mapping[str, float]) -> DataContext:
     """A trivial dict-backed ``DataContext`` test double (duplicated from
-    ``tests/test_decomp_libs_electrical.py`` -- outside this ticket's
-    declared scope)."""
+    the ``test_libs_electrical`` module rather than shared)."""
 
     def resolve(term: ParsedTerm) -> float:
         if term.token == "__const__":
@@ -458,7 +455,7 @@ def _reserve_restriction(
     code: int, plant_code: int, threshold: float
 ) -> ElectricalRestriction:
     """The documented ``disp_usih(h) - ger_usih(h) >= R`` reserve pattern
-    (AC1/AC2's A1/A3 sign proof) for one plant, active across the whole
+    (the A1/A3 sign proof) for one plant, active across the whole
     (single-stage) calendar -- no ``habilita``, no horizon override."""
     return _restriction(
         code,
@@ -482,7 +479,7 @@ def test_libs_electrical_result_is_frozen_with_expected_fields() -> None:
 
 
 def test_emit_reserve_a1_end_to_end_generation_cap() -> None:
-    # AC1: disp_usih(1) - ger_usih(1) >= 300, A_h(1) = 1000 -> ger_usih(1)
+    # disp_usih(1) - ger_usih(1) >= 300, A_h(1) = 1000 -> ger_usih(1)
     # <= 700, a POSITIVE bare generation-cap token -- never an inverted
     # lower bound (the A1 sign fix, proven end to end through the emitter).
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
@@ -524,7 +521,7 @@ def test_emit_reserve_a1_end_to_end_generation_cap() -> None:
 
 
 def test_emit_reserve_a3_negative_cap_stays_feasible_via_slack() -> None:
-    # AC2: A_h(1) = 200 < R = 300 -> ger_usih(1) <= -100, a negative
+    # A_h(1) = 200 < R = 300 -> ger_usih(1) <= -100, a negative
     # generation cap that must stay feasible via slack (A3), never a hard
     # LP infeasibility.
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
@@ -556,7 +553,7 @@ def test_emit_reserve_a3_negative_cap_stays_feasible_via_slack() -> None:
 
 
 def test_emit_active_only_stage0_block0_single_bounds_row() -> None:
-    # AC3: a restriction active only in stage 0 block 0 of a 2-block stage
+    # a restriction active only in stage 0 block 0 of a 2-block stage
     # emits exactly one bounds row for that cell -- activation via row
     # presence -- and none for block 1.
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
@@ -584,7 +581,7 @@ def test_emit_active_only_stage0_block0_single_bounds_row() -> None:
 
 
 def test_emit_violation_penalty_overrides_big_m() -> None:
-    # AC4: an explicit TRATAMENTO-VIOLACAO penalty overrides the BIG-M
+    # an explicit TRATAMENTO-VIOLACAO penalty overrides the BIG-M
     # default.
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
     calendar = _emit_calendar(1, n_blocks=1)
@@ -618,7 +615,7 @@ def test_emit_violation_penalty_overrides_big_m() -> None:
 
 
 def test_emit_inactive_everywhere_defers_without_duplicate_diagnostic() -> None:
-    # AC5: active_cells already emits the one INFO for a restriction inactive
+    # active_cells already emits the one INFO for a restriction inactive
     # in every cell; the emitter must not add a second one.
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
     calendar = _emit_calendar(1, n_blocks=1)
@@ -644,7 +641,7 @@ def test_emit_inactive_everywhere_defers_without_duplicate_diagnostic() -> None:
 
 
 def test_emit_unresolved_bucket_a_token_defers_without_partial_constraint() -> None:
-    # AC6: ger_usih(999) is absent from id_map -- the whole restriction is
+    # ger_usih(999) is absent from id_map -- the whole restriction is
     # dropped (skip-not-partial), never emitted with a partial expression.
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
     calendar = _emit_calendar(1, n_blocks=1)
@@ -791,12 +788,12 @@ def test_emit_sorted_restriction_codes_deterministic_ids() -> None:
 
 
 # ---------------------------------------------------------------------------
-# unrecognized-token skip-not-partial containment (TICKET-015)
+# unrecognized-token skip-not-partial containment
 # ---------------------------------------------------------------------------
 
 
 def test_emit_unrecognized_token_defers_one_restriction_sibling_converts() -> None:
-    # AC3 (ticket-015): a well-formed but undeclared identifier
+    # a well-formed but undeclared identifier
     # (peq_N_PCHgd_N -- the MMGD family, deliberately unmodeled) in one
     # restriction's formula drops only that restriction; a fully resolvable
     # sibling still converts.
@@ -838,7 +835,7 @@ def test_emit_unrecognized_token_defers_one_restriction_sibling_converts() -> No
 
 
 def test_emit_no_unrecognized_tokens_leaves_deferred_reason_empty() -> None:
-    # AC4 (ticket-015): a model with no unrecognized tokens leaves
+    # a model with no unrecognized tokens leaves
     # deferred["unrecognized-token"] an empty tuple and drops nothing
     # spuriously.
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
@@ -866,7 +863,7 @@ def test_emit_no_unrecognized_tokens_leaves_deferred_reason_empty() -> None:
 
 
 def test_emit_propagates_plain_value_error_not_unrecognized_token() -> None:
-    # Pitfall guard (ticket-015): the emitter catches ONLY
+    # Pitfall guard: the emitter catches ONLY
     # UnrecognizedElectricalToken -- a plain ValueError from a resolver bug
     # must still fail loud, never be masked as a routine skip-not-partial
     # drop.
@@ -909,12 +906,12 @@ def test_emit_propagates_plain_value_error_not_unrecognized_token() -> None:
 
 
 # ---------------------------------------------------------------------------
-# unrecognized-token containment widened to active_cells (TICKET-017)
+# unrecognized-token containment widened to active_cells
 # ---------------------------------------------------------------------------
 
 
 def test_emit_unrecognized_token_in_activation_rule_defers_one_restriction() -> None:
-    # AC1 (ticket-017): an undeclared identifier in a restriction's
+    # an undeclared identifier in a restriction's
     # ACTIVATION RULE -- not its bound/expression -- must be contained the
     # same way: active_cells' own UnrecognizedElectricalToken now sits
     # inside the per-restriction guard, so it drops only that restriction; a
@@ -957,7 +954,7 @@ def test_emit_unrecognized_token_in_activation_rule_defers_one_restriction() -> 
 
 
 def test_emit_malformed_activation_rule_propagates_value_error() -> None:
-    # AC2 (ticket-017): a malformed-DSL activation rule (unbalanced parens,
+    # a malformed-DSL activation rule (unbalanced parens,
     # not an undeclared identifier) must still fail loud, never be swallowed
     # by the widened UnrecognizedElectricalToken-specific guard.
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
@@ -989,7 +986,7 @@ def test_emit_malformed_activation_rule_propagates_value_error() -> None:
 
 # ---------------------------------------------------------------------------
 # Tier 3: the real deck + the local cobre binary, guarded exactly like
-# tests/test_decomp_fcf_roundtrip.py.
+# the fcf-roundtrip tests.
 # ---------------------------------------------------------------------------
 
 _DECK = Path("example/decomp-abr-26-lpp")
@@ -1000,13 +997,11 @@ _skip_e2e = pytest.mark.skipif(
     reason=f"requires the local cobre binary ({_COBRE_BIN}) and the {_DECK} deck",
 )
 
-#: Pre-ticket-018 ``unresolved-bucket-a`` count on this deck -- measured by
-#: stashing this ticket's ``_resolve_interc_bus`` fix (``git stash push --
-#: src/cobre_bridge/decomp/libs_electrical_emit.py``) and reconverting: 20
-#: (of which 10 are the IV-transshipment ``ener_interc`` restrictions this
-#: ticket now resolves). Pinned here so the test proves the fix's DIRECTION
-#: on the real deck without re-running the pre-fix code path inside the test
-#: itself.
+#: Baseline ``unresolved-bucket-a`` count on this deck, measured by reverting
+#: the ``_resolve_interc_bus`` fix and reconverting: 20 (of which 10 are the
+#: IV-transshipment ``ener_interc`` restrictions the fix now resolves). Pinned
+#: here so the test proves the fix's DIRECTION on the real deck without
+#: re-running the pre-fix code path inside the test itself.
 _PRE_TICKET_018_UNRESOLVED_BUCKET_A = 20
 
 
@@ -1014,11 +1009,10 @@ _PRE_TICKET_018_UNRESOLVED_BUCKET_A = 20
 def test_abr_26_lpp_ener_interc_transshipment_resolves_and_validates(
     tmp_path: Path,
 ) -> None:
-    """AC5: converting the real deck now resolves the IV-transshipment
+    """Converting the real deck now resolves the IV-transshipment
     ``ener_interc`` operands via ``_resolve_interc_bus``, so
     ``deferred["unresolved-bucket-a"]`` strictly decreases versus the
-    pre-ticket-018 baseline, and ``cobre validate`` on the converted case
-    still exits 0."""
+    baseline, and ``cobre validate`` on the converted case still exits 0."""
     from cobre_bridge.decomp.pipeline import convert_decomp_case
 
     dst = tmp_path / "decomp-abr-26-lpp-converted"

@@ -34,9 +34,9 @@ def _build_case(case_dir: Path) -> None:
     (case_dir / "output").mkdir(parents=True, exist_ok=True)
 
     # 0.13-shaped hydros.json (unit_groups[].bus_id, no top-level bus_id).
-    # Feeds load_hydro_metadata (dashboard/data.py, epic-03 ticket-012) below.
+    # Feeds load_hydro_metadata (dashboard/data.py) below.
     # read_cobre_hydro_metadata (cobre/readers.py) no longer reads
-    # any bus id from hydros.json at all (decision B1, ticket-011), so it is
+    # any bus id from hydros.json at all, so it is
     # indifferent to this shape.
     hydros = {
         "hydros": [

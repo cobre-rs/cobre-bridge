@@ -127,7 +127,7 @@ class TestConvertHydros:
         result = convert_hydros(case, self._make_id_map())
         for h in result["hydros"]:
             # Both plants are in REE 1 -> subsystem 1 -> bus 0. bus_id now
-            # lives on the mirror unit group (ticket 002), not top-level.
+            # lives on the mirror unit group, not top-level.
             assert h["unit_groups"][0]["bus_id"] == 0
 
     def test_generation_values_match_machine_sets(self, tmp_path) -> None:
@@ -393,14 +393,14 @@ class TestConvertHydros:
         # NaN treated as 0 -> factor = 1.0 -> no change from nominal 800 MW
         assert hydro_a["generation"]["max_generation_mw"] == pytest.approx(800.0)
 
-    # --- FILLING phase emission (ticket-009) -------------------------------
+    # --- FILLING phase emission -------------------------------
 
     def test_ne_plant_emits_filling_block(self, tmp_path) -> None:
         """An admitted NE plant emits its entry stage + filling contract.
 
         JURUENA (code 309) fills Oct 2024 (start_sid=1) and enters Nov 2024
         (entry_sid=2); the single-stage rate is ``2.93 / ζ_Oct`` with
-        ``ζ_Oct = 744 * 3600 / 1e6 = 2.6784`` (design §5).
+        ``ζ_Oct = 744 * 3600 / 1e6 = 2.6784``.
         """
         case = _ne_filling_case(tmp_path)
         from cobre_bridge.newave.converters.hydro import convert_hydros
@@ -438,7 +438,7 @@ class TestConvertHydros:
         """``duracao_enchimento == 0`` ⇒ entry == start, no filling block.
 
         cobre rejects ``start_stage_id >= entry_stage_id``, so the empty window
-        emits ``entry_stage_id`` only and keeps ``filling`` None (design §8).
+        emits ``entry_stage_id`` only and keeps ``filling`` None.
         """
         case = _ne_filling_case(tmp_path, duracao=0)
         from cobre_bridge.newave.converters.hydro import convert_hydros
@@ -455,7 +455,7 @@ class TestConvertHydros:
 
         Under a SHORT 3-stage horizon (Oct–Dec 2024) JURUENA's Oct-2024 filling
         start maps to ``start_sid == 0`` and a 6-month ``duracao`` pushes the
-        entry to ``entry_sid == 6 > total_stages (3)`` — a valid case (design §8):
+        entry to ``entry_sid == 6 > total_stages (3)`` — a valid case:
         the plant fills but never operates within the study, yet is still emitted.
         The rate is summed only over the in-horizon stages (the clamp in the
         caller), so ``convert_hydros`` must NOT raise ``IndexError`` indexing the
@@ -534,7 +534,7 @@ class TestConvertHydros:
 
 
 # ---------------------------------------------------------------------------
-# convert_hydros integration tests for ticket-006
+# convert_hydros integration tests
 # ---------------------------------------------------------------------------
 
 
@@ -864,7 +864,7 @@ class TestBuildMirrorUnitGroup:
 
 
 class TestLegacyHydroShapeRejectedBy013:
-    """AC5 (ticket-004): document the exact shape 0.12 produced — a hydro dict
+    """Document the exact shape 0.12 produced — a hydro dict
     with a top-level ``bus_id`` and no ``unit_groups`` — and that no converter
     emits it anymore.
 

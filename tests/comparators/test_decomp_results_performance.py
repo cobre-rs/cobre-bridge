@@ -1,7 +1,7 @@
 """Performance tab tests for ``comparators.decomp.results``.
 
-Second carve out of the legacy ``test_decomp_results_compare.py`` mega file
-(TST-13): the convergence frame, TIM stages/iterations, the max-stage guard,
+Second carve out of the legacy ``test_decomp_results_compare.py`` mega file:
+the convergence frame, TIM stages/iterations, the max-stage guard,
 the forward/backward split chart's column-robustness guard, and the
 Performance tab's ``build_decomp_dataset`` rows. The remaining concern bands
 (network, energy balance, costs, hydro/thermal detail, productivity, FPHA,
@@ -38,8 +38,8 @@ def _relato_convergence_frame() -> pl.DataFrame:
     """Three iterations of the source model's own convergence table.
 
     Carries ``gap_percentual``/``tempo`` alongside ``iteracao``/``zinf``/
-    ``zsup`` so a test can pin that ticket-012 selects only the three chart
-    columns and drops the rest (out of scope per the ticket)."""
+    ``zsup`` so a test can pin that ``_decomp_convergence_frame`` selects
+    only the three chart columns and drops the rest (out of scope)."""
     return pl.DataFrame(
         {
             "iteracao": [1, 2, 3],
@@ -69,7 +69,7 @@ def _cobre_convergence_fixture() -> pl.DataFrame:
 
 
 class TestDecompConvergenceFrame:
-    """ticket-012: ``_decomp_convergence_frame`` -- renames the source
+    """``_decomp_convergence_frame`` -- renames the source
     model's ``relato.convergencia`` onto the canonical ``iteration``/
     ``lower_bound``/``upper_bound_mean`` schema ``read_cobre_convergence``
     emits, so ``convergence_chart`` can read both sides without a
@@ -108,7 +108,7 @@ class TestDecompConvergenceFrame:
     def test_gap_and_timing_columns_are_not_carried_over(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Out of scope per the ticket: ``gap_percentual``/``tempo`` are not
+        """Out of scope: ``gap_percentual``/``tempo`` are not
         consumed by ``convergence_chart``, so they must not leak through."""
         self._patch(monkeypatch, _relato_convergence_frame())
 
@@ -149,7 +149,7 @@ class TestDecompConvergenceFrame:
 
 
 class TestBuildDecompDatasetConvergence:
-    """ticket-012: the Overview tab's Convergence overlay
+    """The Overview tab's Convergence overlay
     (``nw_convergence``/``cobre_convergence``) filled by
     ``build_decomp_dataset``."""
 
@@ -243,7 +243,7 @@ class TestBuildDecompDatasetConvergence:
 
 
 # ---------------------------------------------------------------------------
-# ticket-013: Performance tab timing metadata (Caveat #2 -- no fabricated
+# Performance tab timing metadata (Caveat #2 -- no fabricated
 # DECOMP forward/backward split).
 # ---------------------------------------------------------------------------
 
@@ -468,7 +468,7 @@ class TestPerformanceFwdBwdSplitChartColumnGuard:
         assert "Cobre (s)" in html
 
     def test_columnless_empty_frame_still_renders_cobre_only(self) -> None:
-        """The pre-ticket-013 default (an entirely empty frame) must keep
+        """The prior default (an entirely empty frame) must keep
         working exactly as before -- the guard's ``is_empty()`` half."""
         html = performance_fwd_bwd_split_chart(pl.DataFrame(), self._COBRE_TIMING)
 
@@ -477,7 +477,7 @@ class TestPerformanceFwdBwdSplitChartColumnGuard:
 
 
 class TestBuildDecompDatasetPerformance:
-    """ticket-013: the Performance tab's timing metadata
+    """The Performance tab's timing metadata
     (``nw_tim_stages``/``nw_tim_iterations``/``nw_max_stage``/
     ``cobre_training_seconds``/``cobre_iteration_timing``) filled by
     ``build_decomp_dataset``."""

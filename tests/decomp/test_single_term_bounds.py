@@ -6,7 +6,7 @@ side map, the per-block emission loop's block-count clamp, the "both sides
 absent" skip, the RHQ ``QDEF``/``QTUR``/``QDES``/``QVER`` axis lowering
 (including their coexistence on one plant and, for ``QDES``/``QVER``, the
 ``lowers_to_bound`` single-unit-term vs multi-term/non-unit-coefficient
-classification — epic-06/ticket-021+022), the RHV ``VARM`` additive floor
+classification), the RHV ``VARM`` additive floor
 conversion (including the per-stage effective floor and the no-cadastro
 warning-skip), and the fail-loud dispatcher on an unhandled family.
 """
@@ -220,8 +220,8 @@ def test_ft_thermal_single_block_generation_bound(
     id_map: DecompIdMap, effective: EffectiveCadastro
 ) -> None:
     """A single-term ``FT`` RE lowers to a ``family="thermal"`` contribution
-    on the cobre ``generation`` axis, resolved via ``id_map.thermal_id`` (M1,
-    epic-06/ticket-019)."""
+    on the cobre ``generation`` axis, resolved via ``id_map.thermal_id``
+    (M1)."""
     record = _ft_record(
         constraint_id=30,
         bounds={0: StageBounds(lower=(50.0,), upper=(212.0,))},
@@ -387,7 +387,7 @@ def test_re_unexpected_bounded_variable_raises(
 def test_re_ceiling_above_capacity_clamps_upper(
     id_map: DecompIdMap, effective: EffectiveCadastro
 ) -> None:
-    """AC1: an RE ceiling above the plant's declared capacity is clamped
+    """An RE ceiling above the plant's declared capacity is clamped
     down to that capacity — mirroring the real cross-source mismatch
     (a plant's RE ceiling above its own declared, head-derated
     ``max_generation_mw``) — while the lower bound passes through
@@ -416,7 +416,7 @@ def test_re_ceiling_above_capacity_clamps_upper(
 def test_re_ceiling_at_capacity_is_not_clamped_and_emits_no_diagnostic(
     id_map: DecompIdMap, effective: EffectiveCadastro
 ) -> None:
-    """AC2: a ceiling at (or below) capacity passes through unchanged —
+    """A ceiling at (or below) capacity passes through unchanged —
     including the boundary case where the ceiling exactly equals the
     capacity — and no clamp diagnostic is emitted."""
     record = _re_record(
@@ -444,7 +444,7 @@ def test_re_ceiling_at_capacity_is_not_clamped_and_emits_no_diagnostic(
 def test_re_clamp_emits_diagnostic_naming_plant_ceiling_and_capacity(
     id_map: DecompIdMap, effective: EffectiveCadastro
 ) -> None:
-    """AC3: a firing clamp is captured, inside ``dx.collect()``, as a
+    """A firing clamp is captured, inside ``dx.collect()``, as a
     ``decomp-re-generation-clamped`` Diagnostic naming the plant, the RE
     ceiling, and the declared capacity."""
     record = _re_record(
@@ -780,7 +780,7 @@ def test_hq_qdef_and_qtur_coexist_on_one_plant(
 def test_hq_qdes_lowers_to_diversion(
     hq_id_map: DecompIdMap, effective: EffectiveCadastro
 ) -> None:
-    """AC1 (ticket-021): a single ``±1`` ``QDES`` record with ``L <= QDES <=
+    """A single ``±1`` ``QDES`` record with ``L <= QDES <=
     U`` emits a hydro ``diversion`` contribution with the sign-mapped
     ``(lower, upper)`` — here the identity map, since the coefficient is
     ``+1``."""
@@ -815,7 +815,7 @@ def test_hq_qdes_lowers_to_diversion(
 def test_hq_qdes_negative_coefficient_flips_sides(
     hq_id_map: DecompIdMap, effective: EffectiveCadastro
 ) -> None:
-    """AC1 (ticket-021), sign-mapped: ``-1*QDES in [L, U]`` becomes
+    """Sign-mapped: ``-1*QDES in [L, U]`` becomes
     ``QDES in [-U, -L]`` on the diversion axis."""
     record = _hq_record(
         constraint_id=200,
@@ -843,7 +843,7 @@ def test_hq_qdes_negative_coefficient_flips_sides(
 def test_hq_qver_lowers_to_spillage(
     hq_id_map: DecompIdMap, effective: EffectiveCadastro
 ) -> None:
-    """AC1 (ticket-022): a single ``±1`` ``QVER`` record lowers to a hydro
+    """A single ``±1`` ``QVER`` record lowers to a hydro
     ``spillage`` contribution with the sign-mapped ``(lower, upper)``."""
     record = _hq_record(
         constraint_id=201,
@@ -876,7 +876,7 @@ def test_hq_qver_lowers_to_spillage(
 def test_hq_qver_negative_coefficient_flips_sides(
     hq_id_map: DecompIdMap, effective: EffectiveCadastro
 ) -> None:
-    """AC1 (ticket-022), sign-mapped, mirroring the QDES case above."""
+    """Sign-mapped, mirroring the QDES case above."""
     record = _hq_record(
         constraint_id=201,
         variable="QVER",
@@ -941,7 +941,7 @@ def test_hq_qdef_qdes_qver_all_coexist_on_one_plant(
 
 
 def test_qdes_single_unit_term_lowers_to_bound() -> None:
-    """AC3 (ticket-021): ``lowers_to_bound`` returns ``True`` for a single
+    """``lowers_to_bound`` returns ``True`` for a single
     ``±1`` ``QDES`` term — the classifier ``single_term_bound_contributions``
     is downstream of."""
     record = ConstraintRecord(
@@ -957,7 +957,7 @@ def test_qdes_single_unit_term_lowers_to_bound() -> None:
 
 
 def test_qdes_multi_term_does_not_lower_to_bound() -> None:
-    """AC3 (ticket-021): a multi-term ``QDES`` constraint stays generic."""
+    """A multi-term ``QDES`` constraint stays generic."""
     record = ConstraintRecord(
         family="HQ",
         constraint_id=200,
@@ -974,7 +974,7 @@ def test_qdes_multi_term_does_not_lower_to_bound() -> None:
 
 
 def test_qdes_non_unit_coefficient_does_not_lower_to_bound() -> None:
-    """AC3 (ticket-021): a non-unit-coefficient single ``QDES`` term stays
+    """A non-unit-coefficient single ``QDES`` term stays
     generic."""
     record = ConstraintRecord(
         family="HQ",
@@ -989,7 +989,7 @@ def test_qdes_non_unit_coefficient_does_not_lower_to_bound() -> None:
 
 
 def test_qver_single_unit_term_lowers_to_bound() -> None:
-    """AC2 (ticket-022): ``lowers_to_bound`` returns ``True`` for a single
+    """``lowers_to_bound`` returns ``True`` for a single
     ``±1`` ``QVER`` term."""
     record = ConstraintRecord(
         family="HQ",
@@ -1004,7 +1004,7 @@ def test_qver_single_unit_term_lowers_to_bound() -> None:
 
 
 def test_qver_multi_term_does_not_lower_to_bound() -> None:
-    """AC2 (ticket-022): a multi-term ``QVER`` constraint stays generic."""
+    """A multi-term ``QVER`` constraint stays generic."""
     record = ConstraintRecord(
         family="HQ",
         constraint_id=201,
@@ -1048,7 +1048,7 @@ def test_hq_qbom_lowers_to_pumping_flow_bound(
     qbom_id_map: DecompIdMap, effective: EffectiveCadastro
 ) -> None:
     """A single-term ``QBOM`` RHQ lowers to a pumping ``flow`` bound resolved
-    through ``pumping_station_ids`` (M2, epic-06/ticket-020)."""
+    through ``pumping_station_ids`` (M2)."""
     record = _qbom_record(
         constraint_id=166,
         bounds={0: StageBounds(lower=(5.0,), upper=(80.0,))},

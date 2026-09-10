@@ -1,6 +1,6 @@
 """Unit tests for the ``compare decomp`` artifact export.
 
-Since ticket-023 (D-STRANGLER completion), ``compare decomp`` writes its
+``compare decomp`` writes its
 machine-readable artifacts through the same shared
 :func:`cobre_bridge.comparators.export.write_artifacts` entry point as
 ``compare newave`` — there is no DECOMP-specific writer any more. This module
@@ -142,7 +142,7 @@ def test_manifest_records_command_tolerance_and_artifacts(tmp_path: Path) -> Non
 def test_manifest_records_source_dir_input_files_and_diagnostics(
     tmp_path: Path,
 ) -> None:
-    """The mislabel fix (CMP-14): ``comparison.json`` records the decomp deck
+    """The mislabel fix: ``comparison.json`` records the decomp deck
     under ``source_dir`` (never ``newave_dir``), plus the hashed input files and
     diagnostics threaded through from the caller."""
     dataset = _make_decomp_dataset()

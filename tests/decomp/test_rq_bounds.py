@@ -6,12 +6,12 @@ For an ``RQ``-derived plant, ``convert_hydro_bounds`` contributes, per stage,
 **either** one stage-level (``block_id = None``) contribution — the
 hours-weighted value — when the stage's per-block percentages are all equal,
 **or** one contribution per block (``block_id = 0..n-1``, no base) when they
-are not; never both (epic-07, ticket-023 — the accumulator does not
+are not; never both (the accumulator does not
 replicate cobre's replace-not-merge column semantics, so a base contribution
 left alongside per-block ones would be double-counted into every block's
 intersection). A ``UH``-declared plant's own value takes priority over
 ``RQ`` and is always base-only. A ``QDEF``-windowed plant still contributes
-its ``RQ``/``UH`` value regardless of the window (ticket-023, AC7) — that
+its ``RQ``/``UH`` value regardless of the window — that
 window's own contribution comes separately from
 ``single_term_bounds.single_term_bound_contributions`` (RHQ), and the
 accumulator intersects the two rather than one replacing the other.
@@ -56,7 +56,7 @@ class TestSyntheticUniformAndUhDeclared:
     "in the same deck" framing: plant 1 is ``RQ``-derived and block-uniform,
     plant 2 is ``RQ``-derived and non-uniform (for contrast), plant 3 is
     ``UH``-declared, plant 4 is ``RQ``-derived and ``QDEF``-windowed (still
-    contributes, per AC7).
+    contributes).
     """
 
     _ID_MAP = DecompIdMap(
@@ -144,7 +144,7 @@ class TestSyntheticUniformAndUhDeclared:
         """Build an ``EffectiveCadastro`` directly over ``self._hidr()``,
         bypassing ``build_effective_cadastro``/``AC`` ingestion — this class
         pins the ``RQ``/``UH`` classification, not the resolver itself
-        (covered by ``tests/test_decomp_cadastro.py``)."""
+        (covered by ``tests/decomp/test_cadastro.py``)."""
         return EffectiveCadastro(
             base=self._hidr(), n_stages=len(calendar), stage_varying=stage_varying or {}
         )
@@ -204,7 +204,7 @@ class TestSyntheticUniformAndUhDeclared:
                 self._case(calendar), self._ID_MAP, effective=self._effective(calendar)
             )
 
-        # Criterion 4 (QDEF half, retired per AC7), same mixed deck as the
+        # Criterion 4 (QDEF half), same mixed deck as the
         # two tests above: plant 4 shares REE 2 with plant 2, so it
         # contributes the identical non-uniform per-block pattern, and no
         # warning fires (the skip-and-warn branch no longer exists).

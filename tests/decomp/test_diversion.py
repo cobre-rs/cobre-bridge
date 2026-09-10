@@ -5,7 +5,7 @@ scalar-override machinery as ``VOLMIN``/``VOLMAX``/``VAZMIN``) and the
 non-scalar ``AC DESVIO`` diversion-channel reader plus the
 ``has_diversion``/``diversion`` query methods on ``EffectiveCadastro`` —
 against a synthetic ``Dadger`` double, mirroring the doubles established in
-``tests/test_decomp_cadastro.py``. No real deck, no calendar resolution
+``tests/decomp/test_cadastro.py``. No real deck, no calendar resolution
 beyond what ``resolve_effective_stage`` already covers.
 """
 

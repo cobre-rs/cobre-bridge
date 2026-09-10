@@ -1,5 +1,4 @@
-"""Unit tests for ``cobre_bridge.decomp.converters.scalar_parameters`` (ticket-017,
-epic-05).
+"""Unit tests for ``cobre_bridge.decomp.converters.scalar_parameters``.
 
 Tier-1: pure Python, no ``example/`` deck, no ``import cobre``. Exercises the
 thin delegation to ``cobre.scalar_parameters.build_scalar_parameters``

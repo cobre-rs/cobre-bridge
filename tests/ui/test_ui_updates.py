@@ -1,4 +1,4 @@
-"""Unit tests for ticket-007 UI package updates.
+"""Unit tests for UI package updates.
 
 Covers new theme constants, SUB_TAB_JS, CSS additions, and updated
 collapsible_section() default_collapsed parameter.

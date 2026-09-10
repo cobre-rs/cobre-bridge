@@ -1,12 +1,11 @@
 """Regression guard for the boundary-FCF suite's deck-independence convention.
 
-Epic 02 of ``plans/decomp-fcf-ci-hardening`` (see ``CLAUDE.md``'s "boundary-FCF
-test tiers" subsection) drove every ``tests/decomp/test_fcf_*.py`` module to
-collect without the ``cobre-python`` wheel and without the local,
-gitignored ``example/`` decks. Nothing in the test runner enforces that going
-forward, so this module is a lightweight source-scan guard against
-regression: it reads each FCF test module's own text (never the decks it may
-reference) and asserts the two conditions the epic established.
+Every ``tests/decomp/test_fcf_*.py`` module is required to collect without the
+``cobre-python`` wheel and without the local, gitignored ``example/`` decks
+(see ``CLAUDE.md``'s "boundary-FCF test tiers" subsection). Nothing in the test
+runner enforces that going forward, so this module is a lightweight source-scan
+guard against regression: it reads each FCF test module's own text (never the
+decks it may reference) and asserts those two deck-independence conditions.
 
 This module is itself tier 1: a plain ``pathlib`` + ``re`` scan over test
 source text, no ``import cobre`` anywhere and no ``example/`` path read, so

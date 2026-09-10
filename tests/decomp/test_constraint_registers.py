@@ -207,7 +207,7 @@ def test_re_thermal_only_read() -> None:
 def test_re_thermal_only_single_term_lowers_to_generation_bound() -> None:
     """A single-term ``FT`` RE (no ``FU``/``FI``) lowers to a thermal
     ``generation`` bound: the record moves into ``to_bounds`` and out of
-    ``to_generic`` (M1 — see ``epic-06/ticket-019``)."""
+    ``to_generic`` (M1)."""
     dadger = _FakeDadger(
         re=_decl((10, 1, 2)),
         ft=_ft((10, 1, 5, 1.0, 1)),
@@ -288,8 +288,7 @@ def test_hq_qdef_single_lowers_to_outflow_bound() -> None:
 
 def test_hq_qbom_single_lowers_to_pumping_bound() -> None:
     """A single-term ``QBOM`` RHQ lowers to a pumping ``flow`` bound: the
-    record moves into ``to_bounds`` and out of ``to_generic`` (M2 —
-    epic-06/ticket-020)."""
+    record moves into ``to_bounds`` and out of ``to_generic`` (M2)."""
     dadger = _FakeDadger(
         hq=_decl((5, 1, 1)),
         cq=_coeff((5, 30, 1.0, 1, "QBOM"), tipo=True),
@@ -336,8 +335,8 @@ def test_hq_qbom_no_double_emission() -> None:
 
 def test_hq_qdes_single_lowers_to_diversion_bound() -> None:
     """A single-term ``QDES`` RHQ lowers to a two-sided hydro ``diversion``
-    bound (M3 — epic-06/ticket-021), now that cobre's
-    generic-constraint-authoring epic-01 landed ``min_diversion_m3s``."""
+    bound (M3), now that cobre's
+    generic-constraint-authoring landed ``min_diversion_m3s``."""
     dadger = _FakeDadger(
         hq=_decl((6, 1, 1)),
         cq=_coeff((6, 31, 1.0, 1, "QDES"), tipo=True),
@@ -354,8 +353,8 @@ def test_hq_qdes_single_lowers_to_diversion_bound() -> None:
 
 def test_hq_qver_single_lowers_to_spillage_bound() -> None:
     """A single-term ``QVER`` RHQ lowers to a two-sided hydro ``spillage``
-    bound (M5 — epic-06/ticket-022), now that cobre's
-    generic-constraint-authoring epic-01 landed ``min/max_spillage_m3s``."""
+    bound (M5), now that cobre's
+    generic-constraint-authoring landed ``min/max_spillage_m3s``."""
     dadger = _FakeDadger(
         hq=_decl((9, 1, 1)),
         cq=_coeff((9, 31, 1.0, 1, "QVER"), tipo=True),

@@ -283,7 +283,7 @@ def test_build_effective_cadastro_unknown_plant_code_raises_value_error(
 def test_build_effective_cadastro_permanent_vazmin_resolves_and_is_applied(
     scalar_calendar: list[OperativeStage],
 ) -> None:
-    """ticket-009: a permanent ``AC VAZMIN`` row (the real deck shape — blank
+    """A permanent ``AC VAZMIN`` row (the real deck shape — blank
     ``mes``/``semana``/``ano``) resolves to a constant per-stage
     ``vazao_minima_historica`` series and is counted in
     ``report.applied``."""

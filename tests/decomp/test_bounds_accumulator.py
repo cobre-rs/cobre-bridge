@@ -2,8 +2,8 @@
 
 No deck (synthetic contributions only). Covers the axis registry (contents,
 two-sided/stage-level flags — including the diversion/spillage axes
-epic-06/ticket-021+022 widened/added, and the ``line``/``hydro_unit_group``/
-``contract``/``water_withdrawal`` axes ticket-010 registered — unknown-pair
+widened/added, and the ``line``/``hydro_unit_group``/
+``contract``/``water_withdrawal`` axes registered — unknown-pair
 raise), the per-axis ``intersect`` (tightest pair, unbounded sentinel,
 empty-intersection and both upper-only/lower-only raises), ``resolve`` (base
 vs per-block materialization + the stage-level guard), and
@@ -37,8 +37,8 @@ def test_storage_axis_is_stage_level() -> None:
 
 
 def test_diversion_axis_is_two_sided_block_eligible() -> None:
-    """AC1 (ticket-021): diversion widened from upper-only to two-sided —
-    cobre's generic-constraint-authoring epic-01 landed ``min_diversion_m3s``
+    """Diversion widened from upper-only to two-sided —
+    cobre's generic-constraint-authoring landed ``min_diversion_m3s``
     alongside the pre-existing ``max_diversion_m3s``."""
     spec = axis_spec("hydro", "diversion")
     assert spec.lower_column == "min_diversion_m3s"
@@ -47,8 +47,8 @@ def test_diversion_axis_is_two_sided_block_eligible() -> None:
 
 
 def test_spillage_axis_is_two_sided_block_eligible() -> None:
-    """AC4 (ticket-021) / the axis ticket-022 routes into: a brand-new
-    two-sided, block-eligible ``spillage`` axis."""
+    """A brand-new two-sided, block-eligible ``spillage`` axis (the target
+    that spillage lowering routes into)."""
     spec = axis_spec("hydro", "spillage")
     assert spec.lower_column == "min_spillage_m3s"
     assert spec.upper_column == "max_spillage_m3s"
@@ -118,7 +118,7 @@ def test_hydro_water_withdrawal_axis_is_lower_only_stage_level() -> None:
 
 
 def test_pre_existing_eight_axes_unchanged() -> None:
-    """AC3: every axis registered before this ticket resolves to the exact
+    """Every previously registered axis resolves to the exact
     same :class:`AxisSpec` it always did — the six new families/axes are
     additive only."""
     expected = {
@@ -256,8 +256,8 @@ def test_lower_on_upper_only_axis_raises() -> None:
 
 
 def test_lower_on_registered_line_direct_axis_raises() -> None:
-    """AC2: a genuinely registered upper-only axis (``line``'s ``direct``,
-    added by this ticket) still loud-fails on a lower contribution."""
+    """A genuinely registered upper-only axis (``line``'s ``direct``,
+    added here) still loud-fails on a lower contribution."""
     spec = axis_spec("line", "direct")
     contribs = [
         BoundContribution(
@@ -277,7 +277,7 @@ def test_lower_on_registered_line_direct_axis_raises() -> None:
 
 def test_upper_on_registered_water_withdrawal_axis_raises() -> None:
     """The symmetric guard: a genuinely registered lower-only axis
-    (``hydro``'s ``water_withdrawal``, added by this ticket) loud-fails on
+    (``hydro``'s ``water_withdrawal``, added here) loud-fails on
     an upper contribution."""
     spec = axis_spec("hydro", "water_withdrawal")
     contribs = [
@@ -473,7 +473,7 @@ def test_thermal_table_isolated() -> None:
 
 
 def test_diversion_upper_only_column() -> None:
-    """AC2 (ticket-021), second half: an upper-only diversion group still
+    """An upper-only diversion group still
     emits ``max_diversion_m3s`` alone — ``min_diversion_m3s`` is a real,
     nullable column in the widened schema, but stays ``null`` rather than
     picking up a spurious value."""
@@ -495,7 +495,7 @@ def test_diversion_upper_only_column() -> None:
 
 
 def test_diversion_two_sided_group_resolves_and_fans_out_both_columns() -> None:
-    """AC2 (ticket-021), first half: a two-sided diversion group — one
+    """A two-sided diversion group — one
     contributor supplying only the lower, another only the upper — resolves
     through ``resolve`` to one row and fans out through
     ``build_bound_tables`` into ``min_diversion_m3s``/``max_diversion_m3s``
@@ -534,9 +534,9 @@ def test_diversion_two_sided_group_resolves_and_fans_out_both_columns() -> None:
 
 
 def test_spillage_two_sided_group_resolves_and_fans_out_both_columns() -> None:
-    """AC3 (ticket-022): the resolved spillage group lands
+    """The resolved spillage group lands
     ``min_spillage_m3s``/``max_spillage_m3s`` in the same hydro cell,
-    reusing this ticket's spillage axis."""
+    reusing the registered spillage axis."""
     contribs = [
         BoundContribution(
             family="hydro",

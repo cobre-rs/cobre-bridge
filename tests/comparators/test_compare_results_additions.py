@@ -1,7 +1,7 @@
 """Unit tests for the operative-data additions to ``compare results``.
 
-Covers Epic 2 (per-plant extras + bounds), Epic 3 (system spillage in MWmes), and Epic 1
-(line interchange comparison) — without spinning up a real Cobre or the source model
+Covers per-plant extras + bounds, system spillage in MWmes, and line interchange
+comparison — without spinning up a real Cobre or the source model
 case.
 """
 
@@ -19,7 +19,7 @@ from cobre_bridge.comparators.newave.results import (
 )
 
 # ---------------------------------------------------------------------------
-# Epic 3 — system spillage comparison
+# system spillage comparison
 # ---------------------------------------------------------------------------
 
 
@@ -76,7 +76,7 @@ class TestCompareSystemSpillage:
 
 
 # ---------------------------------------------------------------------------
-# Epic 2 — GHMAX_FPHC overlay builder
+# GHMAX_FPHC overlay builder
 # ---------------------------------------------------------------------------
 
 
@@ -115,7 +115,7 @@ class TestGenMaxOverlay:
 
 
 # ---------------------------------------------------------------------------
-# Epic 1 — line comparison engine
+# line comparison engine
 # ---------------------------------------------------------------------------
 
 

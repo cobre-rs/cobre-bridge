@@ -1,4 +1,4 @@
-"""Tests for ticket-017: head-aware ``max_turbined`` on the DECOMP path.
+"""Tests for head-aware ``max_turbined`` on the DECOMP path.
 
 Covers the DECOMP-local head-corrected engolimento formula
 (``min(Σ n·q_nom·(h_op/h_nom)**k_turb, Σ n·p_nom/ρ_eq)``) that
@@ -178,7 +178,7 @@ class _FakeDadger:
 
 
 def test_affinity_lowers_runofriver_max_turbined() -> None:
-    """AC1: a run-of-river single-conjunto plant whose nominal head (320 m)
+    """A run-of-river single-conjunto plant whose nominal head (320 m)
     is well above the operating head (80 m) has its rated flow derated by
     the Francis affinity ratio ``(h_op / h_nom) ** 0.5`` — the power cap
     (``Σ n·p_nom / ρ_eq`` = 1000/0.8 = 1250) does not bind."""
@@ -197,7 +197,7 @@ def test_affinity_lowers_runofriver_max_turbined() -> None:
 
 
 def test_power_cap_binds_below_affinity() -> None:
-    """AC2: nominal head equal to the operating head (ratio 1, no affinity
+    """Nominal head equal to the operating head (ratio 1, no affinity
     reduction) but a low installed power relative to ρ_eq makes the power
     cap ``Σ n·p_nom / ρ_eq`` the binding term; ``max_generation_mw`` stays
     the unchanged rated power."""
@@ -215,7 +215,7 @@ def test_power_cap_binds_below_affinity() -> None:
 
 
 def test_max_generation_rated_and_no_availability_derating() -> None:
-    """AC3: ``max_turbined_m3s`` carries no TEIF/IP factor — a plant with
+    """``max_turbined_m3s`` carries no TEIF/IP factor — a plant with
     non-zero ``teif``/``ip`` yields the identical head-corrected value as
     one with both zero — and ``max_generation_mw`` is the unchanged rated
     power in either case."""
@@ -253,7 +253,7 @@ def test_max_generation_rated_and_no_availability_derating() -> None:
 
 
 def test_per_stage_overlay_is_head_corrected() -> None:
-    """AC4: a mid-horizon tailrace rise (``canal_fuga_medio`` 20 -> 60 m at
+    """A mid-horizon tailrace rise (``canal_fuga_medio`` 20 -> 60 m at
     the final stage) drops ρ_eq/``h_op`` there, lowering the head-corrected
     flow below the envelope — the ``hydro_unit_group_bounds`` overlay's
     ``max_turbined_m3s`` at that stage is the head-corrected value, not the
@@ -325,7 +325,7 @@ def test_reservoir_and_le_rated_invariant(
     expected: float,
     rated: float,
 ) -> None:
-    """AC5: a reservoir (``M``) plant across a fixture matrix (Francis/
+    """A reservoir (``M``) plant across a fixture matrix (Francis/
     Kaplan turbine, affinity- vs power-cap-binding, single- vs
     multi-conjunto) matches its hand-computed full-range-head result, and
     every case's head-corrected flow sits at or below the rated flow."""
@@ -351,7 +351,7 @@ def test_reservoir_and_le_rated_invariant(
 def test_acaltefe_present_warns_and_proceeds(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """AC6: an ``AC ALTEFE`` override is logged as a tracked gap (idecomp
+    """An ``AC ALTEFE`` override is logged as a tracked gap (idecomp
     exposes no value accessor for it) and conversion proceeds with the base
     ``hidr`` nominal head — the emitted ``max_turbined_m3s`` is unaffected
     by the override's mere presence."""

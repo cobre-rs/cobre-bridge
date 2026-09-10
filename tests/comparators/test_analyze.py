@@ -1,4 +1,4 @@
-"""Unit tests for the ANALYZE-layer adapters (epic-02 tickets 004-006, 008)."""
+"""Unit tests for the ANALYZE-layer adapters."""
 
 from __future__ import annotations
 
@@ -379,7 +379,7 @@ def test_metadata_json_holds_only_provenance_at_top_level(tmp_path: Path) -> Non
     """``to_dir``'s top-level ``metadata.json`` holds only provenance keys.
 
     Render inputs (``results`` plus the drained ``PercentileData`` frames)
-    serialize into the nested render payload (CMP-04), never as a top-level
+    serialize into the nested render payload, never as a top-level
     ``metadata.json`` key — while the genuine provenance key
     ``top_divergences`` is kept at the top level.
     """
@@ -436,7 +436,7 @@ def test_render_inputs_fields_match_report_builder_consumption() -> None:
 
 
 # -------------------------------------------------------------------
-# ticket-008: footer/summary count metadata
+# footer/summary count metadata
 # -------------------------------------------------------------------
 
 
@@ -463,7 +463,7 @@ def test_build_results_dataset_carries_footer_counts() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-009: chart-aggregation primitives
+# chart-aggregation primitives
 # ---------------------------------------------------------------------------
 
 
@@ -650,7 +650,7 @@ def test_per_stage_sum_from_frame_empty_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-010: per-bus roll-up + per-plant percentile extraction
+# per-bus roll-up + per-plant percentile extraction
 # ---------------------------------------------------------------------------
 
 
@@ -680,7 +680,7 @@ def _hydro_row(
 def test_per_bus_sums_from_results_buckets_and_skips_fictitious() -> None:
     # Four hydro rows: ids 0,1 -> SUDESTE; id 2 -> SUL; id 3 -> NOFICT1 (dropped).
     #
-    # ticket-011: the bus label is re-sourced from the hydro_bus_generation
+    # The bus label is re-sourced from the hydro_bus_generation
     # partition's distinct (hydro_id, bus_id) pairs (merged onto hydro_meta as
     # "bus_ids" by the results-comparison orchestrator) -- read_cobre_hydro_metadata
     # itself no longer carries a "bus_id" key.
@@ -738,7 +738,7 @@ def test_per_bus_sums_from_results_skips_plants_without_bus_ids() -> None:
 
 
 def test_per_bus_sums_from_results_excludes_multi_bus_plant() -> None:
-    """ticket-011 AC5: a plant recorded at two buses is neither collapsed onto
+    """A plant recorded at two buses is neither collapsed onto
 
     one of them nor added to both (which would double-count its aggregate
     value); it is dropped from every bus's roll-up and a Diagnostic is raised.
@@ -749,8 +749,8 @@ def test_per_bus_sums_from_results_excludes_multi_bus_plant() -> None:
     ]
     hydro_meta: dict[int, dict[str, object]] = {
         0: {"bus_ids": {100}},
-        # synthetic two-bus plant (epic 08 territory); named so FINDING-4's
-        # fix (include the plant name, not just its numeric id) is checked.
+        # synthetic two-bus plant; named so the fix (include the plant
+        # name, not just its numeric id) is checked.
         9: {"bus_ids": {100, 101}, "name": "AMBIGUOUS_PLANT"},
     }
     bus_meta: dict[int, dict[str, object]] = {
@@ -803,7 +803,7 @@ def test_per_bus_sums_from_frame_matches_legacy_closure() -> None:
 
 
 def test_per_bus_sums_from_frame_excludes_multi_bus_plant() -> None:
-    """ticket-011 AC5, frame-sourced variant of the two-bus exclusion."""
+    """Frame-sourced variant of the two-bus exclusion."""
     df = pl.DataFrame(
         {
             "entity_id": [0, 9],
@@ -840,7 +840,7 @@ def test_per_bus_sums_from_frame_empty_or_missing_column_returns_empty() -> None
 
 
 def test_per_bus_sums_from_results_empty_hydro_meta_diagnoses_map_empty() -> None:
-    """ticket-011 AC4: a non-empty hydro_meta that resolves to zero usable
+    """A non-empty hydro_meta that resolves to zero usable
 
     bus labels must not silently produce an empty map -- a Diagnostic names
     the failure instead.
@@ -860,7 +860,7 @@ def test_per_bus_sums_from_results_empty_hydro_meta_diagnoses_map_empty() -> Non
 
 
 def test_per_bus_sums_from_results_dedupes_repeated_ambiguity_diagnostic() -> None:
-    """FINDING-3 regression: report_builder.py threads the SAME hydro_meta/
+    """Regression: report_builder.py threads the SAME hydro_meta/
     bus_meta object pair into ~11 per-bus chart calls per comparison run
     (one per chart variable); the ambiguous-plant diagnostic must fire once
     per run, not once per call -- compare has no diagnostics de-dup sink, so
@@ -1038,7 +1038,7 @@ def test_plant_percentile_arrays_filters_once_per_plant() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-011: system/network draw-only primitives
+# system/network draw-only primitives
 # ---------------------------------------------------------------------------
 
 
@@ -1218,7 +1218,7 @@ def test_spillage_lookups_empty_returns_empty() -> None:
 
 
 # -------------------------------------------------------------------
-# ticket-008 (epic-03): compare verdict builder
+# compare verdict builder
 # -------------------------------------------------------------------
 
 
@@ -1318,7 +1318,7 @@ class TestCompareVerdict:
 
 
 # ---------------------------------------------------------------------------
-# plant_max_reldiff_ranking (CMP-07: charts._shared._plant_max_reldiff_table)
+# plant_max_reldiff_ranking (charts._shared._plant_max_reldiff_table)
 # ---------------------------------------------------------------------------
 
 
@@ -1398,7 +1398,7 @@ def test_plant_max_reldiff_ranking_no_matching_rows_returns_none_medians() -> No
 
 
 # ---------------------------------------------------------------------------
-# productivity_scatter_errors (CMP-07: charts.productivity)
+# productivity_scatter_errors (charts.productivity)
 # ---------------------------------------------------------------------------
 
 
@@ -1429,7 +1429,7 @@ def test_productivity_scatter_errors_empty_input_returns_zero_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
-# fpha_metric_summary (CMP-07: charts.fpha.fpha_metrics_table)
+# fpha_metric_summary (charts.fpha.fpha_metrics_table)
 # ---------------------------------------------------------------------------
 
 
@@ -1471,7 +1471,7 @@ def test_fpha_metric_summary_aggregates_per_plant_and_sorts_worst_first() -> Non
 
 
 # ---------------------------------------------------------------------------
-# cost_percent_deltas (CMP-07: charts.costs.cost_breakdown_table)
+# cost_percent_deltas (charts.costs.cost_breakdown_table)
 # ---------------------------------------------------------------------------
 
 

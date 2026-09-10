@@ -243,7 +243,7 @@ class TestFphaConverters:
             "type": "constant",
             "value": pytest.approx(_REALISTIC_RHO_ESP / _K),
         }
-        # The fpha path also emits the mandatory mirror unit group (ticket 002).
+        # The fpha path also emits the mandatory mirror unit group.
         assert len(reservoir["unit_groups"]) == 1
 
     def test_hydros_non_fpha_plant_stays_constant(self, tmp_path: Path) -> None:

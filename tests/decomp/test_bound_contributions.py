@@ -1,24 +1,23 @@
-"""Tier-1 tests for the contribution-native bound converters (epic-07,
-ticket-023).
+"""Tier-1 tests for the contribution-native bound converters.
 
 Synthetic ``_StubDadger``/``EffectiveCadastro``/``ConstraintCensus``/
 ``OperativeStage`` fixtures only — no deck, no ``example/`` read, no
-``import cobre`` (mirrors ``test_decomp_single_term_bounds.py``'s fixture
+``import cobre`` (mirrors ``test_single_term_bounds.py``'s fixture
 style). Covers:
 
-- AC1: ``convert_hydro_bounds``/``convert_storage_bounds`` return
+- ``convert_hydro_bounds``/``convert_storage_bounds`` return
   ``list[BoundContribution]``; ``convert_thermal_bounds`` returns a
   ``ThermalBounds`` pair (contributions + cost side-table) — no converter
   returns a ``pa.Table`` bound table.
 - The replace-vs-intersect discipline (A.1/A.3): a block-uniform stage
   contributes one base (``block_id = None``) contribution; a non-uniform
   stage contributes per-block contributions only, never both.
-- AC3: an RQ minimum-outflow contribution and an RHQ ``QDEF`` outflow
+- an RQ minimum-outflow contribution and an RHQ ``QDEF`` outflow
   contribution on the same ``(hydro, stage, block)`` cell intersect to one
   row via ``bounds_accumulator.resolve``.
-- AC6: ``network.pumping_station_id_map`` and ``convert_pumping_stations``
+- ``network.pumping_station_id_map`` and ``convert_pumping_stations``
   agree on every ``UE`` row's id (single authority).
-- AC8: a small uniform / no-override synthetic deck resolves to the exact
+- a small uniform / no-override synthetic deck resolves to the exact
   expected row set, including a cell fanning two axes (outflow + storage)
   from two different contributors into one row.
 """
@@ -140,7 +139,7 @@ def _ct_dadger(
 
 
 class TestContributionNativeReturnTypes:
-    """AC1: no converter returns a ``pa.Table`` bound table."""
+    """No converter returns a ``pa.Table`` bound table."""
 
     def test_convert_hydro_bounds_returns_contribution_list(self) -> None:
         calendar = [_stage(0, (10.0,))]
@@ -264,7 +263,7 @@ class TestReplaceVsIntersectDiscipline:
 
 
 class TestCollisionIntersection:
-    """AC3: an RQ minimum-outflow contribution and an RHQ ``QDEF`` outflow
+    """An RQ minimum-outflow contribution and an RHQ ``QDEF`` outflow
     contribution on the same ``(hydro, stage, block)`` cell intersect to
     exactly one row with the max-lower value — no duplicate cell."""
 
@@ -325,7 +324,7 @@ class TestCollisionIntersection:
 
     def test_line_direct_axis_collision_intersects_to_min_upper(self) -> None:
         """A colliding pair on the ``line`` family's ``direct`` axis (now
-        routed through the accumulator, ticket-011) intersects to the
+        routed through the accumulator) intersects to the
         min-of-uppers -- an upper-only axis has no lower side to raise."""
         contribs = [
             BoundContribution(
@@ -426,8 +425,8 @@ class TestRowGroupContributionsAsymmetricBaseOnlyColumn:
 
 
 class TestWaterWithdrawalBaseOnlyAxis:
-    """AC3: ``("hydro", "water_withdrawal")`` is registered ``block_eligible =
-    False`` (ticket-010) — a hydro with a withdrawal value and no per-block
+    """``("hydro", "water_withdrawal")`` is registered ``block_eligible =
+    False`` — a hydro with a withdrawal value and no per-block
     bound on the same (hydro, stage) must resolve to exactly the base row,
     never a fabricated per-block row, even when the stage carries multiple
     blocks. A deck that declares no withdrawal at all must leave
@@ -480,7 +479,7 @@ class TestWaterWithdrawalBaseOnlyAxis:
 
 
 class TestPumpingStationIdMapSingleAuthority:
-    """AC6: ``pumping_station_id_map`` and ``convert_pumping_stations``
+    """``pumping_station_id_map`` and ``convert_pumping_stations``
     agree on every ``UE`` row's id."""
 
     def test_ids_agree_for_every_ue_row(self) -> None:
@@ -522,7 +521,7 @@ class TestPumpingStationIdMapSingleAuthority:
 
 
 class TestByteIdenticalRegression:
-    """AC8: a uniform / no-override synthetic deck resolves to exactly the
+    """A uniform / no-override synthetic deck resolves to exactly the
     expected row set — including one cell fanning two axes (outflow +
     storage) from two different contributors into one row, never a
     duplicate."""

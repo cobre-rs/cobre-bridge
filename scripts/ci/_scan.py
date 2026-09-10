@@ -14,6 +14,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src" / "cobre_bridge"
+TESTS_ROOT = REPO_ROOT / "tests"
 
 
 def iter_py_files(root: Path) -> Iterator[Path]:

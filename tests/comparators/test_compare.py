@@ -176,7 +176,7 @@ class TestReportFormatting:
 
 
 # -------------------------------------------------------------------
-# Tolerance row-colouring tests (epic-03, ticket-010)
+# Tolerance row-colouring tests
 # -------------------------------------------------------------------
 
 
@@ -261,7 +261,7 @@ class TestToleranceRowColouring:
 
 
 # -------------------------------------------------------------------
-# Compare verdict line tests (epic-03, ticket-009)
+# Compare verdict line tests
 # -------------------------------------------------------------------
 
 
@@ -1111,7 +1111,7 @@ class TestComparisonReportIntegration:
 
 
 class TestCompareResultsReturnsDataset:
-    """``compare_results`` returns a validated ``ComparisonDataset`` (ticket-022).
+    """``compare_results`` returns a validated ``ComparisonDataset``.
 
     Drives the REAL ``compare_results`` with every reader patched to empty so the
     return-type contract is exercised end-to-end without any case files: every
@@ -1663,12 +1663,12 @@ class TestEvaluateLhsCobre:
 
 
 # -------------------------------------------------------------------
-# ticket-028: comparator readers -> F3 (derive shape from the interval)
+# comparator readers -> F3 (derive shape from the interval)
 # -------------------------------------------------------------------
 
 
 class TestShapeFromBounds:
-    """AC2: unit tests for the F3 inverse-mapping helper."""
+    """Unit tests for the F3 inverse-mapping helper."""
 
     def test_lower_only_is_ge(self) -> None:
         from cobre_bridge.core.generic_constraint_format import shape_from_bounds
@@ -1698,7 +1698,7 @@ class TestShapeFromBounds:
 
 
 class TestGenericConstraintF3Loaders:
-    """AC1/AC4: the loaders consume F3's sense-free JSON + interval parquet."""
+    """The loaders consume F3's sense-free JSON + interval parquet."""
 
     def test_bounds_loader_missing_file_has_no_bound_column(
         self, tmp_path: Path
@@ -1767,7 +1767,7 @@ class TestGenericConstraintF3Loaders:
 
 
 class TestPerStageBoundsResolution:
-    """AC3 (unit half): per_stage_bounds resolves the endpoint the pre-F3
+    """per_stage_bounds resolves the endpoint the pre-F3
     single ``bound`` column used to hold, for every constraint direction."""
 
     @staticmethod
@@ -1810,7 +1810,7 @@ class TestPerStageBoundsResolution:
 
 
 class TestAC3NumericRegressionAcrossF3Migration:
-    """AC3 (integration half): an F3 case whose constraints round-trip
+    """An F3 case whose constraints round-trip
     unchanged from the pre-F3 ``(sense, bound)`` content produces identical
     per-stage evaluated limits and pass/fail verdicts to the pre-F3
     comparison — same numbers, new column layout."""
@@ -1884,7 +1884,7 @@ class TestAC3NumericRegressionAcrossF3Migration:
 
 
 class TestConstraintsChartShapeLabelFromBounds:
-    """AC4 (chart half): the chart title derives the shape label from the
+    """The chart title derives the shape label from the
     resolved bounds via `shape_from_bounds`, not from a removed `sense`
     field on the (now sense-free) constraint dict."""
 
@@ -1937,7 +1937,7 @@ _SENSE_ACCESS_RE = re.compile(
 
 
 class TestNoSenseOrSingleBoundColumnRemainsInComparators:
-    """AC5 grep guard: no comparator reads a removed `sense` key or a single
+    """Grep guard: no comparator reads a removed `sense` key or a single
     `bound` column. Matches only genuine column/dict *access* patterns
     (``.col("bound")``, ``row["bound"]``, ``.get("bound"``) — column *names*
     that merely contain "bound" as a substring (``bound_lower``,
