@@ -33,35 +33,37 @@ from cobre_bridge.core.conversion import (
     clear_dst_contents,
 )
 from cobre_bridge.core.generic_constraint_builder import ConstraintIdAllocator
-from cobre_bridge.decomp import anticipated as anticipated_conv
-from cobre_bridge.decomp import bounds as bounds_conv
 from cobre_bridge.decomp import (
     bounds_accumulator,
     constraint_registers,
+)
+from cobre_bridge.decomp import cadastro as cadastro_conv
+from cobre_bridge.decomp import group_bounds as group_bounds_conv
+from cobre_bridge.decomp import hydro as hydro_conv
+from cobre_bridge.decomp import load as load_conv
+from cobre_bridge.decomp import scenarios as scenarios_conv
+from cobre_bridge.decomp import temporal as temporal_conv
+from cobre_bridge.decomp.case import DecompCase
+from cobre_bridge.decomp.converters import anticipated as anticipated_conv
+from cobre_bridge.decomp.converters import bounds as bounds_conv
+from cobre_bridge.decomp.converters import config as config_conv
+from cobre_bridge.decomp.converters import constraints as constraints_conv
+from cobre_bridge.decomp.converters import contracts as contracts_conv
+from cobre_bridge.decomp.converters import fpha as fpha_conv
+from cobre_bridge.decomp.converters import libs_electrical as libs_electrical_conv
+from cobre_bridge.decomp.converters import (
     libs_electrical_emit,
     single_term_bounds,
 )
-from cobre_bridge.decomp import cadastro as cadastro_conv
-from cobre_bridge.decomp import config as config_conv
-from cobre_bridge.decomp import constraints as constraints_conv
-from cobre_bridge.decomp import contracts as contracts_conv
-from cobre_bridge.decomp import fpha as fpha_conv
-from cobre_bridge.decomp import group_bounds as group_bounds_conv
-from cobre_bridge.decomp import hydro as hydro_conv
-from cobre_bridge.decomp import libs_electrical as libs_electrical_conv
-from cobre_bridge.decomp import load as load_conv
-from cobre_bridge.decomp import ncs as ncs_conv
-from cobre_bridge.decomp import network as network_conv
-from cobre_bridge.decomp import scenarios as scenarios_conv
-from cobre_bridge.decomp import temporal as temporal_conv
-from cobre_bridge.decomp import thermal as thermal_conv
-from cobre_bridge.decomp import travel_time as travel_time_conv
-from cobre_bridge.decomp.case import DecompCase
-from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.scalar_parameters import (
+from cobre_bridge.decomp.converters import ncs as ncs_conv
+from cobre_bridge.decomp.converters import network as network_conv
+from cobre_bridge.decomp.converters import thermal as thermal_conv
+from cobre_bridge.decomp.converters import travel_time as travel_time_conv
+from cobre_bridge.decomp.converters.scalar_parameters import (
     build_decomp_scalar_parameters,
     write_scalar_parameters,
 )
+from cobre_bridge.decomp.id_map import DecompIdMap
 
 _LOG = logging.getLogger(__name__)
 
@@ -165,8 +167,8 @@ class FcfInputs:
 #: Sentinel for a null ``block_id`` when joining two bound frames in polars:
 #: `nulls_equal` defaults to False, so two null block ids never match each
 #: other on their own; fill to this real value for the join, then restore
-#: null on the result. Shared by :func:`_rejoin_thermal_cost`,
-#: :func:`_rejoin_contract_price`, and :func:`_attach_water_withdrawal`.
+#: null on the result. See :func:`_fill_block_sentinel` /
+#: :func:`_restore_block_null`.
 _NULL_BLOCK_SENTINEL = -1
 
 #: The ``(stage_id, block_id)`` tail every resolved bound table sorts by,
@@ -174,6 +176,21 @@ _NULL_BLOCK_SENTINEL = -1
 #: and :func:`_convert_constraints` so the two phases can't drift onto
 #: different orderings for the same table shape.
 _BOUND_SORT_KEYS = [("stage_id", "ascending"), ("block_id", "ascending")]
+
+
+def _fill_block_sentinel(frame: pl.DataFrame) -> pl.DataFrame:
+    """Map a null ``block_id`` to :data:`_NULL_BLOCK_SENTINEL` ahead of a join."""
+    return frame.with_columns(pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL))
+
+
+def _restore_block_null(frame: pl.DataFrame) -> pl.DataFrame:
+    """Undo :func:`_fill_block_sentinel` on a merged/joined result."""
+    return frame.with_columns(
+        pl.when(pl.col("block_id") == _NULL_BLOCK_SENTINEL)
+        .then(None)
+        .otherwise(pl.col("block_id"))
+        .alias("block_id")
+    )
 
 
 def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.Table:
@@ -202,19 +219,10 @@ def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.T
     for frame in (bounds_df, cost_df):
         frame["block_id"] = frame["block_id"].astype("Int64")
 
-    bounds_pl = pl.from_pandas(bounds_df).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    cost_pl = pl.from_pandas(cost_df).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    merged_pl = merge_bound_tables(
-        bounds_pl, cost_pl, on=key, precedence="base"
-    ).with_columns(
-        pl.when(pl.col("block_id") == _NULL_BLOCK_SENTINEL)
-        .then(None)
-        .otherwise(pl.col("block_id"))
-        .alias("block_id")
+    bounds_pl = _fill_block_sentinel(pl.from_pandas(bounds_df))
+    cost_pl = _fill_block_sentinel(pl.from_pandas(cost_df))
+    merged_pl = _restore_block_null(
+        merge_bound_tables(bounds_pl, cost_pl, on=key, precedence="base")
     )
     merged = merged_pl.to_pandas()
 
@@ -405,18 +413,9 @@ def _rejoin_contract_price(
     for frame in (bounds_df, price_df):
         frame["block_id"] = frame["block_id"].astype("Int64")
 
-    bounds_pl = pl.from_pandas(bounds_df).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    price_pl = pl.from_pandas(price_df).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    merged_pl = bounds_pl.join(price_pl, on=key, how="left").with_columns(
-        pl.when(pl.col("block_id") == _NULL_BLOCK_SENTINEL)
-        .then(None)
-        .otherwise(pl.col("block_id"))
-        .alias("block_id")
-    )
+    bounds_pl = _fill_block_sentinel(pl.from_pandas(bounds_df))
+    price_pl = _fill_block_sentinel(pl.from_pandas(price_df))
+    merged_pl = _restore_block_null(bounds_pl.join(price_pl, on=key, how="left"))
     merged = merged_pl.to_pandas()
 
     schema = contracts_conv._CONTRACT_BOUNDS_SCHEMA
@@ -504,7 +503,7 @@ def _topology_relink_diagnostic(
 
 
 #: The withdrawal axis's own side-table schema -- mirrors
-#: :func:`~cobre_bridge.decomp.bounds.convert_irrigation_withdrawal`'s shape
+#: :func:`~cobre_bridge.decomp.converters.bounds.convert_irrigation_withdrawal`'s shape
 #: plus the ``block_id`` column :func:`_fan_resolved_rows` needs as a fan-out
 #: key (always ``None``: the axis is registered ``block_eligible=False``).
 _HYDRO_WITHDRAWAL_SCHEMA = pa.schema(
@@ -521,7 +520,8 @@ def _water_withdrawal_contributions(
     withdrawal: pa.Table,
 ) -> list[bounds_accumulator.BoundContribution]:
     """Base-only ``("hydro", "water_withdrawal")`` contributions from
-    *withdrawal* (:func:`~cobre_bridge.decomp.bounds.convert_irrigation_withdrawal`'s
+    *withdrawal*
+    (:func:`~cobre_bridge.decomp.converters.bounds.convert_irrigation_withdrawal`'s
     per-(hydro, stage) table) -- one ``block_id=None`` contribution per row,
     since irrigation withdrawal has no per-block dimension.
     """
@@ -548,8 +548,8 @@ def _attach_water_withdrawal(
     """Fold the ``TI`` irrigation withdrawal into ``hydro_bounds``.
 
     Routes *withdrawal*
-    (:func:`~cobre_bridge.decomp.bounds.convert_irrigation_withdrawal`) through
-    the same ``BoundContribution`` -> :func:`bounds_accumulator.resolve`
+    (:func:`~cobre_bridge.decomp.converters.bounds.convert_irrigation_withdrawal`)
+    through the same ``BoundContribution`` -> :func:`bounds_accumulator.resolve`
     primitive as every other hydro bound (so a withdrawal colliding with another
     contributor on the axis loud-fails instead of one silently overwriting the
     other), then attaches the resolved rows onto *hydro_bounds*.
@@ -574,22 +574,11 @@ def _attach_water_withdrawal(
     )
 
     key = ["hydro_id", "stage_id", "block_id"]
-    hb = pl.from_arrow(hydro_bounds).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    w = pl.from_arrow(withdrawal_bounds).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    merged = (
+    hb = _fill_block_sentinel(pl.from_arrow(hydro_bounds))
+    w = _fill_block_sentinel(pl.from_arrow(withdrawal_bounds))
+    merged = _restore_block_null(
         merge_bound_tables(hb, w, on=key, precedence="base")
-        .with_columns(
-            pl.when(pl.col("block_id") == _NULL_BLOCK_SENTINEL)
-            .then(None)
-            .otherwise(pl.col("block_id"))
-            .alias("block_id")
-        )
-        .sort(["hydro_id", "stage_id", "block_id"], nulls_last=False)
-    )
+    ).sort(["hydro_id", "stage_id", "block_id"], nulls_last=False)
     return merged.to_arrow()
 
 
@@ -733,7 +722,7 @@ def _libs_electrical_census_diagnostic(
     the authoritative per-restriction census for the deck's LIBs-era
     long-form electrical file -- how many restrictions converted to a cobre
     generic constraint, and how many were dropped, broken down by
-    :class:`~cobre_bridge.decomp.libs_electrical_emit.LibsElectricalResult`'s
+    :class:`~cobre_bridge.decomp.converters.libs_electrical_emit.LibsElectricalResult`'s
     four drop reasons (``inactive``/``unrecognized-token``/
     ``unresolved-bucket-bc``/``unresolved-bucket-a``, each already carrying
     its own per-restriction WARNING/INFO diagnostic).

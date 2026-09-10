@@ -21,7 +21,7 @@ import pyarrow as pa
 
 from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.core import diagnostics as dx
-from cobre_bridge.decomp.thermal import _hours_weighted
+from cobre_bridge.decomp.converters.thermal import _hours_weighted
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

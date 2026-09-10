@@ -27,7 +27,7 @@ from cobre_bridge.decomp.constraint_registers import (
     HeMeta,
     StageBounds,
 )
-from cobre_bridge.decomp.constraints import emit_rhe_generics
+from cobre_bridge.decomp.converters.constraints import emit_rhe_generics
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
 from tests.conftest import make_decomp_case

@@ -30,8 +30,8 @@ from inewave.newave import Cortesh
 
 from cobre_bridge.cobre.case_writer import CaseWriter
 from cobre_bridge.core import diagnostics as dx
-from cobre_bridge.decomp.anticipated import read_gnl_model
 from cobre_bridge.decomp.cadastro import build_effective_cadastro
+from cobre_bridge.decomp.converters.anticipated import read_gnl_model
 from cobre_bridge.decomp.fcf.bootstrap import (
     bootstrap_terminal_manifest,
     ensure_writer_binding,
@@ -59,9 +59,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-    from cobre_bridge.decomp.anticipated import GnlCommitmentModel
     from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.converters.anticipated import GnlCommitmentModel
     from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
     from cobre_bridge.decomp.fcf.mapper import MappingResult
     from cobre_bridge.decomp.temporal import OperativeStage
@@ -86,8 +86,9 @@ def _gnl_targets_from(
     """Build the submercado -> GNL-thermal ring plan from the deck + case.
 
     Joins ``model.thermals`` (ascending by ``code``, read from ``dadgnl``'s
-    ``tg`` registry by :func:`~cobre_bridge.decomp.anticipated.read_gnl_model`
-    — reconciled with, never re-derived) onto the converted case's GNL
+    ``tg`` registry by
+    :func:`~cobre_bridge.decomp.converters.anticipated.read_gnl_model` —
+    reconciled with, never re-derived) onto the converted case's GNL
     thermal ids: ``thermals_doc["thermals"]`` entries carrying
     ``anticipated_config``, sorted ascending, are exactly
     ``convert_decomp_case``'s ``first_thermal_id + i`` assignment (ascending
@@ -376,7 +377,7 @@ def _build_gnl_ring_plan(case_dir: Path, deck_files: DecompFiles) -> GnlRingPlan
 
     Deck-reading wrapper around :func:`_gnl_targets_from`: returns ``None``
     when the deck carries no ``dadgnl`` file at all, or when
-    :func:`~cobre_bridge.decomp.anticipated.read_gnl_model` reports the deck
+    :func:`~cobre_bridge.decomp.converters.anticipated.read_gnl_model` reports the deck
     is GNL-off (no committed dispatch, the G6 gate) — reconciled with that
     reader's own gate, never re-derived here. Otherwise threads
     :func:`_post_horizon_start` into the resolved plan so

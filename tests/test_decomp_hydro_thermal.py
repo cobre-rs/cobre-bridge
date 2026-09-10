@@ -11,6 +11,10 @@ import pytest
 
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
+from cobre_bridge.decomp.converters.thermal import (
+    convert_thermal_bounds,
+    convert_thermals,
+)
 from cobre_bridge.decomp.hydro import (
     _build_split_unit_groups,
     _evaporation_coefficients_mm,
@@ -22,7 +26,6 @@ from cobre_bridge.decomp.hydro import (
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
-from cobre_bridge.decomp.thermal import convert_thermal_bounds, convert_thermals
 from tests.conftest import make_decomp_case
 
 _EVAPORATION_COLUMNS = (

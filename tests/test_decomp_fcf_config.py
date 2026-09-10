@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cobre_bridge.decomp.config import convert_config
+from cobre_bridge.decomp.converters.config import convert_config
 from tests.conftest import make_decomp_case
 
 

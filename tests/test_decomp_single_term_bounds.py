@@ -30,11 +30,11 @@ from cobre_bridge.decomp.constraint_registers import (
     StageBounds,
     lowers_to_bound,
 )
-from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.single_term_bounds import (
+from cobre_bridge.decomp.converters.single_term_bounds import (
     HydroCapacities,
     single_term_bound_contributions,
 )
+from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
 from tests.conftest import make_decomp_case
 

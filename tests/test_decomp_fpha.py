@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
-from cobre_bridge.decomp.fpha import (
+from cobre_bridge.decomp.converters.fpha import (
     FPHA_VOLUME_WINDOW_FRACTION,
     convert_hydro_geometry,
     convert_tailrace_curves,

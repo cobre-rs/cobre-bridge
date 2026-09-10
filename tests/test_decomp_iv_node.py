@@ -27,16 +27,16 @@ import pytest
 
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.decomp.case import DecompCase
-from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.libs_electrical import read_carga_ande
-from cobre_bridge.decomp.load import convert_load_factors, convert_load_stats
-from cobre_bridge.decomp.network import (
+from cobre_bridge.decomp.converters.libs_electrical import read_carga_ande
+from cobre_bridge.decomp.converters.network import (
     _LINE_BOUNDS_SCHEMA,
     _UNBOUNDED_LINE_CAPACITY_MW,
     _itaipu_60hz_capacity_mw,
     append_iv_se_line,
     convert_lines,
 )
+from cobre_bridge.decomp.id_map import DecompIdMap
+from cobre_bridge.decomp.load import convert_load_factors, convert_load_stats
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 from tests.conftest import make_decomp_case
 

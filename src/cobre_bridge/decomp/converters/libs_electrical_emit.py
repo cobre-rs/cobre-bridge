@@ -3,7 +3,7 @@ cobre expression string.
 
 ``libs_electrical.assemble_bound`` folds a restriction's bucket-B/-C terms
 into a numeric bound and returns its surviving bucket-A (cobre decision)
-terms as a sign-canonical :class:`~cobre_bridge.decomp.libs_electrical.
+terms as a sign-canonical :class:`~cobre_bridge.decomp.converters.libs_electrical.
 AssembledBound` — a source-model :class:`~cobre_bridge.decomp.
 libs_electrical.ParsedTerm` sequence, not yet a cobre token. This module
 owns that last mile: :func:`_cobre_token` maps one such term to its cobre
@@ -28,7 +28,7 @@ ConstraintRecord` that feeds the **existing** E1–E7
 never a new emitter. The pipeline wiring that builds *id_map*/*ncs_id_by_pee_code*/
 *conjh_bus_by_code_group*/*line_map* from a real deck lives in the pipeline
 caller — this module only ever consumes those maps, never
-builds them (except :mod:`cobre_bridge.decomp.ncs`'s own
+builds them (except :mod:`cobre_bridge.decomp.converters.ncs`'s own
 ``build_pee_ncs_id_map``, which lives next to the ``ncs_id`` assignment it
 mirrors).
 """
@@ -44,12 +44,12 @@ from cobre_bridge.core.generic_constraint_builder import (
     GenericConstraintBuilder,
 )
 from cobre_bridge.decomp.constraint_registers import ConstraintRecord, StageBounds
-from cobre_bridge.decomp.constraints import (
+from cobre_bridge.decomp.converters.constraints import (
     _format_expression,
     _hydro_generation_token,
     slots_from_record,
 )
-from cobre_bridge.decomp.libs_electrical import (
+from cobre_bridge.decomp.converters.libs_electrical import (
     UnrecognizedElectricalToken,
     active_cells,
     assemble_bound,
@@ -58,9 +58,8 @@ from cobre_bridge.decomp.libs_electrical import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from cobre_bridge.decomp.constraints import GenericConstraintResult
-    from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.libs_electrical import (
+    from cobre_bridge.decomp.converters.constraints import GenericConstraintResult
+    from cobre_bridge.decomp.converters.libs_electrical import (
         AssembledBound,
         AvailablePower,
         DataContext,
@@ -68,6 +67,7 @@ if TYPE_CHECKING:
         LibsElectricalModel,
         ParsedTerm,
     )
+    from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
 
@@ -306,7 +306,7 @@ class LibsElectricalResult:
     """The outcome of emitting every resolved electrical restriction as one
     cobre generic constraint (spec §5).
 
-    ``generic`` is the surviving :class:`~cobre_bridge.decomp.constraints.
+    ``generic`` is the surviving :class:`~cobre_bridge.decomp.converters.constraints.
     GenericConstraintResult` (``None`` when no restriction survives).
     ``converted_codes`` is every restriction code that was emitted.
     ``deferred`` maps each drop reason to the restriction codes dropped for
@@ -318,7 +318,7 @@ class LibsElectricalResult:
     resolve a bucket-A decision term; already WARNED), and
     ``"unrecognized-token"`` (the restriction's formula references a
     well-formed but undeclared identifier —
-    :class:`~cobre_bridge.decomp.libs_electrical.UnrecognizedElectricalToken`,
+    :class:`~cobre_bridge.decomp.converters.libs_electrical.UnrecognizedElectricalToken`,
     already WARNED). All four keys are always present, empty
     when nothing was dropped for that reason — this is the census data
     the census diagnostic renders.

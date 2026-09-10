@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cobre_bridge.decomp.config import convert_config
+from cobre_bridge.decomp.converters.config import convert_config
 from cobre_bridge.decomp.temporal import (
     CVaRConfig,
     OperativeStage,

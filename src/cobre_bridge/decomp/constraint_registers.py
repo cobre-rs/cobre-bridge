@@ -703,12 +703,12 @@ def detect_libs_electrical(deck_dir: Path) -> Diagnostic | None:
     richer format is unconverted only for its short-form ``RE``/``RE-*`` and
     date-indexed ``-HORIZONTE-DATA``/``-FORMULA-DATA-PATAMAR`` variants (the
     period-keyed long-form cards ARE converted — see
-    :mod:`cobre_bridge.decomp.libs_electrical`). This reads
+    :mod:`cobre_bridge.decomp.converters.libs_electrical`). This reads
     ``indices.csv`` (when present) and reports the entry's presence; it does
     not parse or convert the LIBs file itself, and does not know whether the
     long-form subset converted — the caller (:func:`~cobre_bridge.decomp.
     pipeline.convert_decomp_case`) is the one that reads
-    :func:`~cobre_bridge.decomp.libs_electrical.read_libs_electrical` and
+    :func:`~cobre_bridge.decomp.converters.libs_electrical.read_libs_electrical` and
     decides whether this diagnostic's return value is still worth emitting:
     it suppresses it once the long-form subset converts (the census INFO
     diagnostic, ``decomp-libs-electrical-converted``, is authoritative

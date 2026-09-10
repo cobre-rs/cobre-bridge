@@ -21,7 +21,10 @@ from cobre_bridge.decomp.constraint_registers import (
     lowers_to_bound,
     read_constraints,
 )
-from cobre_bridge.decomp.constraints import emit_re_generics, emit_rhq_rhv_generics
+from cobre_bridge.decomp.converters.constraints import (
+    emit_re_generics,
+    emit_rhq_rhv_generics,
+)
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
 from tests.conftest import _FakeDadger, make_decomp_case

@@ -18,8 +18,7 @@ import pytest
 
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core.generic_constraint_builder import ConstraintIdAllocator
-from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.libs_electrical import (
+from cobre_bridge.decomp.converters.libs_electrical import (
     AssembledBound,
     AvailablePower,
     DataContext,
@@ -30,14 +29,15 @@ from cobre_bridge.decomp.libs_electrical import (
     ViolationTreatment,
     _UnresolvableBucketBTerm,
 )
-from cobre_bridge.decomp.libs_electrical_emit import (
+from cobre_bridge.decomp.converters.libs_electrical_emit import (
     LibsElectricalResult,
     _cobre_token,
     _resolve_interc_bus,
     build_electrical_expression,
     emit_libs_electrical_generics,
 )
-from cobre_bridge.decomp.ncs import _pee_series, build_pee_ncs_id_map
+from cobre_bridge.decomp.converters.ncs import _pee_series, build_pee_ncs_id_map
+from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
 from tests.conftest import make_decomp_case
 
@@ -737,7 +737,7 @@ def test_emit_cell_inconsistent_terms_raises_value_error_naming_restriction() ->
         )
 
     with patch(
-        "cobre_bridge.decomp.libs_electrical_emit.assemble_bound",
+        "cobre_bridge.decomp.converters.libs_electrical_emit.assemble_bound",
         side_effect=_stub_assemble_bound,
     ):
         with pytest.raises(ValueError, match="706"):
@@ -889,7 +889,7 @@ def test_emit_propagates_plain_value_error_not_unrecognized_token() -> None:
         raise ValueError("a genuine resolver bug, not an unrecognized token")
 
     with patch(
-        "cobre_bridge.decomp.libs_electrical_emit.assemble_bound",
+        "cobre_bridge.decomp.converters.libs_electrical_emit.assemble_bound",
         side_effect=_stub_assemble_bound,
     ):
         with pytest.raises(ValueError, match="resolver bug") as exc_info:

@@ -23,9 +23,9 @@ from cobre_bridge.decomp.bounds_accumulator import (
     PUMPING_BOUNDS_SCHEMA,
     THERMAL_BOUNDS_SCHEMA,
 )
+from cobre_bridge.decomp.converters.network import _LINE_BOUNDS_SCHEMA
+from cobre_bridge.decomp.converters.thermal import _THERMAL_COST_SCHEMA
 from cobre_bridge.decomp.group_bounds import _HYDRO_UNIT_GROUP_BOUNDS_SCHEMA
-from cobre_bridge.decomp.network import _LINE_BOUNDS_SCHEMA
-from cobre_bridge.decomp.thermal import _THERMAL_COST_SCHEMA
 
 
 def test_hydro_bounds_index_columns_precede_values() -> None:

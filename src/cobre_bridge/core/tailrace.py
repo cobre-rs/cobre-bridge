@@ -5,7 +5,7 @@ Builds the ``tailrace_curves`` Arrow table from a plant's downstream-level
 curve families (segments keyed by ``(codigo_usina, indice_familia,
 indice_polinomio)``) — the shared core the source-model track's
 ``convert_tailrace_curves`` (:mod:`cobre_bridge.newave.converters.tailrace`) and the
-DECOMP track's ``convert_tailrace_curves`` (:mod:`cobre_bridge.decomp.fpha`)
+DECOMP track's ``convert_tailrace_curves`` (:mod:`cobre_bridge.decomp.converters.fpha`)
 both call, since ``idecomp.libs.UsinasHidreletricas`` exposes the identical
 column layout as the source model's ``polinjus``.
 """

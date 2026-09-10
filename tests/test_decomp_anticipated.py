@@ -19,8 +19,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp import anticipated
-from cobre_bridge.decomp.anticipated import (
+from cobre_bridge.decomp.converters import anticipated
+from cobre_bridge.decomp.converters.anticipated import (
     GnlClassification,
     GnlCommitment,
     GnlCommitmentModel,
@@ -653,7 +653,9 @@ def test_convert_gnl_warns_on_nonuniform_nl_lag(
         weeks_per_month=_EMIT_WEEKS_PER_MONTH,
         nl_lag_months={86: 2, 224: 3},  # differing lags
     )
-    with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.anticipated"):
+    with caplog.at_level(
+        logging.WARNING, logger="cobre_bridge.decomp.converters.anticipated"
+    ):
         e = convert_gnl(
             model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
         )
@@ -706,7 +708,9 @@ def test_convert_gnl_clamps_past_commitment_above_capability(
         weeks_per_month={},
         nl_lag_months={86: 2},
     )
-    with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.anticipated"):
+    with caplog.at_level(
+        logging.WARNING, logger="cobre_bridge.decomp.converters.anticipated"
+    ):
         e = convert_gnl(
             model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
         )
@@ -796,7 +800,9 @@ def test_convert_gnl_clamps_class4_commitment_above_capability(
         weeks_per_month=_EMIT_WEEKS_PER_MONTH,
         nl_lag_months={86: 2},
     )
-    with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.anticipated"):
+    with caplog.at_level(
+        logging.WARNING, logger="cobre_bridge.decomp.converters.anticipated"
+    ):
         e = convert_gnl(
             model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
         )

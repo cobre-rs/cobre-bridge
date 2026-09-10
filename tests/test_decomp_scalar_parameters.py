@@ -1,4 +1,4 @@
-"""Unit tests for ``cobre_bridge.decomp.scalar_parameters`` (ticket-017,
+"""Unit tests for ``cobre_bridge.decomp.converters.scalar_parameters`` (ticket-017,
 epic-05).
 
 Tier-1: pure Python, no ``example/`` deck, no ``import cobre``. Exercises the
@@ -15,7 +15,7 @@ from cobre_bridge.cobre.case_writer import CaseWriter
 from cobre_bridge.cobre.scalar_parameters import (
     build_scalar_parameters,
 )
-from cobre_bridge.decomp.scalar_parameters import (
+from cobre_bridge.decomp.converters.scalar_parameters import (
     build_decomp_scalar_parameters,
     rho_acum_name,
     write_scalar_parameters,

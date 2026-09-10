@@ -8,9 +8,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from cobre_bridge.decomp.converters.network import convert_buses, convert_lines
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.load import convert_load_factors, convert_load_stats
-from cobre_bridge.decomp.network import convert_buses, convert_lines
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 from tests.conftest import make_decomp_case
 

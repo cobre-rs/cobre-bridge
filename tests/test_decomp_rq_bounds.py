@@ -26,9 +26,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from cobre_bridge.decomp.bounds import convert_hydro_bounds
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
+from cobre_bridge.decomp.converters.bounds import convert_hydro_bounds
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 from tests.conftest import make_decomp_case
@@ -197,7 +197,9 @@ class TestSyntheticUniformAndUhDeclared:
 
     def test_qdef_plant_still_contributes_in_mixed_deck(self, caplog) -> None:
         calendar = self._calendar()
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.bounds"):
+        with caplog.at_level(
+            logging.WARNING, logger="cobre_bridge.decomp.converters.bounds"
+        ):
             contributions = convert_hydro_bounds(
                 self._case(calendar), self._ID_MAP, effective=self._effective(calendar)
             )

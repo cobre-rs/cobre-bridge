@@ -17,7 +17,7 @@ import pandas as pd
 import pytest
 
 import cobre_bridge.decomp.case as case_module
-import cobre_bridge.decomp.fpha as fpha_module
+import cobre_bridge.decomp.converters.fpha as fpha_module
 import cobre_bridge.decomp.temporal as temporal_module
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.id_map import DecompIdMap

@@ -31,7 +31,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp.bounds import convert_hydro_bounds, convert_storage_bounds
 from cobre_bridge.decomp.bounds_accumulator import (
     BoundContribution,
     build_bound_tables,
@@ -45,12 +44,21 @@ from cobre_bridge.decomp.constraint_registers import (
     ConstraintTerm,
     StageBounds,
 )
+from cobre_bridge.decomp.converters.bounds import (
+    convert_hydro_bounds,
+    convert_storage_bounds,
+)
+from cobre_bridge.decomp.converters.network import (
+    convert_pumping_stations,
+    pumping_station_id_map,
+)
+from cobre_bridge.decomp.converters.single_term_bounds import (
+    single_term_bound_contributions,
+)
+from cobre_bridge.decomp.converters.thermal import ThermalBounds, convert_thermal_bounds
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.network import convert_pumping_stations, pumping_station_id_map
 from cobre_bridge.decomp.pipeline import _row_group_contributions
-from cobre_bridge.decomp.single_term_bounds import single_term_bound_contributions
 from cobre_bridge.decomp.temporal import OperativeStage
-from cobre_bridge.decomp.thermal import ThermalBounds, convert_thermal_bounds
 from tests.conftest import make_decomp_case
 
 

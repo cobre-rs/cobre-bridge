@@ -798,7 +798,7 @@ def effective_storage_range(
     is ``tipo_regulacao in ("M", "S")`` — is unchanged: the per-stage
     ``(volume_minimo, volume_maximo)`` via :meth:`EffectiveCadastro.value`.
     This is the one place the ``D``-collapse predicate lives; every storage
-    consumer (:func:`storage_envelope`, :func:`cobre_bridge.decomp.bounds.
+    consumer (:func:`storage_envelope`, :func:`cobre_bridge.decomp.converters.bounds.
     convert_storage_bounds`, :func:`cobre_bridge.decomp.hydro.
     convert_initial_storage`) routes through it. Productivity does **not** —
     :func:`cobre_bridge.decomp.hydro._equivalent_productivity_mw_per_m3s`
@@ -832,7 +832,7 @@ def storage_envelope(effective: EffectiveCadastro, code: int) -> tuple[float, fl
     envelope collapses to that same point; every ``M``/``S`` plant is
     unchanged. This is the envelope the entity ``reservoir`` block
     declares as its default storage bounds;
-    :func:`cobre_bridge.decomp.bounds.convert_storage_bounds` emits a
+    :func:`cobre_bridge.decomp.converters.bounds.convert_storage_bounds` emits a
     per-stage override wherever a stage's effective bounds differ from it.
     """
     ranges = [

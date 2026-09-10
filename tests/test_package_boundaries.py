@@ -288,7 +288,7 @@ _TYPE_CHECKING_EDGES: frozenset[tuple[str, str]] = frozenset(
         ("comparators.newave.results", "newave.id_map"),
         ("core.provenance", "decomp.files"),
         ("core.provenance", "newave.files"),
-        ("decomp.constraints", "core.generic_constraint_builder"),
+        ("decomp.converters.constraints", "core.generic_constraint_builder"),
         ("ui.compare_summary", "comparators.dataset"),
         ("ui.compare_summary", "comparators.verdict"),
         ("ui.console", "comparators.verdict"),
@@ -369,6 +369,34 @@ def test_type_checking_edges_match_tree() -> None:
     assert type_checking == _TYPE_CHECKING_EDGES
 
 
+_SPINE_STEMS: frozenset[str] = frozenset(
+    {"case", "files", "id_map", "pipeline", "preflight"}
+)
+
+
+def _package_top_stems(package: str) -> frozenset[str]:
+    return frozenset(p.stem for p in (_SRC / package).glob("*.py"))
+
+
+def test_track_packages_are_structurally_symmetric() -> None:
+    """`newave/` and `decomp/` share the same spine below the package top:
+    both expose the five spine stems as loose modules, and both carry a
+    `converters/` subpackage; `decomp/` additionally carries `fcf/`. This
+    does not assert the spine is *all* that is loose -- each track's shared
+    infra helpers legitimately stay loose alongside it."""
+    assert _SPINE_STEMS <= _package_top_stems("newave")
+    assert _SPINE_STEMS <= _package_top_stems("decomp")
+
+    for package, subdir in (
+        ("newave", "converters"),
+        ("decomp", "converters"),
+        ("decomp", "fcf"),
+    ):
+        subpackage = _SRC / package / subdir
+        assert subpackage.is_dir()
+        assert (subpackage / "__init__.py").is_file()
+
+
 def _print_literal(name: str, value: frozenset[object]) -> None:
     print(f"{name} = frozenset(")
     print("    {")
@@ -386,3 +414,5 @@ if __name__ == "__main__":
     _print_literal("_PENDING_PRIVATE_EDGES", _private)
     _print_literal("_PENDING_SHADOWED_MODULES", _find_shadowed_modules())
     _print_literal("_TYPE_CHECKING_EDGES", _type_checking)
+    _print_literal("newave top-level *.py stems", _package_top_stems("newave"))
+    _print_literal("decomp top-level *.py stems", _package_top_stems("decomp"))

@@ -165,7 +165,7 @@ def read_anticipated_dispatch(
     lead_stages > n_stages``. This in-study-only ceiling matches the source
     model's own data availability; the sibling conversion track's
     post-horizon anticipated-delivery surface
-    (:mod:`cobre_bridge.decomp.anticipated`) has no analog here — a
+    (:mod:`cobre_bridge.decomp.converters.anticipated`) has no analog here — a
     registered asymmetry, not an unported feature.
     """
     dger = case.dger

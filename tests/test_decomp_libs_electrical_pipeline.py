@@ -35,16 +35,16 @@ from cobre_bridge.decomp.constraint_registers import (
     StageBounds,
     resolve_libs_electrical_path,
 )
-from cobre_bridge.decomp.files import DecompFiles
-from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.libs_electrical import (
+from cobre_bridge.decomp.converters.libs_electrical import (
     ElectricalRestriction,
     LibsElectricalModel,
 )
-from cobre_bridge.decomp.network import _LINE_BOUNDS_SCHEMA
+from cobre_bridge.decomp.converters.network import _LINE_BOUNDS_SCHEMA
+from cobre_bridge.decomp.converters.thermal import _THERMAL_COST_SCHEMA, ThermalBounds
+from cobre_bridge.decomp.files import DecompFiles
+from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.pipeline import ConversionReport
 from cobre_bridge.decomp.temporal import build_operative_calendar
-from cobre_bridge.decomp.thermal import _THERMAL_COST_SCHEMA, ThermalBounds
 from tests.conftest import make_decomp_case
 
 # ---------------------------------------------------------------------------

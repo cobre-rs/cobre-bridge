@@ -9,11 +9,14 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp.bounds import convert_hydro_bounds
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
+from cobre_bridge.decomp.converters.bounds import convert_hydro_bounds
+from cobre_bridge.decomp.converters.network import (
+    convert_lines,
+    convert_pumping_stations,
+)
 from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.network import convert_lines, convert_pumping_stations
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 from tests.conftest import make_decomp_case
 

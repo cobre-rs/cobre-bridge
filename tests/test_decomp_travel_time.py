@@ -11,13 +11,13 @@ from datetime import date
 
 import pandas as pd
 
-from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.travel_time import (
+from cobre_bridge.decomp.converters.travel_time import (
     TravelTime,
     _defluence_windows,
     convert_travel_time,
     read_travel_times,
 )
+from cobre_bridge.decomp.id_map import DecompIdMap
 
 _START = date(2026, 3, 14)  # a Saturday; 168 h (one operative week) per prior window
 

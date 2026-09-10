@@ -16,9 +16,7 @@ import pytest
 
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.decomp.case import DecompCase
-from cobre_bridge.decomp.group_bounds import GroupBoundEntry
-from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.libs_electrical import (
+from cobre_bridge.decomp.converters.libs_electrical import (
     ActivationRule,
     AssembledBound,
     AvailablePower,
@@ -55,6 +53,8 @@ from cobre_bridge.decomp.libs_electrical import (
     read_libs_electrical,
     resolve_disp_usih,
 )
+from cobre_bridge.decomp.group_bounds import GroupBoundEntry
+from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
 from tests.conftest import make_decomp_case
 
@@ -1393,7 +1393,7 @@ def test_build_available_power_for_disp_usih_sums_overlay_and_falls_back() -> No
 
     case = make_decomp_case(Path("unused"), hidr=hidr)
     with patch(
-        "cobre_bridge.decomp.libs_electrical._rated_envelope",
+        "cobre_bridge.decomp.converters.libs_electrical._rated_envelope",
         return_value=(0.0, 1500.0),
     ):
         a_h = build_available_power(case, id_map, overlay=overlay, effective=object())

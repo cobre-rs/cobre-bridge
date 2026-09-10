@@ -759,7 +759,7 @@ def convert_hydros(
 ) -> dict:
     """Build ``hydros.json`` for the operated plants.
 
-    *fpha_codes* (from :func:`cobre_bridge.decomp.fpha.fpha_eligible_codes`)
+    *fpha_codes* (from :func:`cobre_bridge.decomp.converters.fpha.fpha_eligible_codes`)
     selects the plants emitted with cobre's computed-FPHA generation model:
     their ``generation.model`` is ``"fpha"`` and they carry the turbine
     ``efficiency`` (η = ρ_esp / K), the ``specific_productivity_mw_per_m3s_per_m``
@@ -770,7 +770,7 @@ def convert_hydros(
     ``hydro_energy_productivity.parquet``.
 
     *travel_time_hours* (``{plant code: hours}``, from
-    :func:`cobre_bridge.decomp.travel_time.convert_travel_time`) stamps the
+    :func:`cobre_bridge.decomp.converters.travel_time.convert_travel_time`) stamps the
     ``VI`` water travel time onto each arc plant's entry; a plant absent from it
     — or the whole map being ``None`` — emits no ``travel_time_hours`` key
     (cobre defaults it to instantaneous). The key is emitted only when the plant
@@ -815,7 +815,7 @@ def convert_hydros(
     ``reservoir`` block is the plant's
     outer per-stage storage envelope (:func:`storage_envelope`), so
     per-stage bound overrides
-    (:func:`cobre_bridge.decomp.bounds.convert_storage_bounds`)
+    (:func:`cobre_bridge.decomp.converters.bounds.convert_storage_bounds`)
     always sit inside it. Per-family ``AC`` coverage is reported by
     ``check decomp`` (:mod:`cobre_bridge.decomp.preflight`), not logged here.
     """
@@ -1408,8 +1408,10 @@ def convert_itaipu_frequency_min_generation(
     Paraguay/ANDE load) and ``geracao_minima_60_hz`` on the 60 Hz group (on
     the ``IV`` bus, the transshipment corridor into Ivaiporã). Each is a
     per-(estágio, patamar) list, forward-filled across the calendar the same
-    way :func:`~cobre_bridge.decomp.libs_electrical.read_carga_ande` fills the
-    co-located ``carga_ande`` load. In DECOMP the 50 Hz floor binds (the 50 Hz
+    way
+    :func:`~cobre_bridge.decomp.converters.libs_electrical.read_carga_ande`
+    fills the co-located ``carga_ande`` load. In DECOMP the 50 Hz floor binds
+    (the 50 Hz
     half sits exactly at it), so dropping it lets the converted case
     under-run Itaipu's 50 Hz half and backfill the ANDE load from the rest of
     the system through SE's own lines.
@@ -1497,7 +1499,7 @@ def convert_production_models(
     """Per-plant production-model selection.
 
     A plant in *fpha_configs* (``{code: fpha_config}``, from the pipeline via
-    :func:`cobre_bridge.decomp.fpha.fitting_window`) is emitted as ``model:
+    :func:`cobre_bridge.decomp.converters.fpha.fitting_window`) is emitted as ``model:
     "fpha"`` — cobre fits the production function from the plant geometry
     (``hydro_geometry.parquet``) + tailrace families (``tailrace_curves.parquet``)
     over the config's ``fitting_window`` — with its ``reference_volume`` (from
@@ -1505,7 +1507,7 @@ def convert_production_models(
     backwater level. Every other operated plant keeps ``constant_productivity``,
     its ρ_eq riding in ``hydro_energy_productivity.parquet``. *fpha_configs* and
     *reference_volumes* are pre-built by the pipeline so this module needs no
-    import from :mod:`cobre_bridge.decomp.fpha` (which imports it).
+    import from :mod:`cobre_bridge.decomp.converters.fpha` (which imports it).
     """
     fpha_configs = fpha_configs or {}
     reference_volumes = reference_volumes or {}

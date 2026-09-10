@@ -27,13 +27,13 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp.bounds import (
+from cobre_bridge.decomp.cadastro import EffectiveCadastro, storage_envelope
+from cobre_bridge.decomp.case import DecompCase
+from cobre_bridge.decomp.converters.bounds import (
     convert_irrigation_withdrawal,
     convert_storage_bounds,
     convert_volume_espera_bounds,
 )
-from cobre_bridge.decomp.cadastro import EffectiveCadastro, storage_envelope
-from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage
 from tests.conftest import make_decomp_case

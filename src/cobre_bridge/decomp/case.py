@@ -110,7 +110,7 @@ class DecompCase:
 
     @cached_property
     def polinjus(self) -> UsinasHidreletricas | None:
-        from cobre_bridge.decomp.fpha import read_polinjus
+        from cobre_bridge.decomp.converters.fpha import read_polinjus
 
         path = self.files.polinjus
         return read_polinjus(path) if path is not None else None

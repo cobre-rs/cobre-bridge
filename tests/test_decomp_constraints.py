@@ -34,7 +34,7 @@ from cobre_bridge.decomp.constraint_registers import (
     ConstraintTerm,
     StageBounds,
 )
-from cobre_bridge.decomp.constraints import (
+from cobre_bridge.decomp.converters.constraints import (
     _format_expression,
     _hydro_generation_token,
     _variable_token,
