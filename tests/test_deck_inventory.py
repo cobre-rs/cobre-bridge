@@ -2,15 +2,19 @@
 
 A `skipif`-guarded test whose deck no longer exists anywhere runs **nowhere
 and reports nothing** -- a dead skip that reads as a pass. This module scans
-every sibling ``tests/test_*.py`` module's own source text for the deck
+every sibling ``tests/**/test_*.py`` module's own source text for the deck
 directory names its guards reference and checks them against two conditions:
 no guard names a deck that was deliberately retired, and (dev-only) every
-other guarded deck actually exists under ``example/``.
+other guarded deck actually exists under ``example/``. A third scan makes the
+three-tier discipline (`.claude/rules/testing.md`) itself a tier-1 assertion:
+every module referencing a ``Path("example/...")`` deck literal must carry a
+tier-3 guard.
 
-This module is itself tier 1 for its primary assertion: it imports no
-``cobre``, and ``test_no_guard_references_a_retired_deck`` reads no file
-under ``example/`` -- discovery is a plain ``pathlib`` + ``re`` scan over
-test source text, never an import of the guarded modules.
+This module is itself tier 1 for its primary assertions: it imports no
+``cobre``, and neither `test_no_guard_references_a_retired_deck` nor
+`test_every_example_reference_carries_a_tier3_guard` reads any file under
+``example/`` -- discovery is a plain ``pathlib`` + ``re`` scan over test
+source text, never an import of the guarded modules.
 """
 
 from __future__ import annotations
@@ -42,20 +46,41 @@ _RETIRED_DECKS: frozenset[str] = frozenset(
 # existed.
 _DECK_PATTERN = re.compile(r'Path\(["\']example/([^"\'/).]+)')
 
+# Either the decorator form (`@pytest.mark.skipif`) or the runtime-guard form
+# (a bare `pytest.skip(...)` call, always reached through an `if not
+# deck.exists():` check) counts as a tier-3 guard -- both are load-bearing
+# conventions in this repo (the latter predates `skipif` adoption in
+# `tests/newave/test_convert_network.py`'s `TestConvertLineBoundsRealDeckFidelity`
+# and `tests/newave/test_rule43_regression.py`'s
+# `TestNewaveRule43NoRaising`, which document deferring to it deliberately).
+_TIER3_GUARD_PATTERN = re.compile(r"skipif|pytest\.skip\(")
+
+
+def _iter_sibling_test_modules() -> list[Path]:
+    """Every ``tests/**/test_*.py`` module except this file itself, sorted.
+
+    Recurses the whole mirrored tree -- a plain ``.glob`` here would only see
+    this file's own directory and silently scan nothing, the exact
+    dead-guard failure mode this module exists to catch. Skips this module's
+    own file so `_RETIRED_DECKS` and this docstring's example literal do not
+    self-match.
+    """
+    self_name = Path(__file__).name
+    return [
+        module
+        for module in sorted(Path(__file__).parent.rglob("test_*.py"))
+        if module.name != self_name
+    ]
+
 
 def _discover_guarded_decks() -> dict[str, list[str]]:
     """Map each deck name referenced by a `Path("example/...")` literal in a
     sibling test module to the module filename(s) that reference it.
 
-    Static text scan only -- never imports the guarded modules. Skips this
-    module's own file so `_RETIRED_DECKS` and this docstring's example
-    literal do not self-match.
+    Static text scan only -- never imports the guarded modules.
     """
-    self_name = Path(__file__).name
     discovered: dict[str, list[str]] = {}
-    for module in sorted(Path(__file__).parent.glob("test_*.py")):
-        if module.name == self_name:
-            continue
+    for module in _iter_sibling_test_modules():
         source = module.read_text(encoding="utf-8")
         for deck_name in _DECK_PATTERN.findall(source):
             discovered.setdefault(deck_name, []).append(module.name)
@@ -71,6 +96,28 @@ def test_no_guard_references_a_retired_deck() -> None:
     offending = set(discovered) & _RETIRED_DECKS
     assert not offending, "; ".join(
         f"{deck!r} referenced by {discovered[deck]}" for deck in sorted(offending)
+    )
+
+
+def test_every_example_reference_carries_a_tier3_guard() -> None:
+    """Tier 1: the 3-tier discipline (`.claude/rules/testing.md`) as a test.
+
+    Any module holding a `Path("example/...")` deck literal must also carry
+    a tier-3 guard (`skipif`, or the equivalent runtime `pytest.skip(...)`)
+    -- a real-deck read with no guard would fail every CI job outright, and
+    a guard that silently vanished along with the guarding text would let
+    the read through unguarded. Reads only test source text under `tests/`
+    -- no file under `example/`, no `cobre` import.
+    """
+    offenders = [
+        module.name
+        for module in _iter_sibling_test_modules()
+        if _DECK_PATTERN.search(source := module.read_text(encoding="utf-8"))
+        and not _TIER3_GUARD_PATTERN.search(source)
+    ]
+    assert not offenders, (
+        'module(s) reference a `Path("example/...")` deck with no tier-3 '
+        f"guard (`skipif` / `pytest.skip(...)`): {offenders}"
     )
 
 

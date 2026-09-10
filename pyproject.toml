@@ -44,7 +44,8 @@ packages = ["src/cobre_bridge"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--tb=short"
+addopts = "--tb=short --import-mode=importlib"
+pythonpath = ["."]
 
 [tool.coverage.run]
 source = [
