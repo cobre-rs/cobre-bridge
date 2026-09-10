@@ -21,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp.cadastro import EffectiveCadastro, MachineSet
+from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro, MachineSet
 from cobre_bridge.decomp.converters.hydro import (
     convert_hydro_group_availability,
     convert_hydros,

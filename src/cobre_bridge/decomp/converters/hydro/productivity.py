@@ -12,7 +12,7 @@ from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.core.productivity import equivalent_productivity_from_coeffs
 
 if TYPE_CHECKING:
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 

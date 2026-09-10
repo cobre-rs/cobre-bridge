@@ -23,7 +23,10 @@ import pandas as pd
 import pytest
 from idecomp.decomp.modelos.dadger import ACNUMJUS, ACNUMPOS
 
-from cobre_bridge.decomp.cadastro import EffectiveCadastro, build_effective_cadastro
+from cobre_bridge.decomp.converters.cadastro import (
+    EffectiveCadastro,
+    build_effective_cadastro,
+)
 from cobre_bridge.decomp.converters.hydro import convert_hydros
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.pipeline import _topology_relink_diagnostic

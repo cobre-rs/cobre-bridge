@@ -16,7 +16,7 @@ from datetime import date
 
 import pytest
 
-from cobre_bridge.decomp.cadastro import resolve_effective_stage
+from cobre_bridge.decomp.converters.cadastro import resolve_effective_stage
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 
 

@@ -52,11 +52,14 @@ import pyarrow as pa
 
 from cobre_bridge.core.tolerances import floats_differ
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
-from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
+from cobre_bridge.decomp.converters.cadastro import (
+    effective_storage_range,
+    storage_envelope,
+)
 
 if TYPE_CHECKING:
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 

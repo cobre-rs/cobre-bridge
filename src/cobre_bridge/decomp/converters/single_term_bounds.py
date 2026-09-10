@@ -21,17 +21,17 @@ from typing import TYPE_CHECKING
 
 from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
-from cobre_bridge.decomp.cadastro import effective_storage_range
+from cobre_bridge.decomp.converters.cadastro import effective_storage_range
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.constraint_registers import (
         ConstraintCensus,
         ConstraintRecord,
     )
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 

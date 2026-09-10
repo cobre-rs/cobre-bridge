@@ -21,7 +21,6 @@ import pytest
 
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core.diagnostics import Severity
-from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintCensus,
@@ -30,6 +29,7 @@ from cobre_bridge.decomp.constraint_registers import (
     StageBounds,
     lowers_to_bound,
 )
+from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.converters.single_term_bounds import (
     HydroCapacities,
     single_term_bound_contributions,

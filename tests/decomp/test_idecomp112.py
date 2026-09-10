@@ -9,9 +9,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.converters.bounds import convert_hydro_bounds
+from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.converters.network import (
     convert_lines,
     convert_pumping_stations,

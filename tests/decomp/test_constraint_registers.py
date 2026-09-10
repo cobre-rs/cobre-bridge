@@ -12,7 +12,6 @@ from pathlib import Path
 import pandas as pd
 
 from cobre_bridge.core.diagnostics import Severity
-from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintRecord,
     ConstraintTerm,
@@ -21,6 +20,7 @@ from cobre_bridge.decomp.constraint_registers import (
     lowers_to_bound,
     read_constraints,
 )
+from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.converters.constraints import (
     emit_re_generics,
     emit_rhq_rhv_generics,

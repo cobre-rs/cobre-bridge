@@ -30,8 +30,8 @@ from inewave.newave import Cortesh
 
 from cobre_bridge.cobre.case_writer import CaseWriter
 from cobre_bridge.core import diagnostics as dx
-from cobre_bridge.decomp.cadastro import build_effective_cadastro
 from cobre_bridge.decomp.converters.anticipated import read_gnl_model
+from cobre_bridge.decomp.converters.cadastro import build_effective_cadastro
 from cobre_bridge.decomp.fcf.bootstrap import (
     bootstrap_terminal_manifest,
     ensure_writer_binding,
@@ -59,9 +59,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.converters.anticipated import GnlCommitmentModel
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
     from cobre_bridge.decomp.fcf.mapper import MappingResult
     from cobre_bridge.decomp.temporal import OperativeStage

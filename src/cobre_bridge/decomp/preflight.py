@@ -33,14 +33,17 @@ from cobre_bridge.core.preflight import (
     optional_input_advisory,
 )
 from cobre_bridge.decomp import constraint_registers
-from cobre_bridge.decomp.cadastro import APPLIED_AC_CLASSES, UNINGESTABLE_AC_CLASSES
+from cobre_bridge.decomp.converters.cadastro import (
+    APPLIED_AC_CLASSES,
+    UNINGESTABLE_AC_CLASSES,
+)
 from cobre_bridge.decomp.files import discover_decomp_files
 
 if TYPE_CHECKING:
     from idecomp.decomp import Dadger, Vazoes
 
-    from cobre_bridge.decomp.cadastro import CadastroResolutionReport
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.converters.cadastro import CadastroResolutionReport
     from cobre_bridge.decomp.files import DecompFiles
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
@@ -575,7 +578,7 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
         else:
             checks.extend(_tree_checks(vazoes, calendar))
 
-        from cobre_bridge.decomp.cadastro import build_effective_cadastro
+        from cobre_bridge.decomp.converters.cadastro import build_effective_cadastro
         from cobre_bridge.decomp.converters.hydro import read_hidr
 
         try:

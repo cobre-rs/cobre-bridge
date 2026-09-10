@@ -19,7 +19,6 @@ import pytest
 
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core.diagnostics import Severity
-from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintRecord,
@@ -27,6 +26,7 @@ from cobre_bridge.decomp.constraint_registers import (
     HeMeta,
     StageBounds,
 )
+from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.converters.constraints import emit_rhe_generics
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage

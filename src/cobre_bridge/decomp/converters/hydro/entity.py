@@ -29,7 +29,10 @@ from inewave.newave import Hidr
 from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.core.hydro_units import build_mirror_unit_group
 from cobre_bridge.core.productivity import fpha_efficiency
-from cobre_bridge.decomp.cadastro import effective_storage_range, storage_envelope
+from cobre_bridge.decomp.converters.cadastro import (
+    effective_storage_range,
+    storage_envelope,
+)
 from cobre_bridge.decomp.converters.hydro.bounds import (
     _ITAIPU_CODE,
     _build_split_unit_groups,
@@ -43,8 +46,8 @@ if TYPE_CHECKING:
 
     from idecomp.decomp import Dadger
 
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 _LOG = logging.getLogger(__name__)

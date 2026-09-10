@@ -9,8 +9,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
+from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.converters.hydro import (
     _build_split_unit_groups,
     _evaporation_coefficients_mm,

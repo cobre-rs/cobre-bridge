@@ -78,8 +78,8 @@ if TYPE_CHECKING:
     from idecomp.decomp import Dadger
     from idecomp.libs.restricoes import Restricoes
 
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.group_bounds import GroupBoundEntry
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage

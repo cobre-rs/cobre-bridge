@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
     from idecomp.decomp import Dadger
 
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 _LOG = logging.getLogger(__name__)

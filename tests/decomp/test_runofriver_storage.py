@@ -24,12 +24,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp.cadastro import (
+from cobre_bridge.decomp.converters.bounds import convert_storage_bounds
+from cobre_bridge.decomp.converters.cadastro import (
     EffectiveCadastro,
     effective_storage_range,
     storage_envelope,
 )
-from cobre_bridge.decomp.converters.bounds import convert_storage_bounds
 from cobre_bridge.decomp.converters.hydro import (
     convert_energy_productivity,
     convert_hydros,

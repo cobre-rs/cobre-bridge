@@ -35,8 +35,8 @@ from cobre_bridge.decomp.group_bounds import GroupBoundEntry
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 

@@ -16,7 +16,7 @@ import pandas as pd
 import pytest
 from idecomp.decomp.modelos.dadger import ACVAZMIN, ACVOLMAX, ACVOLMIN
 
-from cobre_bridge.decomp.cadastro import (
+from cobre_bridge.decomp.converters.cadastro import (
     CadastroResolutionReport,
     EffectiveCadastro,
     OutOfHorizon,

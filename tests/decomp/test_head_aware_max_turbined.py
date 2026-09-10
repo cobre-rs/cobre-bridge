@@ -30,8 +30,8 @@ import pandas as pd
 import pytest
 from idecomp.decomp.modelos.dadger import ACALTEFE
 
-from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
+from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.converters.hydro import (
     convert_hydro_group_availability,
     convert_hydros,

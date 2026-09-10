@@ -21,7 +21,6 @@ from cobre_bridge.cli import app
 from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.core.diagnostics import Diagnostic
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
-from cobre_bridge.decomp.cadastro import DiversionChannel, EffectiveCadastro
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintCensus,
     ConstraintRecord,
@@ -30,6 +29,7 @@ from cobre_bridge.decomp.constraint_registers import (
     StageBounds,
 )
 from cobre_bridge.decomp.converters.anticipated import GnlEmission
+from cobre_bridge.decomp.converters.cadastro import DiversionChannel, EffectiveCadastro
 from cobre_bridge.decomp.converters.network import _LINE_BOUNDS_SCHEMA
 from cobre_bridge.decomp.converters.single_term_bounds import HydroCapacities
 from cobre_bridge.decomp.converters.thermal import _THERMAL_COST_SCHEMA, ThermalBounds
