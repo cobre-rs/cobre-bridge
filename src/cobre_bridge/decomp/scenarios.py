@@ -34,7 +34,7 @@ from cobre_bridge.core.inflow_windows import (
     month_window,
     previous_months,
 )
-from cobre_bridge.decomp.hydro import _downstream_operated
+from cobre_bridge.decomp.converters.hydro import _downstream_operated
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

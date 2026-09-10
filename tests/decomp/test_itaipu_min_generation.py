@@ -15,7 +15,9 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp.hydro import convert_itaipu_frequency_min_generation
+from cobre_bridge.decomp.converters.hydro import (
+    convert_itaipu_frequency_min_generation,
+)
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from tests.conftest import make_decomp_case

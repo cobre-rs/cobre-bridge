@@ -11,11 +11,7 @@ import pytest
 
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
-from cobre_bridge.decomp.converters.thermal import (
-    convert_thermal_bounds,
-    convert_thermals,
-)
-from cobre_bridge.decomp.hydro import (
+from cobre_bridge.decomp.converters.hydro import (
     _build_split_unit_groups,
     _evaporation_coefficients_mm,
     _evaporation_flag_codes,
@@ -23,6 +19,10 @@ from cobre_bridge.decomp.hydro import (
     convert_hydros,
     convert_initial_storage,
     convert_production_models,
+)
+from cobre_bridge.decomp.converters.thermal import (
+    convert_thermal_bounds,
+    convert_thermals,
 )
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
@@ -336,7 +336,9 @@ def _itaipu_frequency_frame() -> pd.DataFrame:
 class TestConvertHydros:
     def test_registry_entries_and_cascade_skip(self, caplog) -> None:
         hidr = _hidr_frame()
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
+        with caplog.at_level(
+            logging.WARNING, logger="cobre_bridge.decomp.converters.hydro.entity"
+        ):
             doc = convert_hydros(
                 _case(_StubDadger(uh=_uh_frame()), hidr),
                 _ID_MAP,
@@ -372,7 +374,9 @@ class TestConvertHydros:
         """Every hydro carries exactly one mirror unit group (cobre rule 41)
         and no top-level ``bus_id`` (removed field)."""
         hidr = _hidr_frame()
-        with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
+        with caplog.at_level(
+            logging.WARNING, logger="cobre_bridge.decomp.converters.hydro.entity"
+        ):
             doc = convert_hydros(
                 _case(_StubDadger(uh=_uh_frame()), hidr),
                 _ID_MAP,
@@ -516,10 +520,12 @@ def test_deferred_note_excludes_head_productivity(caplog) -> None:
     travel time, ``COTVAZ``/``COTARE``/``COFEVA``) and now points at
     ``check decomp`` for their per-deck coverage.
     """
-    import cobre_bridge.decomp.hydro as hydro_module
+    import cobre_bridge.decomp.converters.hydro as hydro_module
 
     hidr = _hidr_frame()
-    with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
+    with caplog.at_level(
+        logging.WARNING, logger="cobre_bridge.decomp.converters.hydro.entity"
+    ):
         convert_hydros(
             _case(_StubDadger(uh=_uh_frame()), hidr),
             _ID_MAP,

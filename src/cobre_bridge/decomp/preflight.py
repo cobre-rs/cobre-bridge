@@ -576,7 +576,7 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
             checks.extend(_tree_checks(vazoes, calendar))
 
         from cobre_bridge.decomp.cadastro import build_effective_cadastro
-        from cobre_bridge.decomp.hydro import read_hidr
+        from cobre_bridge.decomp.converters.hydro import read_hidr
 
         try:
             hidr = read_hidr(files.hidr)

@@ -28,7 +28,7 @@ from cobre_bridge.decomp.cadastro import (
     _read_polynomial_overrides,
     build_effective_cadastro,
 )
-from cobre_bridge.decomp.hydro import (
+from cobre_bridge.decomp.converters.hydro import (
     convert_energy_productivity,
     convert_hydro_group_availability,
 )

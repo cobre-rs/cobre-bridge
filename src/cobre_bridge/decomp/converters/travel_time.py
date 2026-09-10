@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from cobre_bridge.decomp.hydro import _downstream_operated
+from cobre_bridge.decomp.converters.hydro import _downstream_operated
 
 if TYPE_CHECKING:
     from datetime import date

@@ -32,7 +32,10 @@ from idecomp.decomp.modelos.dadger import ACALTEFE
 
 from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
-from cobre_bridge.decomp.hydro import convert_hydro_group_availability, convert_hydros
+from cobre_bridge.decomp.converters.hydro import (
+    convert_hydro_group_availability,
+    convert_hydros,
+)
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import build_operative_calendar
 from tests.conftest import make_decomp_case
@@ -363,7 +366,9 @@ def test_acaltefe_present_warns_and_proceeds(
     altefe_rows = pd.DataFrame([{"codigo_usina": 1}])
     dadger = _FakeDadger(uh=_uh_frame([1]), altefe=altefe_rows)
 
-    with caplog.at_level(logging.WARNING, logger="cobre_bridge.decomp.hydro"):
+    with caplog.at_level(
+        logging.WARNING, logger="cobre_bridge.decomp.converters.hydro.entity"
+    ):
         doc = convert_hydros(_case(dadger, hidr), id_map, effective=effective)
 
     assert any("ALTEFE" in r.message for r in caplog.records)

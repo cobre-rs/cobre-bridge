@@ -69,7 +69,7 @@ import pandas as pd
 
 from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
 from cobre_bridge.core.generic_constraint_format import sense_to_interval
-from cobre_bridge.decomp.hydro import _rated_envelope
+from cobre_bridge.decomp.converters.hydro import _rated_envelope
 from cobre_bridge.decomp.load import _per_stage_block_loads
 
 if TYPE_CHECKING:

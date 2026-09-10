@@ -30,7 +30,7 @@ from cobre_bridge.decomp.cadastro import (
     storage_envelope,
 )
 from cobre_bridge.decomp.converters.bounds import convert_storage_bounds
-from cobre_bridge.decomp.hydro import (
+from cobre_bridge.decomp.converters.hydro import (
     convert_energy_productivity,
     convert_hydros,
     convert_initial_storage,
@@ -305,7 +305,9 @@ def test_collapse_diagnostic_counts_d_plants(caplog: pytest.LogCaptureFixture) -
         hidr=hidr,
         calendar=_calendar(1),
     )
-    with caplog.at_level(logging.INFO, logger="cobre_bridge.decomp.hydro"):
+    with caplog.at_level(
+        logging.INFO, logger="cobre_bridge.decomp.converters.hydro.entity"
+    ):
         convert_hydros(case, id_map, effective=effective)
 
     assert "collapsed 2 run-of-river" in caplog.text

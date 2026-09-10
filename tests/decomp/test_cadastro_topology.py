@@ -24,7 +24,7 @@ import pytest
 from idecomp.decomp.modelos.dadger import ACNUMJUS, ACNUMPOS
 
 from cobre_bridge.decomp.cadastro import EffectiveCadastro, build_effective_cadastro
-from cobre_bridge.decomp.hydro import convert_hydros
+from cobre_bridge.decomp.converters.hydro import convert_hydros
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.pipeline import _topology_relink_diagnostic
 from cobre_bridge.decomp.scenarios import _incremental_context, convert_external_inflows

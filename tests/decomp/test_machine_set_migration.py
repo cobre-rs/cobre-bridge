@@ -22,7 +22,10 @@ import pandas as pd
 import pytest
 
 from cobre_bridge.decomp.cadastro import EffectiveCadastro, MachineSet
-from cobre_bridge.decomp.hydro import convert_hydro_group_availability, convert_hydros
+from cobre_bridge.decomp.converters.hydro import (
+    convert_hydro_group_availability,
+    convert_hydros,
+)
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 from tests.conftest import make_decomp_case

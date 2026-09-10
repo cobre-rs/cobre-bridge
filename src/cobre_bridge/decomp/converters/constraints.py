@@ -64,8 +64,8 @@ from cobre_bridge.core.generic_constraint_builder import (
 from cobre_bridge.core.productivity import stored_energy_productivity
 from cobre_bridge.decomp.cadastro import effective_storage_range
 from cobre_bridge.decomp.constraint_registers import StageBounds
+from cobre_bridge.decomp.converters.hydro import _downstream_operated
 from cobre_bridge.decomp.converters.scalar_parameters import rho_acum_name
-from cobre_bridge.decomp.hydro import _downstream_operated
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
