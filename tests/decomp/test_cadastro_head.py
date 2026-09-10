@@ -22,13 +22,13 @@ import pytest
 from idecomp.decomp.modelos.dadger import ACCOTVOL, ACJUSMED, ACPERHID, ACPROESP
 
 from cobre_bridge.core.productivity import apply_hydraulic_loss, mean_cota
-from cobre_bridge.decomp.cadastro import (
+from cobre_bridge.decomp.converters.cadastro import (
     EffectiveCadastro,
     OutOfHorizon,
     _read_polynomial_overrides,
     build_effective_cadastro,
 )
-from cobre_bridge.decomp.hydro import (
+from cobre_bridge.decomp.converters.hydro import (
     convert_energy_productivity,
     convert_hydro_group_availability,
 )

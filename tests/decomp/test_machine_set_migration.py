@@ -1,7 +1,7 @@
 """Tests for migrating capacity/availability consumers onto the
 per-stage-effective machine-set view.
 
-``decomp/hydro.py``'s entity/mirror-group capacity (``convert_hydros``) and
+The entity/mirror-group capacity converter (``convert_hydros``) and
 the B8 per-group per-stage availability overlay
 (``convert_hydro_group_availability``) used to read the machine-set
 overrides through a date-blind ``_read_ac_machine_overrides``/
@@ -21,8 +21,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from cobre_bridge.decomp.cadastro import EffectiveCadastro, MachineSet
-from cobre_bridge.decomp.hydro import convert_hydro_group_availability, convert_hydros
+from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro, MachineSet
+from cobre_bridge.decomp.converters.hydro import (
+    convert_hydro_group_availability,
+    convert_hydros,
+)
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 from tests.conftest import make_decomp_case

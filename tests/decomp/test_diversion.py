@@ -17,7 +17,7 @@ import pandas as pd
 import pytest
 from idecomp.decomp.modelos.dadger import ACDESVIO, ACVMDESV, ACVSVERT
 
-from cobre_bridge.decomp.cadastro import (
+from cobre_bridge.decomp.converters.cadastro import (
     DiversionChannel,
     EffectiveCadastro,
     OutOfHorizon,

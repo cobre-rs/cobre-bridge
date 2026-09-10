@@ -21,17 +21,17 @@ from typing import TYPE_CHECKING
 
 from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
-from cobre_bridge.decomp.cadastro import effective_storage_range
+from cobre_bridge.decomp.converters.cadastro import effective_storage_range
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.constraint_registers import (
         ConstraintCensus,
         ConstraintRecord,
     )
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -393,10 +393,10 @@ def _hv_storage_contributions(
     The source model's ``LV`` limits are relative to the plant's useful
     volume; cobre's ``min/max_storage_hm3`` are absolute. The sign map
     (:func:`_sided_bounds`) runs first, then each surviving side is added to
-    the per-stage effective floor (:func:`~cobre_bridge.decomp.cadastro.
-    effective_storage_range`'s floor element, which honours per-stage ``AC
-    VOLMIN``/``VOLMAX`` overrides and the run-of-river ``D`` collapse) to
-    reach the absolute bound.
+    the per-stage effective floor (:func:`~cobre_bridge.decomp.converters.
+    cadastro.effective.effective_storage_range`'s floor element, which
+    honours per-stage ``AC VOLMIN``/``VOLMAX`` overrides and the
+    run-of-river ``D`` collapse) to reach the absolute bound.
 
     A ``code`` absent from the cadastro (``effective.base.index``) emits a
     ``WARNING`` diagnostic and is skipped entirely rather than crashing or

@@ -43,8 +43,9 @@ plumbing).
 ``emit_rhe_generics``: unlike the three families above, it
 owns its own model-agnostic productivity reconstruction (the shared
 ``productivity.stored_energy_productivity`` primitive, driven over the
-operated-cascade walk this module imports from ``decomp/hydro.py``) rather
-than reading a bounds axis off the register directly — the RHS is a
+operated-cascade walk this module imports as
+:func:`_downstream_operated`) rather than reading a bounds axis off the
+register directly — the RHS is a
 whole-REE stored-energy sum, not a per-plant limit, so it needs the
 per-stage accumulated productivity to convert reservoir storage to energy.
 """
@@ -62,22 +63,22 @@ from cobre_bridge.core.generic_constraint_builder import (
     is_bounded,
 )
 from cobre_bridge.core.productivity import stored_energy_productivity
-from cobre_bridge.decomp.cadastro import effective_storage_range
 from cobre_bridge.decomp.constraint_registers import StageBounds
+from cobre_bridge.decomp.converters.cadastro import effective_storage_range
+from cobre_bridge.decomp.converters.hydro import _downstream_operated
 from cobre_bridge.decomp.converters.scalar_parameters import rho_acum_name
-from cobre_bridge.decomp.hydro import _downstream_operated
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from cobre_bridge.core.generic_constraint_builder import Slot
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.constraint_registers import (
         ConstraintCensus,
         ConstraintRecord,
         ConstraintTerm,
     )
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -828,10 +829,11 @@ def _per_stage_own_integrated_rho(
     Builds a per-stage ``hidr``-shaped row from *effective* — copying
     ``effective.base.loc[code]`` and overwriting the five
     ``a{i}_volume_cota`` coefficients
-    (:meth:`~cobre_bridge.decomp.cadastro.EffectiveCadastro.cota_polynomial`)
+    (:meth:`~cobre_bridge.decomp.converters.cadastro.effective.
+    EffectiveCadastro.cota_polynomial`)
     and ``canal_fuga_medio``/``volume_minimo``/``volume_maximo``/
-    ``volume_referencia`` (:meth:`~cobre_bridge.decomp.cadastro.
-    EffectiveCadastro.value`) — then calls
+    ``volume_referencia`` (:meth:`~cobre_bridge.decomp.converters.cadastro.
+    effective.EffectiveCadastro.value`) — then calls
     :func:`~cobre_bridge.core.productivity.stored_energy_productivity` on it,
     which itself branches on ``tipo_regulacao`` (the volume-integrated EARM
     ρ for ``"M"``, the point ρ at ``volume_referencia`` for ``"D"``/``"S"``).
@@ -866,7 +868,8 @@ def _per_stage_rho_acum_energy(
 
     For each stage, builds the stage-representative operated-cascade
     topology (``_downstream_operated(effective, code, operated,
-    stage_index=...)``, imported from :mod:`cobre_bridge.decomp.hydro`) and
+    stage_index=...)``, imported from
+    :mod:`cobre_bridge.decomp.converters.hydro`) and
     topologically accumulates ``acc[code] = own[code][s] + (acc[downstream]
     if downstream is not None else 0.0)`` — a memoized DAG walk mirroring
     the source model's ``_cascade_sum``/``compute_per_stage_acc_productivities`` —

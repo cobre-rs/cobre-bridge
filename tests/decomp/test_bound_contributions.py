@@ -35,7 +35,6 @@ from cobre_bridge.decomp.bounds_accumulator import (
     build_bound_tables,
     resolve,
 )
-from cobre_bridge.decomp.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.constraint_registers import (
     ConstraintCensus,
@@ -47,6 +46,7 @@ from cobre_bridge.decomp.converters.bounds import (
     convert_hydro_bounds,
     convert_storage_bounds,
 )
+from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
 from cobre_bridge.decomp.converters.network import (
     convert_pumping_stations,
     pumping_station_id_map,

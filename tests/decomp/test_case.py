@@ -32,7 +32,7 @@ _CASE_MODULE_PATH = (
 #: exempt -- see the AST walk below, which only inspects ``tree.body``.
 _BANNED_MODULE_SCOPE_SUBSTRINGS = (
     "pipeline",
-    "decomp.hydro",
+    "decomp.converters.hydro",
     "decomp.temporal",
     "decomp.id_map",
     "decomp.fpha",

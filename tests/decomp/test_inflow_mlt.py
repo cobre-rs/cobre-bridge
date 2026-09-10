@@ -136,9 +136,9 @@ def test_incremental_mlt_matches_observed_pattern_on_deck() -> None:
     """
     from idecomp.decomp import Dadger, Mlt
 
-    from cobre_bridge.decomp import cadastro as cadastro_conv
-    from cobre_bridge.decomp import hydro as hydro_conv
     from cobre_bridge.decomp import temporal as temporal_conv
+    from cobre_bridge.decomp.converters import cadastro as cadastro_conv
+    from cobre_bridge.decomp.converters import hydro as hydro_conv
 
     dadger = Dadger.read(str(_DECK / "dadger.rv2"))
     hidr = hydro_conv.read_hidr(_DECK / "hidr.dat")

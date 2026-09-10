@@ -25,17 +25,17 @@ from cobre_bridge.core.preflight import (
     PreflightVerdict,
     optional_input_advisory,
 )
-from cobre_bridge.decomp.cadastro import (
+from cobre_bridge.decomp.constraint_registers import (
+    detect_libs_electrical,
+    detect_unreadable_electrical,
+    read_constraints,
+)
+from cobre_bridge.decomp.converters.cadastro import (
     _SCALAR_AC_SPECS,
     APPLIED_AC_CLASSES,
     UNINGESTABLE_AC_CLASSES,
     CadastroResolutionReport,
     OutOfHorizon,
-)
-from cobre_bridge.decomp.constraint_registers import (
-    detect_libs_electrical,
-    detect_unreadable_electrical,
-    read_constraints,
 )
 from cobre_bridge.decomp.files import DecompFiles
 from cobre_bridge.decomp.preflight import (

@@ -2,9 +2,9 @@
 
 Covers the two plant-keyed, ``int``-valued mnemonics (``ACNUMJUS`` — the
 water-routing downstream plant — and ``ACNUMPOS`` — the inflow gauge),
-flowing through the shared :func:`~cobre_bridge.decomp.cadastro.
-_read_keyed_overrides` reader (with ``_plant_code_key``), and their effect
-on the re-sourced
+flowing through the shared
+:func:`~cobre_bridge.decomp.converters.cadastro.overrides._read_keyed_overrides`
+reader (with ``_plant_code_key``), and their effect on the re-sourced
 cascade walk (``_downstream_operated``), the incremental-inflow cascade
 (``_incremental_context``/``convert_external_inflows``), the entity
 ``downstream_id``, and the pipeline's ``cadastro-topology-relinked``
@@ -23,8 +23,11 @@ import pandas as pd
 import pytest
 from idecomp.decomp.modelos.dadger import ACNUMJUS, ACNUMPOS
 
-from cobre_bridge.decomp.cadastro import EffectiveCadastro, build_effective_cadastro
-from cobre_bridge.decomp.hydro import convert_hydros
+from cobre_bridge.decomp.converters.cadastro import (
+    EffectiveCadastro,
+    build_effective_cadastro,
+)
+from cobre_bridge.decomp.converters.hydro import convert_hydros
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.pipeline import _topology_relink_diagnostic
 from cobre_bridge.decomp.scenarios import _incremental_context, convert_external_inflows

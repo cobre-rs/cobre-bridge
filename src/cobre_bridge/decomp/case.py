@@ -78,7 +78,7 @@ class DecompCase:
 
     @cached_property
     def hidr(self) -> pd.DataFrame:
-        from cobre_bridge.decomp.hydro import read_hidr
+        from cobre_bridge.decomp.converters.hydro import read_hidr
 
         return read_hidr(self.files.hidr)
 

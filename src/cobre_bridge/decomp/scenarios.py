@@ -34,15 +34,15 @@ from cobre_bridge.core.inflow_windows import (
     month_window,
     previous_months,
 )
-from cobre_bridge.decomp.hydro import _downstream_operated
+from cobre_bridge.decomp.converters.hydro import _downstream_operated
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from idecomp.decomp import Vazoes
 
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
     from cobre_bridge.decomp.temporal import OperativeStage
 
@@ -60,8 +60,10 @@ def _incremental_context(
 
     Stage-agnostic by design (one cascade for the whole horizon): both the
     station column and the downstream link are read at stage 0
-    (:meth:`~cobre_bridge.decomp.cadastro.EffectiveCadastro.inflow_gauge`/
-    :func:`~cobre_bridge.decomp.hydro._downstream_operated`'s own default).
+    (:meth:`~cobre_bridge.decomp.converters.cadastro.effective.
+    EffectiveCadastro.inflow_gauge`/
+    :func:`~cobre_bridge.decomp.converters.hydro.entity.
+    _downstream_operated`'s own default).
     A plant whose effective gauge varies across stages (a temporal ``AC
     NUMPOS``) gets a tracked-gap warning here; the downstream sibling gap is
     logged inside ``_downstream_operated`` itself, which this function also

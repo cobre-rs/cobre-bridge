@@ -29,13 +29,13 @@ import pyarrow as pa
 
 from cobre_bridge.core.productivity import evaluate_cota, fpha_efficiency
 from cobre_bridge.core.tailrace import build_tailrace_table
-from cobre_bridge.decomp.cadastro import effective_storage_range
+from cobre_bridge.decomp.converters.cadastro import effective_storage_range
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 #: Half-width of the FPHA volume fitting window as a fraction of a plant's

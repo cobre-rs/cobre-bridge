@@ -48,7 +48,7 @@ from cobre_bridge.decomp.scenarios import _incremental_context
 if TYPE_CHECKING:
     import pandas as pd
 
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 #: The twelve calendar months an MLT table carries, in ``mes`` order.

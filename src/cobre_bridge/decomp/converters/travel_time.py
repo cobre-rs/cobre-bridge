@@ -29,14 +29,14 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from cobre_bridge.decomp.hydro import _downstream_operated
+from cobre_bridge.decomp.converters.hydro import _downstream_operated
 
 if TYPE_CHECKING:
     from datetime import date
 
     from idecomp.decomp import Dadger
 
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
 
 _LOG = logging.getLogger(__name__)
