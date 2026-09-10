@@ -1,7 +1,7 @@
 """Core kernels + dataset-build tests for ``comparators.decomp.results``.
 
-First carve out of the legacy ``test_decomp_results_compare.py`` mega file
-(TST-13): the pure-function kernels (``_stage_rows``/``_scenario_mean``/
+First carve out of the legacy ``test_decomp_results_compare.py`` mega file:
+the pure-function kernels (``_stage_rows``/``_scenario_mean``/
 ``_map_entities``/``_result_comparisons``/``_bus_side``) plus
 ``build_decomp_dataset``'s base dataset-assembly, shared-case-build, and
 single-parse tests. The remaining concern bands (network, energy balance,
@@ -77,7 +77,7 @@ class TestStageRows:
 
 
 class TestWeightedGroupMean:
-    """ticket-052: the shared kernel `_scenario_mean` and
+    """The shared kernel `_scenario_mean` and
     `_probability_weighted_stage_cost` both delegate to."""
 
     def test_weighted_mean_matches_the_probability_weighted_expectation(self) -> None:
@@ -257,7 +257,7 @@ class TestScenarioMean:
 
 
 class TestScenarioMeanCompositeKey:
-    """ticket-007: grouping by a composite entity key -- an interchange
+    """Grouping by a composite entity key -- an interchange
     corridor's ``(de, para)`` code pair, not a single entity code."""
 
     def test_averages_over_nodes_per_corridor(self) -> None:
@@ -407,7 +407,7 @@ class TestBuildDecompDataset:
             "storage_final_hm3",
             "deficit_mw",
             "spot_price",
-            # ticket-016: derived realized hydro productivity (both fixture
+            # derived realized hydro productivity (both fixture
             # plants turbine well above the zero-guard on both sides).
             "productivity_mw_per_m3s",
         }
@@ -578,13 +578,13 @@ def _patch_discoverable_deck_with_no_sb(
 
 
 class TestBuildDecompDatasetSharedCaseBuild:
-    """ticket-020: the deck is now parsed exactly once, via the shared
-    ``DecompCase`` built at the top of ``build_decomp_dataset`` (CMP-06) --
+    """The deck is now parsed exactly once, via the shared
+    ``DecompCase`` built at the top of ``build_decomp_dataset`` --
     retargeted replacement for the old per-helper ``_build_line_id_map(...)
     is None``/``_decomp_constraint_context(...) is None`` graceful-degrade
     unit tests. A bad/deckless deck now raises at that shared build (the
-    same typed error ``_read_aligned_frames`` already raised first, before
-    this ticket) rather than silently degrading each of the three sites
+    same typed error ``_read_aligned_frames`` already raised first)
+    rather than silently degrading each of the three sites
     independently."""
 
     def test_deckless_directory_raises_the_typed_discovery_error(
@@ -610,8 +610,8 @@ class TestBuildDecompDatasetSharedCaseBuild:
 
 def _minimal_sist_frame() -> pl.DataFrame:
     """One stage, one bus -- the minimal ``dec_oper_sist``-shaped row both
-    ``_bus_side`` and ``_energy_balance_frames`` read (ticket-020's
-    single-parse spy exercises the real, unmocked ``_read_aligned_frames``,
+    ``_bus_side`` and ``_energy_balance_frames`` read (the single-parse spy
+    exercises the real, unmocked ``_read_aligned_frames``,
     so its own readers need a real-enough frame instead of the
     ``_read_aligned_frames``-level stub every other fixture in this module
     uses)."""
@@ -629,7 +629,7 @@ def _minimal_sist_frame() -> pl.DataFrame:
 
 
 class TestBuildDecompDatasetSingleParse:
-    """ticket-020 (CMP-06): `build_decomp_dataset` parses the deck exactly
+    """`build_decomp_dataset` parses the deck exactly
     once via the shared `DecompCase`, no matter how many of the three
     historical parse sites (read/align, the Network/Productivity/REE/
     evaporation id map, and the Constraints-tab census) a given run
@@ -645,7 +645,7 @@ class TestBuildDecompDatasetSingleParse:
         through -- sees exactly one invocation for a whole
         ``build_decomp_dataset`` run that exercises all three, down from
         three separate ``discover_decomp_files -> Dadger.read ->
-        DecompIdMap.from_dadger`` parses before this ticket."""
+        DecompIdMap.from_dadger`` parses."""
         decomp_dir = tmp_path / "deck"
         case_dir = tmp_path / "case"
         constraints = [
@@ -784,7 +784,7 @@ class TestBuildDecompDatasetSingleParse:
             "spot_price",
             "productivity_mw_per_m3s",
         }
-        # metadata["unmapped"] per level (TestBuildDecompDataset / ticket-018).
+        # metadata["unmapped"] per level (TestBuildDecompDataset).
         assert dataset.metadata["unmapped"] == {
             "hydro": [],
             "thermal": [86, 224],

@@ -379,7 +379,7 @@ def test_dashboard_css_contains_collapsible() -> None:
 
 
 def test_comparison_css_includes_enhanced_styles() -> None:
-    """comparison_css() must include enhanced UX styles (ticket-026)."""
+    """comparison_css() must include enhanced UX styles."""
     output = comparison_css()
     assert "translateY" in output
     assert "@media (max-width" in output
@@ -438,7 +438,7 @@ def test_build_comparison_html_head_includes_plotly_title_shim() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-019: animated tab underline + expand-to-full-width
+# animated tab underline + expand-to-full-width
 # ---------------------------------------------------------------------------
 
 
@@ -475,7 +475,7 @@ def test_dashboard_css_contains_expand_btn_styles() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-020: Stripe-style metric cards with sparklines
+# Stripe-style metric cards with sparklines
 # ---------------------------------------------------------------------------
 
 
@@ -543,7 +543,7 @@ def test_dashboard_css_contains_metric_delta_styles() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-021: collapsible sections and staggered card entry animations
+# collapsible sections and staggered card entry animations
 # ---------------------------------------------------------------------------
 
 
@@ -574,7 +574,7 @@ def test_collapsible_section_contains_content() -> None:
 
 
 def test_section_title_unchanged() -> None:
-    """section_title must return exactly the pre-ticket-021 output, no regression."""
+    """section_title must return exactly its established output, no regression."""
     result = section_title("Test")
     assert result == '<div class="section-title">Test</div>'
 
@@ -592,7 +592,7 @@ def test_tab_switch_js_contains_stagger_animation() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-022: plant explorer JS infrastructure
+# plant explorer JS infrastructure
 # ---------------------------------------------------------------------------
 
 
@@ -649,7 +649,7 @@ def test_dashboard_css_includes_explorer_container() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-025: synchronized hover and comparison mode
+# synchronized hover and comparison mode
 # ---------------------------------------------------------------------------
 
 

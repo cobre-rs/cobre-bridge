@@ -99,7 +99,7 @@ class TestResolveResultFile:
 
     def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
         """A file present only under `saidas/` is a miss -- the clean break
-        retiring the saidas-first union (ticket-025)."""
+        retiring the saidas-first union."""
         saidas = tmp_path / "saidas"
         saidas.mkdir()
         (saidas / "dec_oper_ree.csv").touch()
@@ -148,7 +148,7 @@ class TestResolveRelato:
 
 class TestResolveRevisionedFile:
     """`_resolve_revisioned_file`: the shared root-only ``<stem>.rvN``
-    resolver behind `_resolve_relato` and the ticket-017 FPHA readers."""
+    resolver behind `_resolve_relato` and the FPHA readers."""
 
     def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
         saidas = tmp_path / "saidas"
@@ -319,7 +319,7 @@ class TestReadEcoFpha:
 
     @_needs_reduced_deck
     def test_real_deck_has_no_eco_fpha(self) -> None:
-        """The reduced deck this ticket was developed against ships no
+        """The reduced deck ships no
         ``eco_fpha`` table at all -- `read_eco_fpha` must degrade this to
         `FileNotFoundError`, never a crash, so callers can treat it exactly
         like any other absent optional FPHA source."""
@@ -397,7 +397,7 @@ class TestReadDecOperCore:
     def test_saidas_only_is_not_found(self, tmp_path: Path) -> None:
         """A file present only under `saidas/` is a miss: `_resolve_result_file`
         returns `None` and `_read_dec_oper` raises `FileNotFoundError` naming
-        only `case_dir` (ticket-025 clean break)."""
+        only `case_dir`."""
         saidas = tmp_path / "saidas"
         saidas.mkdir()
         (saidas / "dec_oper_sist.csv").touch()
@@ -437,7 +437,7 @@ class TestRealDeckReaders:
 
 class TestReadRelatoConvergenceDiscovery:
     """Tier-1: `read_relato_convergence` resolves a root-only report; a
-    `saidas/`-only report is a miss (ticket-025)."""
+    `saidas/`-only report is a miss."""
 
     def test_finds_root_relato(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -954,8 +954,8 @@ class TestReadDecOperRee:
 
 
 class TestReadDecOperEvap:
-    """`read_dec_oper_evap`: per-hydro/stage reservoir evaporation
-    (ticket-020). Verified columns against idecomp 1.14.2's
+    """`read_dec_oper_evap`: per-hydro/stage reservoir evaporation.
+    Verified columns against idecomp 1.14.2's
     ``DecOperEvap.tabela``."""
 
     def test_finds_root_file(
@@ -1041,8 +1041,7 @@ class TestReadDecOperEvap:
 
 
 class TestReadDecOperRheSoft:
-    """`read_dec_oper_rhesoft`: RHE soft-constraint achieved LHS vs limit
-    (ticket-019)."""
+    """`read_dec_oper_rhesoft`: RHE soft-constraint achieved LHS vs limit."""
 
     def test_finds_root_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

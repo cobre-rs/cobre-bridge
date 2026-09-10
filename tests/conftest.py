@@ -100,7 +100,7 @@ def decomp_mini_deck() -> Path:
 
     A tier-2 end-to-end test converts this deck with the real
     ``convert_decomp_case`` and validates the result with the real
-    ``cobre.io.validate`` — see ``tests/test_convert_decomp_e2e.py``.
+    ``cobre.io.validate`` — see ``tests/decomp/test_convert_decomp_e2e.py``.
     """
     return Path(__file__).parent / "decks" / "decomp_mini"
 
@@ -111,7 +111,7 @@ def newave_mini_deck() -> Path:
 
     A tier-2 end-to-end test converts this deck with the real
     ``convert_newave_case`` and validates the result with the real
-    ``cobre.io.validate`` — see ``tests/test_convert_newave_e2e.py``.
+    ``cobre.io.validate`` — see ``tests/newave/test_convert_newave_e2e.py``.
     """
     return Path(__file__).parent / "decks" / "newave_mini"
 

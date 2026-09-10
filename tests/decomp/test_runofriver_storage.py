@@ -1,4 +1,4 @@
-"""Tests for ticket-018: collapse run-of-river ('D') storage to a reference volume.
+"""Tests for collapsing run-of-river ('D') storage to a reference volume.
 
 Under the DECOMP reservoir predicate a reservoir is ``tipo_regulacao in
 ("M", "S")``; only ``tipo_regulacao == "D"`` is run-of-river and cannot
@@ -9,7 +9,7 @@ volume_maximo)`` band straight through for a ``D`` plant, emitting phantom
 weekly storage the plant does not have. :func:`~cobre_bridge.decomp.
 cadastro.effective_storage_range` collapses that band to a single point
 (``volume_referencia``) for a ``D`` plant only; every storage consumer now
-routes through it, while productivity keeps reading the full range (AC4).
+routes through it, while productivity keeps reading the full range.
 
 Tier-1 only: synthetic ``_StubDadger`` doubles and a synthetic
 ``EffectiveCadastro``/calendar, no real deck.
@@ -154,7 +154,7 @@ _ID_MAP_SINGLE = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,)
 
 
 # ---------------------------------------------------------------------------
-# AC1: a D plant's storage collapses to vol_ref.
+# A D plant's storage collapses to vol_ref.
 # ---------------------------------------------------------------------------
 
 
@@ -186,7 +186,7 @@ def test_d_plant_storage_collapses_to_vol_ref() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC2: M and S plants are unaffected (only 'D' collapses).
+# M and S plants are unaffected (only 'D' collapses).
 # ---------------------------------------------------------------------------
 
 
@@ -218,7 +218,7 @@ def test_m_and_s_plants_keep_full_range() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC3: initial storage for a D plant equals vol_ref, independent of UH %.
+# Initial storage for a D plant equals vol_ref, independent of UH %.
 # ---------------------------------------------------------------------------
 
 
@@ -241,7 +241,7 @@ def test_d_plant_initial_storage_is_vol_ref() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC4: productivity is NOT routed through the collapse.
+# Productivity is NOT routed through the collapse.
 # ---------------------------------------------------------------------------
 
 
@@ -278,7 +278,7 @@ def test_d_plant_productivity_uses_full_range() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC5: the collapse diagnostic counts only D plants whose hidr range
+# The collapse diagnostic counts only D plants whose hidr range
 # actually carried volume_minimo != volume_maximo.
 # ---------------------------------------------------------------------------
 
@@ -312,7 +312,7 @@ def test_collapse_diagnostic_counts_d_plants(caplog: pytest.LogCaptureFixture) -
 
 
 # ---------------------------------------------------------------------------
-# AC6: a missing/zero vol_ref falls back to volume_minimo, never a
+# A missing/zero vol_ref falls back to volume_minimo, never a
 # zero-width range at zero.
 # ---------------------------------------------------------------------------
 

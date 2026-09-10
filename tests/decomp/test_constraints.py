@@ -13,7 +13,7 @@ GNL/unknown-thermal, frequency-split, no-line ``FI``, and an all-skipped
 census), and ``emit_rhq_rhv_generics``'s RHQ flow-mix/``QBOM``-station and
 RHV multi-``VARM`` additive-floor/volume-tipo-deferral behaviour. The
 ``GenericConstraintBuilder`` itself is covered by
-``tests/test_generic_constraint_builder.py``.
+``tests/core/test_generic_constraint_builder.py``.
 """
 
 from __future__ import annotations

@@ -39,7 +39,7 @@ def _assert_no_repo_internal_leaks(collected: list[dx.Diagnostic]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# _apply_permanent_overrides unit tests  (ticket-004)
+# _apply_permanent_overrides unit tests
 # ---------------------------------------------------------------------------
 
 
@@ -221,7 +221,7 @@ class TestApplyPermanentOverrides:
 
 
 # ---------------------------------------------------------------------------
-# _extract_temporal_overrides unit tests  (ticket-005)
+# _extract_temporal_overrides unit tests
 # ---------------------------------------------------------------------------
 
 
@@ -533,7 +533,7 @@ class TestReadGhminPerStage:
 
 
 # ---------------------------------------------------------------------------
-# _read_penalid unit tests  (ticket-007)
+# _read_penalid unit tests
 # ---------------------------------------------------------------------------
 
 

@@ -1,4 +1,4 @@
-"""Unit tests for the check-family CLI args migration (ticket-004).
+"""Unit tests for the check-family CLI args migration.
 
 Tier 1 — pure Python, imports no cobre. Locks in the migration of
 ``_run_check``/``_run_decomp_check`` from ``SimpleNamespace`` to the typed
@@ -225,7 +225,7 @@ class TestCheckDecompNoColor:
 
 
 class TestCheckCommand:
-    """ticket-007: the ``check newave`` preflight command (exit 0/1/2 + --json)."""
+    """The ``check newave`` preflight command (exit 0/1/2 + --json)."""
 
     def _invoke_main(
         self,

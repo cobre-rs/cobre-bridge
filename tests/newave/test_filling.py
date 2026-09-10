@@ -43,7 +43,7 @@ def test_stage_id_pre_start_is_negative() -> None:
 
 
 def test_zeta_october_31_days() -> None:
-    # October has 31 days -> 744 h -> 744 * 3600 / 1e6 == 2.6784 (design §5).
+    # October has 31 days -> 744 h -> 744 * 3600 / 1e6 == 2.6784.
     assert abs(zeta(2024, 10) - 2.6784) < 1e-9
 
 
@@ -58,7 +58,7 @@ def test_zeta_non_leap_february() -> None:
 
 
 def test_fill_rate_juruena_single_stage() -> None:
-    # JURUENA single-stage window [1, 2) = Oct 2024: 2.93 / 2.6784 ≈ 1.09 (§5).
+    # JURUENA single-stage window [1, 2) = Oct 2024: 2.93 / 2.6784 ≈ 1.09.
     result = filling_min_rate_m3s(2.93, 0.0, 1, 2, lambda t: (2024, 10))
     assert abs(result - 2.93 / 2.6784) < 1e-6
 
@@ -75,18 +75,18 @@ def test_fill_rate_nonzero_volume_morto() -> None:
 
 
 def test_filling_schedule_juruena() -> None:
-    # JURUENA: Oct 2024 start, duracao 1, study start Sep 2024 -> (1, 2) (§5).
+    # JURUENA: Oct 2024 start, duracao 1, study start Sep 2024 -> (1, 2).
     assert filling_schedule(2024, 10, 1, 2024, 9) == (1, 2)
 
 
 def test_filling_schedule_pre_start_clamp() -> None:
     # Start before study start (raw_start = -2): start clamps to 0,
-    # entry = raw_start + duracao = -2 + 3 = 1 (design §8 pre-start clamp).
+    # entry = raw_start + duracao = -2 + 3 = 1 (pre-start clamp).
     assert filling_schedule(2024, 7, 3, 2024, 9) == (0, 1)
 
 
 def test_filling_schedule_zero_duration_equal_pair() -> None:
-    # duracao 0: equal pair, the empty-window "no Filling phase" signal (§8).
+    # duracao 0: equal pair, the empty-window "no Filling phase" signal.
     assert filling_schedule(2024, 10, 0, 2024, 9) == (1, 1)
 
 

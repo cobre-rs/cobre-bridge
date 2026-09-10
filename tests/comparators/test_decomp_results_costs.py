@@ -1,7 +1,7 @@
 """Cost-frame tests for ``comparators.decomp.results``.
 
-Second carve out of the legacy ``test_decomp_results_compare.py`` mega file
-(TST-13): the DECOMP-side NPV/cost frames, scenario probabilities and
+Second carve out of the legacy ``test_decomp_results_compare.py`` mega file:
+the DECOMP-side NPV/cost frames, scenario probabilities and
 probability-weighting, the union of source-model and Cobre cost rows, and the
 Overview tab's cost sections in ``build_decomp_dataset``. The remaining
 concern bands (network, energy balance, performance, hydro/thermal detail,
@@ -36,7 +36,7 @@ from tests.comparators.conftest import _balance_fixture, _patch_aligned_frames
 
 def _relato_costs_frame() -> pl.DataFrame:
     """Two stages, two scenarios each -- known k$ values that pin the exact
-    NPV dict and per-stage ``nw_sin`` magnitudes ticket-010 must produce.
+    NPV dict and per-stage ``nw_sin`` magnitudes ``_cost_frames`` must produce.
 
     Per-stage means (across ``cenario``): stage 1 -> geracao_termica=120,
     custo_presente=600, custo_futuro=2200; stage 2 -> geracao_termica=100,
@@ -88,7 +88,7 @@ def _relato2_costs_frame() -> pl.DataFrame:
 
 
 class TestCostFrames:
-    """ticket-010: ``_cost_frames`` -- the DECOMP-side NPV dict (R$) + the
+    """``_cost_frames`` -- the DECOMP-side NPV dict (R$) + the
     per-stage ``nw_sin`` cost rows (10^6 R$), reconciled from native k$."""
 
     def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -105,7 +105,7 @@ class TestCostFrames:
     def test_kdollars_to_reais_reconciliation_on_both_unit_paths(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """The epic's TOP RISK guard, pinned in one place: a known k$ input
+        """The TOP RISK guard, pinned in one place: a known k$ input
         must land at the correct magnitude on BOTH the ``nw_costs`` dict (R$,
         x1e3) and the ``nw_sin`` CTERM per-stage rows (10^6 R$, /1e3).
         ``geracao_termica`` aggregates to 220.0 k$ NPV (120 + 100 stage
@@ -390,7 +390,7 @@ class TestScenarioProbabilities:
 
 
 class TestWeightedGroupMeanCostEquivalence:
-    """ticket-052: `_probability_weighted_stage_cost`'s weighted branch is
+    """`_probability_weighted_stage_cost`'s weighted branch is
     now `_weighted_group_mean(frame, ["estagio"], present)` -- pin that the
     two calls agree on the exact frame `_cost_frames` builds, and that the
     kernel's zero-weight guard still governs a malformed report."""
@@ -423,7 +423,7 @@ class TestWeightedGroupMeanCostEquivalence:
 
 
 class TestUnionRelatoReports:
-    """ticket-052: `_union_relato_reports` -- the shared union `_cost_frames`
+    """`_union_relato_reports` -- the shared union `_cost_frames`
     and `_scenario_probabilities` both delegate to."""
 
     def test_monthly_empty_returns_raw_unchanged(self) -> None:
@@ -529,7 +529,7 @@ class TestScenarioWeightingIntegration:
 
 
 class TestUnionCostRows:
-    """ticket-010: ``_union_cost_rows`` -- additive union onto ``nw_sin``,
+    """``_union_cost_rows`` -- additive union onto ``nw_sin``,
     defensive against the dataclass-default columnless ``pl.DataFrame()``."""
 
     def _typed(self, variable: str, value: float) -> pl.DataFrame:
@@ -583,7 +583,7 @@ def _cobre_stage_costs_fixture() -> pl.DataFrame:
 
 
 class TestBuildDecompDatasetCosts:
-    """ticket-010: Overview cost metadata (nw_costs/cobre_costs/nw_sin cost
+    """Overview cost metadata (nw_costs/cobre_costs/nw_sin cost
     rows/cobre_stage_costs) filled by ``build_decomp_dataset``."""
 
     def _patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -614,8 +614,8 @@ class TestBuildDecompDatasetCosts:
     def test_nw_sin_retains_earm_ena_rows_alongside_the_new_cost_rows(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Additive union, not overwrite: the ticket-006 EARM/ENA rows must
-        survive the ticket-010 cost-row union."""
+        """Additive union, not overwrite: the EARM/ENA rows must
+        survive the cost-row union."""
         self._patch(monkeypatch)
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)

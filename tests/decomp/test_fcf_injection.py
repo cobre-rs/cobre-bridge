@@ -1,9 +1,9 @@
 """Tests for the boundary FCF importer's config-patch orchestration
 (``fcf/importer.py::import_boundary_fcf``/``_patch_policy_boundary``).
 
-**TRACKED COBRE-GAP C8** (see
-``~/git/cobre/plans/conversion-found-improvements.md`` and the code comment
-at ``fcf/importer.py::_patch_policy_boundary``): cobre resolves
+**TRACKED COBRE-GAP C8** (see cobre's conversion-found-improvements registry
+and the code comment at ``fcf/importer.py::_patch_policy_boundary``): cobre
+resolves
 ``policy.boundary.path`` against the run's ``--output`` directory, not
 ``case_dir``, so every ``cobre run`` invocation that touches the boundary
 must pass ``--output`` equal to the case dir it runs against — never the
@@ -64,8 +64,8 @@ def _mock_deck_and_cut_seams(
     verbatim, and stubs the ``sys.modules['cobre']`` entry so
     ``import_boundary_fcf``'s own unconditional ``import cobre`` (needed for
     ``cobre.__version__``) resolves without the cobre-python wheel
-    installed — the epic-01 `"stub sys.modules['cobre']"` pattern
-    (``tests/test_decomp_fcf_bootstrap.py``), not a module attribute patch.
+    installed — the `"stub sys.modules['cobre']"` pattern
+    (``tests/decomp/test_fcf_bootstrap.py``), not a module attribute patch.
 
     Returns a ``DecompCase`` with ``dadger``/``id_map``/``hidr``/``calendar``
     pre-filled (opaque placeholders — the importer never re-parses them) and
@@ -86,8 +86,8 @@ def _mock_deck_and_cut_seams(
     # case-reading seam like the deck ones above; these binary-free
     # orchestration cases carry only a minimal config.json, so stub it to a
     # single 648 h block rather than author a full stages.json. `import_
-    # boundary_fcf` derives its scalar `cost_unit_hours` as the sum of these
-    # (ticket-001), so a one-element `[648.0]` preserves the prior 648 h; these
+    # boundary_fcf` derives its scalar `cost_unit_hours` as the sum of these,
+    # so a one-element `[648.0]` preserves the prior 648 h; these
     # storage/C8 cases place no live GNL ring, so the per-block length is never
     # validated against `n_patamares`.
     monkeypatch.setattr(
@@ -133,7 +133,7 @@ def test_patch_policy_boundary_preserves_other_sections(tmp_path: Path) -> None:
         "training": {"stopping_rules": [{"type": "iteration_limit", "limit": 500}]},
         "simulation": {"num_openings": 10, "scenario_label": "cenário"},
     }
-    # The pipeline's own in-memory dict (this ticket's carrier) — no
+    # The pipeline's own in-memory dict — no
     # config.json exists on disk yet; `_patch_policy_boundary` mutates and
     # writes *this* object, never re-reading the file.
     config = dict(other_sections)
@@ -394,7 +394,7 @@ def test_seed_recent_observations_mutates_passed_dict_no_reread(
     `recent_observations` into the passed `initial_conditions` dict and
     writes it through `CaseWriter` once, never re-reading
     `initial_conditions.json` off disk: the written file is byte-identical
-    to what the pre-ticket read-modify-write produced from the same starting
+    to what a prior read-modify-write produced from the same starting
     document (indent=2 / ensure_ascii=False / single trailing newline, the
     `_write_json` style), and every pre-existing key survives untouched.
     """

@@ -3,7 +3,7 @@
 Covers module constants, can_render, _compute_npv_metric, _build_metrics_row,
 and the full render() path including the empty-costs degradation branch.
 
-Ticket-015 additions cover: _render_cost_composition, _render_category_evolution,
+Also covers: _render_cost_composition, _render_category_evolution,
 _render_spot_price, _render_violations, and the extended render() output.
 """
 
@@ -77,7 +77,7 @@ def _make_mock_data(
     """Build a minimal MagicMock that satisfies the DashboardData interface.
 
     Sets proper defaults for all fields accessed by ``render()`` (including
-    ticket-015 sections) to avoid MagicMock auto-chaining on polars
+    the extended sections) to avoid MagicMock auto-chaining on polars
     LazyFrames, which causes OOM.
     """
     data = MagicMock()
@@ -103,7 +103,7 @@ def _make_mock_data(
 
 
 def test_tab_constants() -> None:
-    """Module-level constants must match the ticket specification exactly."""
+    """Module-level constants must match their expected values exactly."""
     assert costs_mod.TAB_ID == "tab-costs"
     assert costs_mod.TAB_LABEL == "Costs"
     assert costs_mod.TAB_ORDER == 40
@@ -258,7 +258,7 @@ def test_render_contains_section_title() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Helpers for ticket-015 tests
+# Helpers for the extended-section tests
 # ---------------------------------------------------------------------------
 
 
@@ -299,7 +299,7 @@ def _make_mock_data_full(
     n_scenarios: int = 2,
     n_stages: int = 3,
 ) -> MagicMock:
-    """Build a MagicMock satisfying the full DashboardData interface for ticket-015."""
+    """Build a MagicMock satisfying the full DashboardData interface."""
     data = MagicMock()
     data.costs = costs if costs is not None else _make_costs_df(n_scenarios, n_stages)
     data.discount_rate = discount_rate
@@ -463,8 +463,8 @@ def test_render_spot_price_contains_collapsible_section() -> None:
 def test_render_spot_price_subplot_titles_match_bus_count() -> None:
     """_render_spot_price with 4 non-fictitious buses must produce 4 subplot titles.
 
-    Acceptance criterion from ticket-015: the number of subplot titles in the
-    figure equals the number of non-fictitious buses.
+    The number of subplot titles in the figure equals the number of
+    non-fictitious buses.
     """
     bus_ids = [0, 1, 2, 3]
     bus_names = {0: "Alpha", 1: "Beta", 2: "Gamma", 3: "Delta"}
@@ -537,10 +537,7 @@ def test_render_spot_price_is_default_collapsed() -> None:
 
 def test_render_violations_zero_costs_returns_no_violation_text() -> None:
     """_render_violations with all-zero violation costs must return 'No violation
-    costs'.
-
-    Acceptance criterion from ticket-015.
-    """
+    costs'."""
     costs = _make_costs_df_with_violations(generic_violation_cost=0.0)
     data = _make_mock_data_full(costs=costs)
     html = _render_violations(data)
@@ -551,8 +548,7 @@ def test_render_violations_nonzero_costs_returns_collapsible_section() -> None:
     """_render_violations with non-zero generic_violation_cost returns
     collapsible-section.
 
-    Acceptance criterion from ticket-015: the result contains 'collapsible-section'
-    and a bar chart.
+    The result contains 'collapsible-section' and a bar chart.
     """
     costs = _make_costs_df_with_violations(generic_violation_cost=500.0)
     data = _make_mock_data_full(costs=costs)
@@ -600,16 +596,13 @@ def test_render_violations_is_default_collapsed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_render — extended (ticket-015)
+# test_render — extended
 # ---------------------------------------------------------------------------
 
 
 def test_render_contains_cost_composition_section() -> None:
     """render() with non-zero thermal_cost across 3 stages must include
-    'Cost Composition by Stage'.
-
-    Acceptance criterion from ticket-015.
-    """
+    'Cost Composition by Stage'."""
     costs = _make_costs_df(n_scenarios=2, n_stages=3, thermal_cost=1000.0)
     data = _make_mock_data_full(costs=costs)
     html = render(data)
@@ -619,8 +612,8 @@ def test_render_contains_cost_composition_section() -> None:
 def test_render_contains_at_least_three_collapsible_sections() -> None:
     """render() must contain at least 3 collapsible-section elements.
 
-    Acceptance criterion from ticket-015: composition, category trends, spot
-    price sections are always present (violation section may be absent).
+    Composition, category trends, and spot price sections are always present
+    (violation section may be absent).
     """
     costs = _make_costs_df(n_scenarios=2, n_stages=3, thermal_cost=1000.0)
     data = _make_mock_data_full(costs=costs)
@@ -629,7 +622,7 @@ def test_render_contains_at_least_three_collapsible_sections() -> None:
 
 
 def test_render_includes_npv_section() -> None:
-    """render() must still include the NPV Cost Analysis section from ticket-014."""
+    """render() must still include the NPV Cost Analysis section."""
     data = _make_mock_data_full()
     html = render(data)
     assert "NPV Cost Analysis" in html
@@ -654,7 +647,7 @@ def test_render_includes_all_temporal_sections() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test__chart_violation_timeline (ticket-009)
+# test__chart_violation_timeline
 # ---------------------------------------------------------------------------
 
 
@@ -736,10 +729,7 @@ def test_chart_violation_timeline_x_axis_uses_dates_with_label_ticks() -> None:
 
 
 def test_chart_violation_timeline_returns_none_when_all_zero() -> None:
-    """_chart_violation_timeline must return None when all violation costs are zero.
-
-    Acceptance criterion from ticket-009.
-    """
+    """_chart_violation_timeline must return None when all violation costs are zero."""
     costs = _make_costs_df_with_storage_violation(storage_violation_cost=0.0)
     data = _make_mock_data_full(costs=costs)
     fig = _chart_violation_timeline(data)
@@ -763,15 +753,15 @@ def test_chart_violation_timeline_returns_none_when_no_violation_columns() -> No
 
 
 # ---------------------------------------------------------------------------
-# test__render_violations extended (ticket-009)
+# test__render_violations extended
 # ---------------------------------------------------------------------------
 
 
 def test_render_violations_with_nonzero_data_contains_two_chart_cards() -> None:
     """_render_violations with nonzero violation data must contain two chart-card divs.
 
-    Acceptance criterion from ticket-009: the Violations section now contains a
-    2-column grid with bar chart (left) + timeline (right).
+    The Violations section contains a 2-column grid with bar chart (left) +
+    timeline (right).
     """
     costs = _make_costs_df_with_storage_violation(
         n_scenarios=2, n_stages=3, storage_violation_cost=10.0
@@ -795,7 +785,7 @@ def test_render_violations_timeline_absent_when_all_violation_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test__build_composition_data (ticket-011)
+# test__build_composition_data
 # ---------------------------------------------------------------------------
 
 
@@ -829,9 +819,9 @@ def _make_composition_costs_df(
 def test_build_composition_data_keys() -> None:
     """_build_composition_data must return a dict with required top-level keys.
 
-    Acceptance criterion from ticket-011: keys are category, component, total,
-    stages, colors — plus ``stage_labels`` (the tick text paired with the ISO
-    date positions in ``stages`` for the proportional date x-axis).
+    Keys are category, component, total, stages, colors — plus ``stage_labels``
+    (the tick text paired with the ISO date positions in ``stages`` for the
+    proportional date x-axis).
     """
     costs = _make_composition_costs_df()
     data = _make_mock_data_full(costs=costs, n_scenarios=2, n_stages=3)
@@ -849,10 +839,7 @@ def test_build_composition_data_keys() -> None:
 
 def test_build_composition_data_total_stats() -> None:
     """total.mean, total.p10, total.p90 must all have length == number of stages
-    and satisfy p10 <= mean <= p90 for each stage.
-
-    Acceptance criterion from ticket-011.
-    """
+    and satisfy p10 <= mean <= p90 for each stage."""
     costs = _make_composition_costs_df(n_scenarios=2, n_stages=3)
     data = _make_mock_data_full(costs=costs, n_scenarios=2, n_stages=3)
     result = _build_composition_data(data)
@@ -868,10 +855,7 @@ def test_build_composition_data_total_stats() -> None:
 
 
 def test_build_composition_data_empty() -> None:
-    """_build_composition_data must return None for an empty costs DataFrame.
-
-    Acceptance criterion from ticket-011.
-    """
+    """_build_composition_data must return None for an empty costs DataFrame."""
     data = _make_mock_data_full(costs=pd.DataFrame())
     result = _build_composition_data(data)
     assert result is None
@@ -880,8 +864,7 @@ def test_build_composition_data_empty() -> None:
 def test_build_composition_data_zero_cols_excluded() -> None:
     """Zero-valued columns must not appear in component.
 
-    Acceptance criterion from ticket-011: ncs_generation_cost is all-zero
-    and must be absent from component keys.
+    ncs_generation_cost is all-zero and must be absent from component keys.
     """
     costs = _make_composition_costs_df()
     data = _make_mock_data_full(costs=costs, n_scenarios=2, n_stages=3)
@@ -895,10 +878,7 @@ def test_build_composition_data_zero_cols_excluded() -> None:
 
 def test_build_composition_section_html() -> None:
     """_build_composition_section must emit costs-group-sel, costs-comp,
-    and COSTS_COMP_DATA in the HTML output.
-
-    Acceptance criterion from ticket-011.
-    """
+    and COSTS_COMP_DATA in the HTML output."""
     costs = _make_composition_costs_df()
     data = _make_mock_data_full(costs=costs, n_scenarios=2, n_stages=3)
     html = _build_composition_section(data)

@@ -1,7 +1,7 @@
 """Productivity tab tests for ``comparators.decomp.results``.
 
-Third carve out of the legacy ``test_decomp_results_compare.py`` mega file
-(TST-13): per-(plant, stage) realized productivity derivation and the
+Third carve out of the legacy ``test_decomp_results_compare.py`` mega file:
+per-(plant, stage) realized productivity derivation and the
 Productivity tab's realized-per-stage half of ``build_decomp_dataset``. The
 remaining classes (report_builder/verdict/CLI cross-module tests and the
 tier-3 ``*E2E`` classes) stay in the mega file pending their own routing and
@@ -80,7 +80,7 @@ class TestHydroProductivityResults:
         ]
 
     def test_ratio_math(self) -> None:
-        """AC1: geracao_MW=100, vazao_turbinada_m3s=50 -> newave_value 2.0."""
+        """geracao_MW=100, vazao_turbinada_m3s=50 -> newave_value 2.0."""
         rows = self._hydro_pair(nw_gen=100.0, nw_turb=50.0, cb_gen=90.0, cb_turb=45.0)
 
         productivity = _hydro_productivity_results(rows)
@@ -93,7 +93,7 @@ class TestHydroProductivityResults:
         assert row.cobre_value == pytest.approx(2.0)
 
     def test_zero_guard_drops_the_row_when_source_turbined_is_zero(self) -> None:
-        """AC2: vazao_turbinada_m3s=0 -> no non-null newave_value -- the row
+        """vazao_turbinada_m3s=0 -> no non-null newave_value -- the row
         is DROPPED entirely (never null-kept)."""
         rows = self._hydro_pair(nw_gen=100.0, nw_turb=0.0, cb_gen=90.0, cb_turb=45.0)
 
@@ -120,8 +120,8 @@ class TestHydroProductivityResults:
 
     def test_row_dropped_when_the_matching_variable_is_absent(self) -> None:
         """Only a generation_mw row, no turbined_m3s row for that key --
-        never an exception, just no productivity row (missing turbined flow
-        per the ticket's Error Handling)."""
+        never an exception, just no productivity row (missing turbined
+        flow)."""
         rows = [
             ResultComparison(
                 entity_type="hydro",
@@ -185,8 +185,8 @@ class TestHydroProductivityResults:
 
 def _productivity_aligned_fixture() -> _AlignedDecompFrames:
     """Two hydro plants, one stage: plant A (code 10) exercises the ratio
-    math (AC1: 100/50 -> 2.0 on the source side); plant B (code 20)'s source
-    turbined is 0 (AC2: zero-guard drops it, never null-keeps it)."""
+    math (100/50 -> 2.0 on the source side); plant B (code 20)'s source
+    turbined is 0 (zero-guard drops it, never null-keeps it)."""
     source_hydro = pl.DataFrame(
         {
             "entity_id": [0, 1],
@@ -219,7 +219,7 @@ def _productivity_aligned_fixture() -> _AlignedDecompFrames:
 
 
 class TestBuildDecompDatasetProductivity:
-    """ticket-016: fills the Productivity tab's realized per-stage half
+    """Fills the Productivity tab's realized per-stage half
     (``dataset.render.productivity_per_stage``) and leaves the static
     pmo-derived half (``productivity_detail``) empty -- DECOMP ships no
     pmo.dat ([ASSUMPTION] option a, no fabricated static comparison)."""
@@ -245,7 +245,7 @@ class TestBuildDecompDatasetProductivity:
     def test_ratio_math_matches_dec_oper_usih_generation_over_turbined(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC1: geracao_MW=100, vazao_turbinada_m3s=50 -> newave_value 2.0,
+        """geracao_MW=100, vazao_turbinada_m3s=50 -> newave_value 2.0,
         end to end from ``build_decomp_dataset``."""
         _patch_aligned_frames(monkeypatch, _productivity_aligned_fixture())
 
@@ -259,7 +259,7 @@ class TestBuildDecompDatasetProductivity:
     def test_zero_turbined_plant_emits_no_non_null_newave_value(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC2: plant B's source turbined is 0 -> the zero-guard holds (the
+        """Plant B's source turbined is 0 -> the zero-guard holds (the
         row is DROPPED entirely, so no non-null -- or null -- value for it
         survives into the frame)."""
         _patch_aligned_frames(monkeypatch, _productivity_aligned_fixture())
@@ -282,9 +282,9 @@ class TestBuildDecompDatasetProductivity:
     def test_report_renders_both_the_realized_title_and_the_static_no_data_note(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """AC4 + AC5 together, on the SAME DECOMP dataset: with
+        """On the SAME DECOMP dataset: with
         ``productivity_detail`` empty AND ``productivity_per_stage``
-        non-empty, the decoupled report_builder gate (ticket-016) renders
+        non-empty, the decoupled report_builder gate renders
         BOTH the realized-productivity section and the static section's "No
         productivity data available" note."""
         _patch_aligned_frames(monkeypatch, _productivity_aligned_fixture())

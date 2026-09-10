@@ -1,8 +1,8 @@
 """Regression guard for cobre 0.13 rule 43 on freshly converted decks
-(epic-04, ticket-017; depends on ticket-016's ``emission_checks`` mirror).
+(depends on the ``emission_checks`` mirror in the pipeline).
 
-Cobre rule 43 — ``check_bound_raises_declared_capacity`` in
-``cobre-io/src/validation/semantic/block_bounds.rs`` — rejects any
+Cobre rule 43 — the ``check_bound_raises_declared_capacity`` semantic
+validation rule — rejects any
 ``hydro_bounds`` row whose ``max_turbined_m3s`` or ``max_generation_mw``
 exceeds the plant's own declared value in ``system/hydros.json``
 (``generation.max_turbined_m3s`` / ``generation.max_generation_mw``).
@@ -11,17 +11,17 @@ that raises it above the plant's own declared ceiling is not, and cobre
 refuses to load the case at all.
 
 This module exists because that rule was violated for real, not
-hypothetically. Before ticket-015b, the NEWAVE converter declared
+hypothetically. Before the declaration fix, the NEWAVE converter declared
 ``generation.max_turbined_m3s`` at the single reference-head value while
 ``convert_turbined_bounds_head_corrected`` emitted per-stage rows at the
 (higher) head-corrected cap for any plant carrying a CFUGA/CMONT/
 VOLREF_SAZ override — a fresh conversion of ``example/newave_rodada`` had
-2478 rule-43-raising rows, and cobre rejected the case outright. Ticket
-015b fixed this by declaring the plant at ``max(reference, per-stage
+2478 rule-43-raising rows, and cobre rejected the case outright. The
+declaration fix declares the plant at ``max(reference, per-stage
 envelope)``, so every per-stage row only ever tightens the bound
 downward. ``emission_checks.check_hydro_bounds_no_raising`` mirrors the
 rule as a diagnostic (non-fatal, courtesy-only) inside the pipeline; this
-module is the executable pass/fail guard on real decks that ticket-015b's
+module is the executable pass/fail guard on real decks that the declaration
 fix must keep satisfying — if a future converter change reintroduces even
 one raising row, this test fails.
 
@@ -55,11 +55,11 @@ _GUARDED_COLUMNS: tuple[str, ...] = ("max_turbined_m3s", "max_generation_mw")
 #: false-fire on float noise.
 _ENVELOPE_TOLERANCE = 1e-9
 
-#: AC #2: the row count scanned must be non-trivial, or an empty/near-empty
+#: The row count scanned must be non-trivial, or an empty/near-empty
 #: scan could pass vacuously and this guard would silently stop guarding.
 _MIN_EXPECTED_ROWS = 1000
 
-#: AC #2, per-column strengthening: the aggregate row count above says
+#: Per-column strengthening: the aggregate row count above says
 #: nothing about any one guarded column, which can be sparse (e.g.
 #: ``max_generation_mw`` is only ever populated for a dead-volume filling
 #: plant's per-stage override, a handful of rows even on a real deck) — a
@@ -79,7 +79,7 @@ _NEWAVE_RODADA = Path("example/newave_rodada")
 
 #: Per-deck expected set of guarded columns actually present in the
 #: freshly converted ``hydro_bounds.parquet`` — pinned so that presence
-#: itself is asserted explicitly (AC #1: "assert that explicitly rather
+#: itself is asserted explicitly ("assert that explicitly rather
 #: than skipping silently") instead of a bare ``if column in table:``
 #: quietly doing nothing when a column happens to be absent for one deck.
 _EXPECTED_PRESENT_COLUMNS: dict[Path, frozenset[str]] = {
@@ -184,7 +184,7 @@ def _scan_hydro_bounds(
 
 
 class TestNewaveRule43NoRaising:
-    """AC #1/#2/#4/#5: a fresh NEWAVE conversion has zero rule-43-raising
+    """A fresh NEWAVE conversion has zero rule-43-raising
     ``hydro_bounds`` rows, on a non-trivial row count, both guarded columns
     checked independently at cobre's relative tolerance.
     """
@@ -206,14 +206,14 @@ class TestNewaveRule43NoRaising:
             hydros_json, dst / "constraints" / "hydro_bounds.parquet"
         )
 
-        # AC #2: guard against a vacuous scan.
+        # Guard against a vacuous scan.
         assert rows_scanned > _MIN_EXPECTED_ROWS, (
             f"only {rows_scanned} hydro_bounds row(s) scanned for {deck} — "
             "too few to exercise rule 43; a near-empty scan would pass "
             "vacuously, which is worse than no test at all"
         )
 
-        # AC #1 (explicit-not-silent arm): pin exactly which guarded columns
+        # Explicit-not-silent arm: pin exactly which guarded columns
         # this deck's hydro_bounds carries. A column's absence is asserted,
         # not merely skipped — e.g. newave_rodada carries no
         # max_generation_mw at all, which is fine, but that fact is checked
@@ -229,12 +229,12 @@ class TestNewaveRule43NoRaising:
             "schema change is intentional, otherwise investigate a regression"
         )
 
-        # AC #1 (the actual rule-43 assertion), each present column checked
+        # The actual rule-43 assertion, each present column checked
         # independently.
         for column in present_columns:
             scan = scans[column]
 
-            # AC #2, per-column strengthening: a column reporting present=True
+            # Per-column strengthening: a column reporting present=True
             # with (near-)zero non-null values would satisfy raising_count==0
             # vacuously — assert real per-column coverage, not just a
             # non-trivial aggregate row count.

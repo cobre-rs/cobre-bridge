@@ -79,11 +79,11 @@ def _hidr_frame() -> pd.DataFrame:
 
 
 def _effective_no_override(hidr: pd.DataFrame) -> EffectiveCadastro:
-    """ticket-014: ``convert_external_inflows`` now takes the effective
+    """``convert_external_inflows`` now takes the effective
     cadastro, not the bare ``hidr`` frame; every call site in this module
     that carries no ``AC NUMJUS``/``NUMPOS`` override wraps *hidr* through
     this — the resulting downstream/gauge reads fall through to *hidr*
-    unchanged (see ``tests/test_decomp_cadastro_topology.py`` for the
+    unchanged (see the ``test_cadastro_topology`` module for the
     override-bearing cases).
     """
     return EffectiveCadastro(base=hidr, n_stages=len(_calendar()), stage_varying={})
@@ -239,7 +239,7 @@ class TestPipeline:
 
 
 class TestPhaseLabels:
-    """ticket-004 (epic-02): ``DECOMP_CONVERSION_PHASE_LABELS`` + the
+    """``DECOMP_CONVERSION_PHASE_LABELS`` + the
     ``on_phase`` progress callback, mirroring the source model's own
     ``CONVERSION_PHASE_LABELS``/``on_phase`` wiring."""
 
@@ -257,10 +257,10 @@ class TestPhaseLabels:
 
 
 class TestDecompCaseArtifacts:
-    """ticket-013 (epic-03): the bundle ``_discover``/``_convert_core_entities``/
+    """The bundle ``_discover``/``_convert_core_entities``/
     ``_convert_scenarios`` thread across the discovery/entity/scenario phases,
     and the still-inline bounds/constraints/write phases read back off — must
-    carry every field those five functions (plus ticket-016's FCF importer,
+    carry every field those five functions (plus the FCF importer,
     which reads ``config``/``initial_conditions``) depend on."""
 
     def test_field_contract(self) -> None:
@@ -330,13 +330,13 @@ class TestDecompCaseArtifacts:
 
 
 class TestEmissionCheckWiring:
-    """The post-emission self-checks (ticket-016, epic-04) run inside
+    """The post-emission self-checks run inside
     ``convert_decomp_case``, before the constraint writes."""
 
     def test_run_and_gate_raises_on_duplicate_bound_row(self) -> None:
         """tier-1 (no ``example/`` deck): drives the same
         ``emission_checks.run_and_gate`` call ``_convert_decomp_case_impl``
-        now makes (ticket-002), over a synthetic in-memory bounds table
+        now makes, over a synthetic in-memory bounds table
         carrying one duplicate ``(hydro_id, stage_id, block_id, column)`` row
         (cobre rule 36, ``check_bound_row_uniqueness``) — the gate must raise
         ``EmissionCheckError``, and that exception must still satisfy
@@ -368,7 +368,7 @@ class TestEmissionCheckWiring:
     ) -> None:
         """A violation built from DECOMP-shaped artifacts still flips the
         verdict via ``cli.app._convert_status`` — the single function both
-        pipelines' convert verdicts key off (AC #3), not a bare inspection of
+        pipelines' convert verdicts key off, not a bare inspection of
         the diagnostic."""
         from cobre_bridge.cli.verdict import _convert_status
         from cobre_bridge.core import diagnostics as dx
@@ -404,15 +404,15 @@ class TestEmissionCheckWiring:
 
 
 class TestBoundAccumulatorWiring:
-    """ticket-023 (epic-07): the E2 accumulator is the *single* merge point
-    for every per-entity bound (AC #2), and the new pumping family is wired
-    end-to-end (AC #4)."""
+    """The E2 accumulator is the *single* merge point
+    for every per-entity bound, and the new pumping family is wired
+    end-to-end."""
 
     def test_pipeline_source_has_no_concat_tables_for_entity_bounds(self) -> None:
         """The naive ``pa.concat_tables`` the old hydro-bounds combine used
         is gone — every ENTITY bound table pipeline.py writes comes from
         ``bounds_accumulator.resolve`` + ``build_bound_tables``.
-        ticket-023b's own ``pa.concat_tables(generic_bound_tables)`` call is a
+        The generic emitters' own ``pa.concat_tables(generic_bound_tables)`` call is a
         different, sanctioned merge (folding the RE/RHQ/RHV/RHE
         generic-constraint bound tables into one, mirroring the source
         model's own generic-constraints pipeline) — not a regression of the
@@ -429,7 +429,7 @@ class TestBoundAccumulatorWiring:
         self, tmp_path: Path
     ) -> None:
         """A deck with no QBOM records writes no ``pumping_bounds.parquet``
-        at all (AC #4, the negative half) — the fully-synthetic mock deck
+        at all (the negative half) — the fully-synthetic mock deck
         (``_run_cadastro_pipeline``) carries none."""
         dst = _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
         assert not (dst / "constraints" / "pumping_bounds.parquet").exists()
@@ -488,15 +488,14 @@ class TestCli:
         assert result.exit_code == 1
 
 
-# ticket-008 (epic-02, cadastro overrides): a fully synthetic Tier-1 harness
-# for ``convert_decomp_case`` — no real deck under ``example/``. Every
-# converter the pipeline calls other than the five this ticket wires
-# (``build_effective_cadastro``, ``convert_initial_storage``,
+# A fully synthetic Tier-1 harness for ``convert_decomp_case`` — no real
+# deck under ``example/``. Every converter the pipeline calls other than the
+# five wired here (``build_effective_cadastro``, ``convert_initial_storage``,
 # ``convert_hydros``, ``convert_hydro_bounds``, ``convert_storage_bounds``)
-# is patched to a canned return value, so the test exercises only this
-# ticket's own orchestration: threading the effective cadastro through,
-# combining ``hydro_bounds`` with the storage-bounds overlay, and the
-# resolution-report summary diagnostic.
+# is patched to a canned return value, so the test exercises only the
+# orchestration: threading the effective cadastro through, combining
+# ``hydro_bounds`` with the storage-bounds overlay, and the resolution-report
+# summary diagnostic.
 
 
 def _cadastro_plant_row(
@@ -510,7 +509,7 @@ def _cadastro_plant_row(
         "desvio": 0,
         "volume_minimo": vmin,
         "volume_maximo": vmax,
-        # ticket-023b: emit_rhe_generics computes a per-stage integrated ρ_acum
+        # emit_rhe_generics computes a per-stage integrated ρ_acum
         # for every operated plant (not only ones an HE record references), so
         # this synthetic fixture needs a regulation type ("M" -- a reservoir --
         # never branches through the run-of-river collapse the rest of this
@@ -563,7 +562,7 @@ def _cadastro_uh_frame() -> pd.DataFrame:
                 "volume_inicial": 50.0,
                 "vazao_defluente_minima": None,
                 "volume_morto_inicial": None,
-                # ticket-023b: convert_decomp_case builds hydro_to_ree off this
+                # convert_decomp_case builds hydro_to_ree off this
                 "codigo_ree": 1,
             },
             {
@@ -647,36 +646,37 @@ def _run_cadastro_pipeline(
     convert_gnl_mock_out: list[MagicMock] | None = None,
 ) -> Path:
     """Run ``convert_decomp_case`` against the fully synthetic mock deck
-    above, patching every converter this ticket does not wire to a canned
+    above, patching every converter not under test to a canned
     return value. Returns the case directory.
 
-    *to_generic* (ticket-023b) feeds ``constraint_registers.read_constraints``'s
-    ``ConstraintCensus.to_generic`` — every RE/RHQ/RHV/RHE record this
-    ticket's own emitters consume, none of which the mock deck's ``Dadger``
-    can produce for real (it exposes no ``RE``/``HQ``/``HV``/``HE``/``CM``
-    accessors). *unreadable_electrical*/*libs_electrical* feed the E1
+    *to_generic* feeds ``constraint_registers.read_constraints``'s
+    ``ConstraintCensus.to_generic`` — every RE/RHQ/RHV/RHE record the
+    generic-constraint emitters consume, none of which the mock deck's
+    ``Dadger`` can produce for real (it exposes no
+    ``RE``/``HQ``/``HV``/``HE``/``CM`` accessors).
+    *unreadable_electrical*/*libs_electrical* feed the E1
     detection helpers the same way — both otherwise patched to their
     empty/absent default so this shared fixture keeps regressing the
-    ticket-008/023 combine logic it was built for, undisturbed.
+    bound-combine logic it was built for, undisturbed.
 
-    *diagnostics_out* (ticket-003): ``convert_decomp_case`` now owns its own
+    *diagnostics_out*: ``convert_decomp_case`` now owns its own
     top-level ``dx.collect()``, so a caller-side ``with dx.collect():``
     wrapped around this helper would be shadowed and see nothing. A caller
     that needs the run's diagnostics passes a list here; it is extended in
     place with ``report.diagnostics`` after the (patched) conversion returns.
 
-    *dry_run* (ticket-007) threads straight through to ``convert_decomp_case``.
+    *dry_run* threads straight through to ``convert_decomp_case``.
     *report_out*, mirroring *diagnostics_out*'s out-param shape, lets a caller
     inspect the full returned ``ConversionReport`` (e.g. ``would_write_paths``)
     without changing this helper's ``Path``-only return type.
 
-    *gnl_emission* (ticket-004, epic-03) drives the pipeline's GNL wiring
+    *gnl_emission* drives the pipeline's GNL wiring
     block (``pipeline.py``'s ``files.dadgnl is not None`` branch), which every
     other caller skips by leaving *gnl_emission* at its ``None`` default. When
     supplied: ``files.dadgnl`` points at a placeholder path so the branch is
     entered; ``Dadger.Dadgnl.read``/``anticipated_conv.read_gnl_model`` are
     patched to a sentinel non-``None`` model (their own decode logic is out of
-    scope — ``tests/test_decomp_anticipated.py`` owns it);
+    scope — the ``test_anticipated`` module owns it);
     ``anticipated_conv.convert_gnl`` is patched to return *gnl_emission*
     verbatim; and ``thermal_conv.convert_thermals`` is swapped from the empty
     default to a single CT thermal (id ``0``) so ``first_thermal_id`` (``max(id)
@@ -741,8 +741,8 @@ def _run_cadastro_pipeline(
             "value_m3s": pa.array([], type=pa.float64()),
         }
     )
-    # The pre-ticket-008 baseline hydro_bounds: one RQ/UH-derived min-outflow
-    # contribution — this ticket's own combine logic (one resolve() +
+    # The pre-override baseline hydro_bounds: one RQ/UH-derived min-outflow
+    # contribution — the combine logic (one resolve() +
     # build_bound_tables() pass over this plus the real convert_storage_bounds
     # output) is what is under test, not convert_hydro_bounds' own RQ/UH logic
     # (out of scope).
@@ -794,16 +794,16 @@ def _run_cadastro_pipeline(
         ".bounds_conv.convert_hydro_bounds": baseline_hydro_bounds,
         "cobre_bridge.decomp.pipeline.hydro_conv.convert_hydro_group_availability": {},
         "cobre_bridge.decomp.pipeline.contracts_conv.read_contracts": [],
-        # epic-07 (ticket-023): the mock deck (_CadastroDadger) exposes no
+        # The mock deck (_CadastroDadger) exposes no
         # RE/HQ/HV/UE accessors, so the special-constraint census and the
-        # pumping id map must be patched too — this ticket's own combine
+        # pumping id map must be patched too — the bound-combine
         # logic is under test, not the special-constraint reader or the
         # pumping id map (both out of scope, exercised elsewhere).
         "cobre_bridge.decomp.pipeline.constraint_registers.read_constraints": (
             ConstraintCensus(by_family={}, to_bounds=(), to_generic=to_generic)
         ),
         "cobre_bridge.decomp.pipeline.network_conv.pumping_station_id_map": {},
-        # ticket-023b: the mock deck exposes no real files (DecompCase.from_directory
+        # The mock deck exposes no real files (DecompCase.from_directory
         # is patched wholesale above, so no real file I/O happens anywhere in this
         # fixture) — the E1 detection helpers read the raw deck files directly, so
         # they must be patched here too, the same way the special-constraint
@@ -817,10 +817,10 @@ def _run_cadastro_pipeline(
         ),
     }
     if gnl_emission is not None:
-        # ticket-004: route the GNL wiring block through
+        # Route the GNL wiring block through
         # its own patches rather than the empty/absent default above —
         # convert_gnl's own decode/placement logic stays out of scope
-        # (tests/test_decomp_anticipated.py owns it), only the routing of its
+        # (the ``test_anticipated`` module owns it), only the routing of its
         # *return value* into the written case files is under test here.
         # ``case.dadgnl`` is already the non-None sentinel set above, so only
         # its downstream decode (read_gnl_model) needs patching here.
@@ -850,7 +850,7 @@ def _run_cadastro_pipeline(
     return dst
 
 
-# ticket-004 (epic-03): two hand-built ``GnlEmission`` fixtures driving
+# Two hand-built ``GnlEmission`` fixtures driving
 # ``TestGnlWiring`` below via ``_run_cadastro_pipeline``'s ``gnl_emission``
 # param — no real ``dadgnl`` deck, no ``convert_gnl`` execution (it is
 # mocked). "Populated" carries a non-empty post-study ``thermal_bounds``
@@ -885,9 +885,9 @@ _EMPTY_THERMAL_BOUNDS_GNL_EMISSION = GnlEmission(
 
 
 class TestGnlWiring:
-    """ticket-004 (epic-03): regression-guard the pre-existing GNL wiring
-    block. Epic 02 reworked ``convert_gnl`` to
-    synthesise a GS-driven post-study calendar and free (not just pinned)
+    """Regression-guard the pre-existing GNL wiring
+    block. ``convert_gnl``
+    synthesises a GS-driven post-study calendar and free (not just pinned)
     forward deliveries, but the pipeline call site already carried the
     unchanged ``GnlEmission`` shape to disk — no tier-1 test exercised it,
     since the mock deck's ``DecompFiles`` always carried ``dadgnl=None``.
@@ -995,14 +995,14 @@ class TestGnlWiring:
 
 
 class TestCadastroPipelineWiring:
-    """ticket-008: ``build_effective_cadastro`` threads into
+    """``build_effective_cadastro`` threads into
     ``convert_decomp_case`` and the storage-bounds overlay folds into the
     same ``hydro_bounds.parquet`` the RQ/UH minimum-outflow rows populate."""
 
     def test_no_override_regresses_hydro_bounds_and_entity_output(
         self, tmp_path: Path
     ) -> None:
-        """No ``AC`` volume record: the combined table equals the pre-ticket
+        """No ``AC`` volume record: the combined table equals the pre-override
         baseline (no storage rows), and ``initial_conditions.json`` /
         ``system/hydros.json`` reflect the base registry values unchanged."""
         dst = _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
@@ -1028,7 +1028,7 @@ class TestCadastroPipelineWiring:
         self, tmp_path: Path
     ) -> None:
         """``$schema`` is now stamped on DECOMP ``initial_conditions.json`` too
-        (the twin-track asymmetry epic-07 deferred), first key to match the
+        (a previously deferred twin-track asymmetry), first key to match the
         source model's own key order, pinned to the registry."""
         dst = _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
 
@@ -1042,7 +1042,7 @@ class TestCadastroPipelineWiring:
         """An ``ACVOLMAX`` row raising plant 1's ``volume_maximo`` to 250.0
         from the final stage forward widens its entity envelope to 250.0
         (``system/hydros.json``) and adds override rows to the combined
-        ``hydro_bounds`` table. Per Rule A (ticket-006, ``storage_envelope``):
+        ``hydro_bounds`` table. Per Rule A (``storage_envelope``):
         the raised (final) stage itself now *equals* the widened envelope and
         needs no override row; the earlier stages, which still sit at the
         narrower pre-raise ceiling, are what differ from it and get the
@@ -1070,7 +1070,7 @@ class TestCadastroPipelineWiring:
         ]
         assert len(storage_only) >= 1
         assert all(row["max_storage_hm3"] == 100.0 for row in storage_only)
-        # The pre-ticket-008 baseline row (min_outflow, no storage columns)
+        # The pre-override baseline row (min_outflow, no storage columns)
         # is still present, untouched by the combine.
         outflow_only = [row for row in storage_rows if row["min_outflow_m3s"] == 5.0]
         assert len(outflow_only) == 1
@@ -1085,7 +1085,7 @@ class TestCadastroPipelineWiring:
         """The resolution-report summary is a single INFO diagnostic naming
         ``volume_maximo`` among the applied overrides.
 
-        ticket-003: ``convert_decomp_case`` now owns its own top-level
+        ``convert_decomp_case`` now owns its own top-level
         ``dx.collect()``, so this reads the diagnostics via
         ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
         ``dx.collect()`` (which would be shadowed and see nothing)."""
@@ -1115,13 +1115,13 @@ class TestCadastroPipelineWiring:
         assert "volume_maximo" in cadastro_diagnostics[0].summary
 
 
-# ticket-023b (epic-07): synthetic RE/RHQ/RHV/RHE ``to_generic`` records for
+# Synthetic RE/RHQ/RHV/RHE ``to_generic`` records for
 # ``TestGenericConstraintWiring`` below. Every record uses plant codes 1/2 —
 # the shared ``_cadastro_hidr_frame``/``_cadastro_uh_frame`` fixture's two
 # plants, both members of REE 1 (``_cadastro_uh_frame``'s ``codigo_ree``) —
 # and is deliberately multi-term (RE/HQ/HV) or the whole-REE energy sum (HE),
 # so none of the four ever lowers to an entity bound (``lowers_to_bound``);
-# every one lands in ``census.to_generic``, this ticket's own territory.
+# every one lands in ``census.to_generic``, the generic-constraint territory.
 _N_BLOCKS = 3  # matches _calendar()'s 3-block stages
 
 
@@ -1181,7 +1181,7 @@ def _synthetic_rhv_record() -> ConstraintRecord:
 
 #: The RHE record's percentage limit — deliberately a *percentage*
 #: (``tipo_limite=2``) rather than an absolute MWmes limit, so its RHS
-#: genuinely depends on ρ_acum (an absolute limit would not exercise AC3's
+#: genuinely depends on ρ_acum (an absolute limit would not exercise the
 #: "LHS sigil == the RHS ρ_acum it drove" wiring at all).
 _RHE_LIMITE_PCT = 40.0
 
@@ -1218,14 +1218,14 @@ def _all_synthetic_generics() -> tuple[ConstraintRecord, ...]:
 
 
 class TestGenericConstraintWiring:
-    """ticket-023b (epic-07): the E4/E5 generic-constraint emitters wired
+    """The E4/E5 generic-constraint emitters wired
     into ``convert_decomp_case`` over one shared 0-based id allocator.
     Tier-1 synthetic only — the ``_run_cadastro_pipeline`` mock deck,
     extended with a ``to_generic`` census; no real deck, no ``import cobre``.
     """
 
     def test_ids_are_dense_and_unique_across_the_emitters(self, tmp_path: Path) -> None:
-        """AC1: RE (one upper-only id) -> the combined RHQ/RHV emitter (one
+        """RE (one upper-only id) -> the combined RHQ/RHV emitter (one
         genuinely two-sided HQ id under cobre's F3 interval model + one
         lower-only HV id) -> RHE (one id) share a single running allocator,
         so the 4 emitted ids form a gap-free ``range(4)`` with no
@@ -1246,7 +1246,7 @@ class TestGenericConstraintWiring:
     def test_writes_both_generic_files_when_generics_present(
         self, tmp_path: Path
     ) -> None:
-        """AC2 (positive half): a deck with >= 1 surviving generic writes
+        """Positive half: a deck with >= 1 surviving generic writes
         both ``generic_constraints.json`` and
         ``generic_constraint_bounds.parquet``."""
         dst = _run_cadastro_pipeline(
@@ -1258,19 +1258,19 @@ class TestGenericConstraintWiring:
     def test_writes_neither_generic_file_when_none_survive(
         self, tmp_path: Path
     ) -> None:
-        """AC2 (negative half): the baseline mock deck (no ``to_generic``
+        """Negative half: the baseline mock deck (no ``to_generic``
         records at all) writes neither file."""
         dst = _run_cadastro_pipeline(tmp_path, ac_volmax_frame=None)
         assert not (dst / "constraints" / "generic_constraints.json").exists()
         assert not (dst / "constraints" / "generic_constraint_bounds.parquet").exists()
 
     def test_rhe_rho_acum_sigil_matches_the_rhs_it_drove(self, tmp_path: Path) -> None:
-        """AC3: the ``@rho_acum_h{id}`` LHS sigil ``generic_parameters.json``
+        """The ``@rho_acum_h{id}`` LHS sigil ``generic_parameters.json``
         declares for a referenced hydro resolves to the SAME per-stage value
         ``emit_rhe_generics`` used to compute that same constraint's own RHS
         (a percentage-of-EARM limit, so the RHS genuinely depends on it) —
-        proving the pipeline wires ticket-017's scalar-parameters half and
-        ticket-018's RHE emitter half together, not two independently
+        proving the pipeline wires the scalar-parameters half and the
+        RHE emitter half together, not two independently
         computed values that merely happen to look alike."""
         dst = _run_cadastro_pipeline(
             tmp_path, ac_volmax_frame=None, to_generic=(_synthetic_rhe_record(),)
@@ -1321,10 +1321,10 @@ class TestGenericConstraintWiring:
     def test_detection_diagnostics_flow_through_the_dx_sink(
         self, tmp_path: Path
     ) -> None:
-        """AC4: the E1 FE/RHA/LIBs-electrical detection diagnostics are
+        """The E1 FE/RHA/LIBs-electrical detection diagnostics are
         captured on the returned ``ConversionReport``, not only logged.
 
-        ticket-003: ``convert_decomp_case`` now owns its own top-level
+        ``convert_decomp_case`` now owns its own top-level
         ``dx.collect()``, so this reads the diagnostics via
         ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
         ``dx.collect()`` (which would be shadowed and see nothing)."""
@@ -1371,7 +1371,7 @@ class TestGenericConstraintWiring:
     def test_generic_bounds_are_zstd_and_envelope_matches_the_shared_writer(
         self, tmp_path: Path
     ) -> None:
-        """AC5: ``generic_constraint_bounds.parquet`` compresses with zstd
+        """``generic_constraint_bounds.parquet`` compresses with zstd
         (cobre C3: snappy unsupported), and ``generic_constraints.json``'s
         envelope key + ``$schema`` match the registry entry the source
         model's own generic-constraints writer (``converters/constraints.py``)
@@ -1395,7 +1395,7 @@ class TestGenericConstraintWiring:
 
 
 class TestDryRun:
-    """ticket-007 (epic-03): ``dry_run`` threads through both DECOMP write
+    """``dry_run`` threads through both DECOMP write
     seams (the in-impl ``_write_json``/``_write_parquet`` closures and the
     ``write_scalar_parameters`` seam) and the partial-write cleanup arm."""
 
@@ -1415,7 +1415,7 @@ class TestDryRun:
     def test_dry_run_defers_generic_parameters_but_records_its_path(
         self, tmp_path: Path
     ) -> None:
-        """A surviving RHE record (ticket-018) drives
+        """A surviving RHE record drives
         ``write_scalar_parameters`` -- under ``dry_run=True`` it must defer
         the write while still recording the path, proving the second write
         seam (outside the ``_write_json``/``_write_parquet`` closures) is
@@ -1500,7 +1500,7 @@ class TestDryRun:
         """A successful ``--force`` re-run over a populated ``dst`` pre-clears
         the previous case's full artifact set first, so a conditional
         artifact the new run does not reproduce (``post_study_stages.json``,
-        ``boundary/``) cannot survive on top of the fresh case (CONV-02)."""
+        ``boundary/``) cannot survive on top of the fresh case."""
         from cobre_bridge.decomp import pipeline as decomp_pipeline
 
         dst = tmp_path / "case"
@@ -1553,7 +1553,7 @@ class TestDryRun:
     def test_real_run_against_populated_dst_refuses_without_clearing(
         self, tmp_path: Path
     ) -> None:
-        """Regression for the epic-03 data-loss bug: the non-empty/``force``
+        """Regression for the data-loss bug: the non-empty/``force``
         refusal must fire before the clearing ``try``/``except`` so a plain
         (no ``--force``) run against a pre-existing, populated ``dst`` raises
         cleanly and never deletes the user's existing case. Exercises the
@@ -1576,7 +1576,7 @@ class TestDryRun:
         self, tmp_path: Path
     ) -> None:
         """The DECOMP set clears the shared artifacts plus its own root-level
-        ``post_study_stages.json`` and ``boundary/`` tree (CONV-10)."""
+        ``post_study_stages.json`` and ``boundary/`` tree."""
         from cobre_bridge.core.conversion import clear_dst_contents
         from cobre_bridge.decomp.pipeline import DECOMP_CLEARED_ARTIFACTS
 
@@ -1602,7 +1602,7 @@ class TestDryRun:
     def test_newave_cleared_set_leaves_decomp_only_artifacts(
         self, tmp_path: Path
     ) -> None:
-        """Regression pinning CONV-10: the NEWAVE set does not name
+        """Regression: the NEWAVE set does not name
         DECOMP-only artifacts, so they survive a NEWAVE-set clear."""
         from cobre_bridge.core.conversion import clear_dst_contents
         from cobre_bridge.newave.pipeline import NEWAVE_CLEARED_ARTIFACTS
@@ -1673,12 +1673,12 @@ class TestDeferralWarning:
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A deck with FE/RHA/LIBs surfaces reports them exactly once, through
-        ticket-023b's structured ``Diagnostic``s -- even when the deferral
+        the structured ``Diagnostic``s -- even when the deferral
         warning fires (VI present here), it names only water travel time,
         never these special-constraint surfaces (the warning text and the
         ``dx`` sink are disjoint on these items).
 
-        ticket-003: ``convert_decomp_case`` owns its own top-level
+        ``convert_decomp_case`` owns its own top-level
         ``dx.collect()``, so the diagnostics half reads
         ``_run_cadastro_pipeline``'s ``diagnostics_out`` rather than an outer
         ``dx.collect()`` (which would be shadowed and see nothing)."""
@@ -1921,12 +1921,12 @@ def _fc_line(tipo: str, caminho: str) -> str:
 
 
 class TestDiscoverDecompFilesBoundaryFcf:
-    """TICKET-007: ``discover_decomp_files`` resolves the deck's optional
+    """``discover_decomp_files`` resolves the deck's optional
     boundary-FCF cut files (``cortesh``/``cortes``), gated on their presence
     -- the discovery prerequisite for the boundary-FCF importer, which
     ``convert decomp`` now runs by default (``--no-fcf`` opts out). Mirrors
     ``TestDiscoverDecompFilesLibsElectrical``'s synthetic-deck-dir fixture
-    pattern (``tests/test_decomp_libs_electrical_pipeline.py``)."""
+    pattern (in the ``test_libs_electrical_pipeline`` module)."""
 
     @staticmethod
     def _minimal_deck(deck_dir: Path, *, dadger_text: str = "") -> None:
@@ -2018,9 +2018,8 @@ class TestDiscoverDecompFilesBoundaryFcf:
         assert files.cortesh == target
 
     def test_decomp_files_still_constructs_without_the_new_fields(self) -> None:
-        """Every pre-existing ``DecompFiles(...)`` call site (this ticket
-        touches none of them) keeps constructing unchanged -- both new
-        fields default to ``None``."""
+        """Every pre-existing ``DecompFiles(...)`` call site keeps
+        constructing unchanged -- both new fields default to ``None``."""
         from cobre_bridge.decomp.files import DecompFiles
 
         files = DecompFiles(

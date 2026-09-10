@@ -6,10 +6,10 @@ _add_type_filter_and_row_attrs helpers, and the full render() path using
 MagicMock data with real polars/pandas objects for fields that get accessed
 as LazyFrames/DataFrames.
 
-Also covers the F3 sense-free migration (epic-08 ticket-029): constraint
+Also covers the F3 sense-free migration: constraint
 dicts here carry no ``sense`` key and ``gc_bounds`` fixtures carry the F3
 ``bound_lower``/``bound_upper`` endpoint pair instead of a single ``bound``
-column, matching what ticket-027's writers now emit.
+column, matching what the current constraint-bounds writers now emit.
 """
 
 from __future__ import annotations
@@ -218,7 +218,7 @@ def _make_mock_data(
 
 
 def test_tab_constants() -> None:
-    """Module-level constants must match the ticket specification exactly."""
+    """Module-level constants must match their expected values exactly."""
     assert tab_constraints.TAB_ID == "tab-constraints"
     assert tab_constraints.TAB_LABEL == "Constraints"
     assert tab_constraints.TAB_ORDER == 80
@@ -416,7 +416,7 @@ def test_compute_violation_zones_two_sided_range_flags_both_directions() -> None
     """A genuine distinct-endpoint range (``bound_lower`` != ``bound_upper``) flags
     a below-floor breach AND an above-ceiling breach independently, in one call —
     the two-sided test this fix adds in place of the single-sense ``>=``/``<=``
-    branch (epic-08 F3 range mishandling)."""
+    branch (the F3 range-mishandling case this fixes)."""
     p10 = [5.0, 50.0, 50.0]
     p90 = [5.0, 50.0, 95.0]
     bound_lower = [10.0, 10.0, 10.0]
@@ -539,7 +539,7 @@ def test_build_constraint_lhs_data_missing_bounds_gives_none_bound() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC1: derived sense + bound value parity with a pre-F3 case (ticket-029)
+# Derived sense + bound value parity with a pre-F3 case
 # ---------------------------------------------------------------------------
 
 
@@ -574,7 +574,7 @@ def test_build_constraint_lhs_data_derives_le_from_upper_endpoint() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fix 1 (epic-08 boundary review): a genuine distinct-endpoint "range" band
+# A genuine distinct-endpoint "range" band
 # (DECOMP RE/HQ/HV) must render both the floor and the ceiling and
 # violation-test both directions, instead of silently dropping the floor.
 # ---------------------------------------------------------------------------
@@ -1149,7 +1149,7 @@ class TestEvaluateAtNameRhoAcumOverride:
         assert s0["lhs_value"].iloc[0] == 2.0 * 100.0
 
     def test_override_lets_a_satisfied_stage_clear_its_own_bound(self) -> None:
-        """The regression this ticket fixes: the *default* column can put the
+        """The regression guarded here: the *default* column can put the
         LHS on the wrong side of its own bound; the LP-faithful override
         clears it. Default LHS = 2.0*100=200 < bound=300 (falsely violated);
         override LHS = 5.68*100=568 >= bound=300 (actually satisfied)."""
@@ -1241,8 +1241,8 @@ class TestStorageOnlyFastPath:
 
 
 # ---------------------------------------------------------------------------
-# AC1 (table half): build_constraints_summary_table derives its "Sense"
-# column + "Bound Range" from F3 endpoints (ticket-029)
+# build_constraints_summary_table derives its "Sense"
+# column + "Bound Range" from F3 endpoints
 # ---------------------------------------------------------------------------
 
 
@@ -1296,8 +1296,8 @@ class TestSummaryTableDerivesSenseFromBounds:
 
 
 # ---------------------------------------------------------------------------
-# AC2: dashboard/data.py's generic-constraint bounds loader reads the F3
-# bound_lower/bound_upper columns straight through (ticket-029)
+# dashboard/data.py's generic-constraint bounds loader reads the F3
+# bound_lower/bound_upper columns straight through
 # ---------------------------------------------------------------------------
 
 
@@ -1344,8 +1344,8 @@ class TestLoadGenericConstraintsF3Shape:
 
 
 # ---------------------------------------------------------------------------
-# AC4 grep guard: no dashboard/report reader accesses a removed `sense` key
-# or a single `bound` column (ticket-029)
+# grep guard: no dashboard/report reader accesses a removed `sense` key
+# or a single `bound` column
 # ---------------------------------------------------------------------------
 
 _BOUND_ACCESS_RE = re.compile(
@@ -1358,7 +1358,7 @@ _SENSE_ACCESS_RE = re.compile(
 
 class TestNoSenseOrSingleBoundColumnRemainsInDashboardOrReport:
     """Mirrors ``TestNoSenseOrSingleBoundColumnRemainsInComparators``
-    (ticket-028, ``tests/test_compare.py``) for the ticket-029 readers:
+    in the comparators compare tests, for the dashboard/report readers:
     matches only genuine column/dict *access* patterns (``.col("bound")``,
     ``row["bound"]``, ``.get("bound"``) — column *names* that merely contain
     "bound" as a substring (``bound_lower``, ``bound_upper``) are not

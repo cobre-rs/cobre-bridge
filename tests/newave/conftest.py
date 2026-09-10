@@ -239,7 +239,7 @@ def _make_intercambio_df() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# NE-with-filling fixtures (ticket-009): a JURUENA-shaped run-of-river ('S')
+# NE-with-filling fixtures: a JURUENA-shaped run-of-river ('S')
 # plant (code 309) admitted into the active set by its exph dead-volume row.
 # ---------------------------------------------------------------------------
 
@@ -285,12 +285,12 @@ def _make_ne_exph_mock(*, duracao: int = 1, volume_morto: float = 0.0) -> MagicM
 
     Mirrors the real ``exph.dat`` layout (verified on JURUENA): one schedule row
     (non-null ``data_inicio_enchimento``) — what ``filling_hydro_codes`` selects
-    and the epic-03 ``convert_hydros`` filling tests read via ``.iloc[0]`` — then
+    and the ``convert_hydros`` filling tests read via ``.iloc[0]`` — then
     one row **per generating unit** with ``data_entrada_operacao`` /
-    ``conjunto_maquina_entrada`` / ``maquina_entrada`` populated (epic-04). JURUENA
+    ``conjunto_maquina_entrada`` / ``maquina_entrada`` populated. JURUENA
     has two machines, both entering Jan 2025 in machine group 1 (so under the
     Sep-2024 horizon their online stage is 4). The schedule row keeps a non-null
-    ``data_entrada_operacao`` (per the epic-03 mock) but a NULL
+    ``data_entrada_operacao`` but a NULL
     ``conjunto_maquina_entrada``, so the ramp branch — which filters unit rows on
     ``conjunto_maquina_entrada`` — never treats it as a generating unit.
     """
@@ -324,7 +324,7 @@ def _ne_filling_case(tmp_path, *, duracao: int = 1, volume_morto: float = 0.0):
 
     Study start Sep 2024 ⇒ stage 0 = Sep, stage 1 = Oct, stage 2 = Nov. JURUENA's
     Oct-2024 filling start maps to ``start_sid == 1``; with ``duracao == 1`` the
-    entry is ``entry_sid == 2`` (design §5).
+    entry is ``entry_sid == 2``.
     """
     return _hydro_case(
         tmp_path,

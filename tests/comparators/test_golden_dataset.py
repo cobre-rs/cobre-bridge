@@ -15,7 +15,7 @@ was verified to preserve the float ``repr`` byte-for-byte.
 
 Regeneration recipe (only when an intentional, reviewed output change is made)::
 
-    COBRE_BRIDGE_UPDATE_GOLDENS=1 .venv/bin/pytest tests/test_golden_dataset.py
+    COBRE_BRIDGE_UPDATE_GOLDENS=1 .venv/bin/pytest tests/comparators/test_golden_dataset.py
 
 When ``COBRE_BRIDGE_UPDATE_GOLDENS=1`` the tests WRITE the golden files and pass;
 otherwise they READ the goldens and assert equality. Goldens are NEVER silently

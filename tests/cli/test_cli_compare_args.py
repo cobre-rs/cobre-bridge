@@ -1,4 +1,4 @@
-"""Tier-1 tests for the compare-family typed-args migration (ticket-006).
+"""Tier-1 tests for the compare-family typed-args migration.
 
 Locks in two things: `_compare_newave` / `_compare_decomp` build a typed
 `CompareArgs` instead of a duck-typed `SimpleNamespace`, and
@@ -156,7 +156,7 @@ class TestCompareHandlerSignatures:
 
 
 class TestResolveCompareSettings:
-    """ticket-014/ticket-006: unit tests for the ``_resolve_compare_settings`` helper.
+    """Unit tests for the ``_resolve_compare_settings`` helper.
 
     Drives the helper directly with a crafted ``CompareArgs`` and a patched
     ``load_config`` returning a hand-built ``BridgeConfig``, so the precedence

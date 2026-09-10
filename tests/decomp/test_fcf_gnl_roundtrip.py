@@ -1,12 +1,11 @@
-"""GNL ring round-trip identity test for the boundary FCF mapper (epic 5).
+"""GNL ring round-trip identity test for the boundary FCF mapper.
 
-Epic 4 wired ``map_boundary_cuts(..., gnl_plan=GnlRingPlan | None)`` to place
-the per-block hours-weighted patamar sum ``Σ_p pi_gnl[col(s, p, l)] · h_p``
-(``math.fsum``, ticket-001) onto the terminal ring's *covered* dated
-``AnticipatedThermalState`` slots, and ticket-013's covered-lane filter drops
-that sum to ``0.0`` on any dated slot whose ``delivery_date`` falls before
-the post-study horizon. Two existing
-tests in ``tests/test_decomp_fcf_roundtrip.py`` prove the mapper's
+``map_boundary_cuts(..., gnl_plan=GnlRingPlan | None)`` places the per-block
+hours-weighted patamar sum ``Σ_p pi_gnl[col(s, p, l)] · h_p`` (``math.fsum``)
+onto the terminal ring's *covered* dated ``AnticipatedThermalState`` slots,
+and the covered-lane filter drops that sum to ``0.0`` on any dated slot whose
+``delivery_date`` falls before the post-study horizon. Two existing
+tests in ``tests/decomp/test_fcf_roundtrip.py`` prove the mapper's
 storage/lag legs end to end via a synthetic ``map -> write -> load_policy``
 round trip cross-checked against a *non-circular* oracle; this module is the
 GNL ring's equivalent — deck-independent, tier-2 (needs the optional
@@ -21,7 +20,7 @@ Python-vs-Python check. Instead it re-derives the flat ``pi_gnl`` column
 layout locally (:func:`_col`) and locates every slot by a linear scan over
 the *reloaded* ``entity_manifest`` (:func:`_slot_index`) — the ground truth
 for where the checkpoint writer actually placed each coefficient, never the
-mapper's own bookkeeping. Mirrors ``test_decomp_fcf_roundtrip.py``'s
+mapper's own bookkeeping. Mirrors ``test_fcf_roundtrip.py``'s
 ``_slot_index``/oracle discipline.
 """
 
@@ -68,7 +67,7 @@ _POST_HORIZON_START = 20260501
 
 #: Non-uniform coupling per-block hours (patamar order) — deliberately
 #: distinct across patamares so the round trip actually exercises the
-#: per-block weighting (ticket-001), not merely the uniform-split special
+#: per-block weighting, not merely the uniform-split special
 #: case that collapses to the pre-fix plain-sum-times-total-hours value.
 _COUPLING_BLOCK_HOURS = (100.0, 200.0, 300.0)
 
@@ -102,7 +101,7 @@ def _slot_index(
     for where the checkpoint writer actually placed each mapped
     coefficient — never `fcf.mapper._index_manifest`/`_index_gnl_ring`,
     which are the mapper's own bookkeeping and would make this oracle
-    circular. Mirrors `tests/test_decomp_fcf_roundtrip.py::_slot_index`.
+    circular. Mirrors `tests/decomp/test_fcf_roundtrip.py::_slot_index`.
     """
     for position, slot in enumerate(manifest):
         if (
@@ -156,8 +155,8 @@ def test_synthetic_gnl_roundtrip_coefficient_identity(tmp_path: Path) -> None:
     scanning the reloaded `entity_manifest`, never the mapper's own
     bookkeeping — against this module's independent `_col`/`math.fsum`
     oracle: the covered slot equals the per-block hours-weighted sum of its
-    three source `pi_gnl` columns against `_COUPLING_BLOCK_HOURS`
-    (ticket-001); the non-covered and sentinel slots are exactly `0.0`.
+    three source `pi_gnl` columns against `_COUPLING_BLOCK_HOURS`;
+    the non-covered and sentinel slots are exactly `0.0`.
     """
     header = make_cortes_header(
         (),
@@ -216,9 +215,8 @@ def test_synthetic_gnl_roundtrip_coefficient_identity(tmp_path: Path) -> None:
     assert sentinel_position is not None
 
     # The authored coefficient is the per-block hours-weighted pi_gnl sum
-    # (ticket-001) — `Σ_p pi_gnl[col(1, p, 2)] · coupling_block_hours[p]` —
-    # matching the mapper's `math.fsum(pi_gnl[c] * h for c, h in zip(...))`
-    # order exactly.
+    # `Σ_p pi_gnl[col(1, p, 2)] · coupling_block_hours[p]`, matching the
+    # mapper's `math.fsum(pi_gnl[c] * h for c, h in zip(...))` order exactly.
     expected_covered_sum = math.fsum(
         pi_gnl[
             _col(

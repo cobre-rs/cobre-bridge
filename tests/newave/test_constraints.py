@@ -38,7 +38,7 @@ from tests.conftest import make_case, make_nw_files
 # The remediation/summary/title/notes strings constraints.py emits reach a
 # pip-installed user with no repo checkout — none may leak a repo-internal
 # reference (mirrors test_decomp_fcf_capability.py's own marker scan, plus the
-# two extra markers the migration ticket calls out).
+# two extra markers the migration calls out).
 _REPO_INTERNAL_LEAKS = (
     "docs/",
     "plans/",
@@ -881,7 +881,7 @@ class TestConvertElectricConstraints:
         ``lim_inf``/``lim_sup`` are independent declarations, not one band —
         unlike the DECOMP ``_GenericBuilder``, which does collapse a genuine
         band into one id). Each keeps today's row semantics: one endpoint
-        populated, the other null (AC1/AC2)."""
+        populated, the other null."""
         case, id_map = _make_electric_re_case(tmp_path)
 
         result = convert_electric_constraints(case, id_map)
@@ -957,7 +957,7 @@ class TestConvertElectricConstraintsEmission:
     def test_hydro_unmapped_from_formula_and_re_dat_sources(
         self, tmp_path: Path
     ) -> None:
-        """AC: one hydro-unmapped term from a formula and one from an
+        """One hydro-unmapped term from a formula and one from an
         RE.DAT-only constraint both land in the same diagnostic, with the
         Source column distinguishing them."""
         from unittest.mock import MagicMock

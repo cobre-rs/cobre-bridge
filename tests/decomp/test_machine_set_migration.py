@@ -1,4 +1,4 @@
-"""Tests for ticket-012: migrating capacity/availability consumers onto the
+"""Tests for migrating capacity/availability consumers onto the
 per-stage-effective machine-set view.
 
 ``decomp/hydro.py``'s entity/mirror-group capacity (``convert_hydros``) and
@@ -7,7 +7,7 @@ the B8 per-group per-stage availability overlay
 overrides through a date-blind ``_read_ac_machine_overrides``/
 ``_AcOverrides`` pair. This migration re-sources both consumers onto
 ``EffectiveCadastro``'s per-stage-effective ``machine_conjunto_count``/
-``machine_set`` accessors (ticket-011), so a plant whose machine set changes
+``machine_set`` accessors, so a plant whose machine set changes
 mid-horizon gets the correct per-stage capacity — a fixture no real deck
 (rv3) exercises, since every machine-set override there resolves to stage 0.
 Tier-1: pure Python, no ``import cobre``, no ``example/`` read.
@@ -52,7 +52,7 @@ def _plant_row() -> dict:
 
     ``queda_nominal_conjunto_1`` is pinned to 80.0 m — exactly the plant's
     own operating head (``h_op = rho_eq / rho_esp = 0.72 / 0.009 = 80``) —
-    so the ticket-017 affinity ratio is a no-op (``(h_op/h_nom)**k == 1``)
+    so the affinity ratio is a no-op (``(h_op/h_nom)**k == 1``)
     and this fixture stays a pure machine-set/MP-FD regression, isolated
     from head-affinity effects (covered elsewhere,
     ``test_decomp_head_aware_max_turbined.py``). The head-corrected
@@ -136,8 +136,8 @@ class _StubDadger:
         df: bool = False,
     ) -> pd.DataFrame:
         # No ACALTEFE (or any other AC) row on this synthetic double — the
-        # ticket-017 tracked-gap warning is covered separately in
-        # test_decomp_head_aware_max_turbined.py.
+        # tracked-gap warning is covered separately in
+        # test_head_aware_max_turbined.py.
         return pd.DataFrame()
 
 
@@ -153,7 +153,7 @@ def _dropping_machine_set_effective(
     """Conjunto 1's machine count is 4 for stages 0-1 (matching the
     ``hidr`` base) and drops to 2 at the final stage — the synthetic
     mid-horizon ``NUMMAQ`` shrink no rv3 deck exercises (every machine-set
-    override there resolves to stage 0, per the ticket's own rv3 probe)."""
+    override there resolves to stage 0, per the rv3 probe)."""
     machine_sets = tuple(
         MachineSet(4, 25.0, 50.0) if stage < n_stages - 1 else MachineSet(2, 25.0, 50.0)
         for stage in range(n_stages)
@@ -169,8 +169,8 @@ def _dropping_machine_set_effective(
 def test_constant_machine_set_matches_base_rated_sum() -> None:
     """No override at all: the entity envelope and its mirror group's
     ``max_generation_mw`` equal the base ``hidr`` rated sum (4 x 25 = 100
-    MW) — byte-identical to the pre-ticket date-blind value.
-    ``max_turbined_m3s`` is head-corrected (ticket-017): the affinity ratio
+    MW) — byte-identical to the date-blind value.
+    ``max_turbined_m3s`` is head-corrected: the affinity ratio
     is a no-op here (``queda_nominal_conjunto_1`` pinned to ``h_op``), but
     the installed-power cap ``Σ n·p_nom / rho_eq`` (= 100 / 0.72) still
     binds below the rated 4 x 50 = 200 m3/s."""
@@ -243,7 +243,7 @@ def test_constant_machine_set_availability_matches_mp_fd_product() -> None:
     """Regression guard: with a constant (un-overridden) machine set, the
     B8 overlay still reproduces the plain ``installed x MP x FD`` formula,
     capped by the (here, non-binding) hydraulic ceiling — unchanged from
-    the pre-ticket date-blind behaviour, now sourced through ``effective``.
+    the date-blind behaviour, now sourced through ``effective``.
     A stage whose MP/FD factors do not move installed capacity below the
     envelope (stage 0) gets no row; the flow envelope is untouched by
     MP/FD (only by the machine set), so ``max_turbined_m3s`` stays absent

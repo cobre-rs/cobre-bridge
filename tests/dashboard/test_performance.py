@@ -1,4 +1,4 @@
-"""Unit tests for src/cobre_bridge/dashboard/tabs/v2_performance.py."""
+"""Unit tests for cobre_bridge.dashboard.tabs.performance (the Performance tab)."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _make_solver_df(
 ) -> pd.DataFrame:
     """Synthetic solver DataFrame (solver_train or solver_sim).
 
-    Includes all columns required by ticket-021 chart functions so that
+    Includes all columns required by the Performance tab chart functions so that
     tests using the default ``_make_mock_data()`` do not fail on missing columns.
     """
     return pd.DataFrame(
@@ -443,13 +443,12 @@ def test_render_wraps_retry_histogram_in_chart_card() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_render_full_sections (ticket-021)
+# test_render_full_sections
 # ---------------------------------------------------------------------------
 
 
 def test_render_full_sections() -> None:
-    """render() with all non-empty data must contain all section titles added by
-    ticket-021."""
+    """render() with all non-empty data must contain all section titles."""
     scaling_report = {
         "stages": [
             {
@@ -475,7 +474,7 @@ def test_render_full_sections() -> None:
     assert "Per-Stage LP Detail" in html
     assert "Solver Retries" in html
     assert "Simulation" in html
-    # Sections added in the post-epic-01 reorg.
+    # Additional top-level iteration-timing sections.
     assert "Top-Level Iteration Timing" in html
     assert "Forward / Backward Wall-Time Breakdown" in html
     assert "Parallel Overhead Decomposition" in html
@@ -643,7 +642,7 @@ def test_opening_0_is_slower_than_rest_in_synthetic_data() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_render_empty_solver (ticket-021)
+# test_render_empty_solver
 # ---------------------------------------------------------------------------
 
 

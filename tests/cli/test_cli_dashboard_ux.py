@@ -1,9 +1,9 @@
-"""Tier-1 CLI-UX tests for ``dashboard`` (ticket-005).
+"""Tier-1 CLI-UX tests for ``dashboard``.
 
 Locks in the ``dashboard`` migration from ``SimpleNamespace`` to the typed
 ``DashboardArgs``: the no-simulation-output early exit now routes through
-``_fail`` (CLI-02 — a ``--json`` error envelope instead of empty stdout),
-the two human status lines are suppressed under ``--quiet`` (CLI-06) while
+``_fail`` (a ``--json`` error envelope instead of empty stdout),
+the two human status lines are suppressed under ``--quiet`` while
 the dashboard file is still written, and ``--no-color`` reaches every
 console ``_run_dashboard`` builds. Imports no cobre; the dashboard build
 itself is stubbed so no real case data is required.
@@ -187,7 +187,7 @@ class TestDashboardNoColor:
 
 
 class TestDashboardOpen:
-    """ticket-016: ``dashboard --open`` launches the written HTML in a browser.
+    """``dashboard --open`` launches the written HTML in a browser.
 
     Runs ``dashboard`` in-process via ``cli.main`` with the real dashboard build
     stubbed (``cobre_bridge.dashboard.build_dashboard``) so it only writes a tiny
@@ -303,7 +303,7 @@ class TestDashboardOpen:
 
 
 class TestDashboardJson:
-    """ticket-021: ``dashboard --json`` emits the unified verdict envelope.
+    """``dashboard --json`` emits the unified verdict envelope.
 
     Reuses ``TestDashboardOpen``'s in-process driver and build stub: the real
     dashboard build is replaced by a stub that writes a tiny file at the output
@@ -398,7 +398,7 @@ class TestDashboardJson:
     ) -> None:
         # A case dir WITHOUT output/simulation fires the exit-1 guard FIRST, so no
         # build happens; the guard now routes through ``_fail``, so stdout carries
-        # one error envelope instead of staying empty (CLI-02).
+        # one error envelope instead of staying empty.
         case_dir = tmp_path / "case"
         case_dir.mkdir()
         self._stub_build_dashboard(monkeypatch)

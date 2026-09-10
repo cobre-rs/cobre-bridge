@@ -219,7 +219,7 @@ class TestConvertHydroBounds:
         )
         # The RQ percentages (100, 100, 0) are non-uniform on every stage, so
         # plant 1 contributes per-block only (block_id = 0..2), no base
-        # contribution (covered in depth by tests/test_decomp_rq_bounds.py).
+        # contribution (covered in depth by tests/decomp/test_rq_bounds.py).
         plant1_stage0 = {
             c.block_id: c.lower
             for c in contributions
@@ -245,12 +245,12 @@ class TestConvertHydroBounds:
         assert 0 not in {c.entity_id for c in contributions}
 
     def test_qdef_windowed_plant_still_contributes_its_rq_default(self) -> None:
-        """Retired (ticket-023, epic-07): ``convert_hydro_bounds`` no longer
+        """``convert_hydro_bounds`` no longer
         skips a plant with an explicit ``QDEF`` flow window — that window's
         own ``outflow`` contribution now comes from
         ``single_term_bounds.single_term_bound_contributions`` (RHQ), and the
         accumulator intersects the two on the same ``(hydro, stage, block)``
-        cell rather than one replacing the other (AC7)."""
+        cell rather than one replacing the other."""
         cq = pd.DataFrame(
             [
                 {

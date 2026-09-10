@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 class TestPartitionValidationWarnings:
-    """``_partition_validation_warnings`` — the pure whitelist filter (ticket-007)."""
+    """``_partition_validation_warnings`` — the pure whitelist filter."""
 
     def test_partition_whitelists_interop_warning(self) -> None:
         """The interop message is whitelisted; an unrelated one still renders."""

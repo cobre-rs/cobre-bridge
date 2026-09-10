@@ -1405,8 +1405,8 @@ class TestConvertHydroEnergyProductivity:
 #
 # The parsing behaviour itself (angle/distance methods, commented lines, no
 # file present) is covered by TestParseFphaPlaneReduction in
-# tests/test_fpha_conversion.py, the established home for the FPHA converters;
-# this class covers only the multiple-active-methods diagnostic this ticket adds.
+# tests/newave/test_fpha_conversion.py, the established home for the FPHA converters;
+# this class covers only the multiple-active-methods diagnostic.
 
 
 class TestParseFphaPlaneReductionDiagnostics:

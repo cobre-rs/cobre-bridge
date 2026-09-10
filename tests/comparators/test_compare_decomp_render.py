@@ -6,7 +6,7 @@ threaded and ``--quiet``-gated. Tier 1 -- pure Python, no ``cobre`` import, no
 ``example/`` deck: the dataset build is stubbed via the same
 ``cobre_bridge.comparators.decomp.results.build_decomp_dataset`` monkeypatch
 seam ``TestCompareDecompCommand`` below and ``TestCompareDiagnosticsWiring``
-(``tests/test_compare.py``) already use.
+(``tests/comparators/test_compare.py``) already use.
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def _invoke(argv_tail: list[str], monkeypatch: pytest.MonkeyPatch, deck: Path) -
 def test_compare_decomp_renders_the_full_shared_table(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC1: stdout carries the ``DECOMP``-labelled header and a table row per
+    """Stdout carries the ``DECOMP``-labelled header and a table row per
     compared variable -- not just the one-line headline."""
     result = _invoke([], monkeypatch, tmp_path)
 
@@ -101,7 +101,7 @@ def test_compare_decomp_renders_the_full_shared_table(
 def test_compare_decomp_quiet_suppresses_header_and_table(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC2: ``--quiet`` suppresses both the header and the per-variable table."""
+    """``--quiet`` suppresses both the header and the per-variable table."""
     result = _invoke(["--quiet"], monkeypatch, tmp_path)
 
     assert result.exit_code == 0
@@ -113,7 +113,7 @@ def test_compare_decomp_quiet_suppresses_header_and_table(
 def test_compare_decomp_json_emits_one_verdict_and_suppresses_the_table(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC3: ``--json`` emits exactly one JSON verdict on stdout (the full
+    """``--json`` emits exactly one JSON verdict on stdout (the full
     table is suppressed) and the process exits 0."""
     result = _invoke(["--json"], monkeypatch, tmp_path)
 
@@ -155,7 +155,7 @@ class TestCompareDecompCommand:
     def test_renders_headline_and_exits_zero(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """ticket-023: the legacy per-variable table and bounds table renderer
+        """The legacy per-variable table and bounds table renderer
         is retired; the shared ``build_compare_verdict`` headline is the sole
         terminal summary."""
         result = self._invoke(
@@ -350,7 +350,7 @@ class TestCompareDecompCommand:
     def test_format_html_writes_the_shared_multi_tab_report_labelled_decomp(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """ticket-022: the HTML block now renders the SAME shared multi-tab
+        """The HTML block now renders the SAME shared multi-tab
         report as ``compare newave`` (``build_comparison_report``), not the
         legacy single-page renderer, with the reference series labelled
         "DECOMP" (never "NEWAVE")."""
@@ -404,7 +404,7 @@ class TestCompareDecompCommand:
     def test_partition_missing_output_exits_two(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """FINDING-1 regression: CobrePartitionMissingError extends
+        """Regression: CobrePartitionMissingError extends
         BridgeError, a hierarchy disjoint from CobreReadError (RuntimeError)
         and FileNotFoundError/ValueError. The compare decomp CLI handler
         must catch it too -- a clean ERROR line + exit 2, not an unhandled

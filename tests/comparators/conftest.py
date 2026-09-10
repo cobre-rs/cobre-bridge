@@ -22,7 +22,7 @@ def _patch_shared_case(
     id_map: DecompIdMap,
     dadger: object | None = None,
 ) -> None:
-    """Patch the shared ``DecompCase.from_directory`` build (ticket-020) so
+    """Patch the shared ``DecompCase.from_directory`` build so
     ``build_decomp_dataset``'s ``case.id_map``/``case.dadger`` resolve to
     *id_map*/*dadger* without touching the filesystem -- the case is now
     built unconditionally, before ``_read_aligned_frames`` runs, so every
@@ -47,20 +47,20 @@ def _patch_aligned_frames(
         "cobre_bridge.comparators.decomp.results._read_aligned_frames",
         lambda *_args, **_kwargs: aligned,
     )
-    # ticket-020: the shared ``DecompCase`` build now runs unconditionally at
+    # The shared ``DecompCase`` build now runs unconditionally at
     # the top of ``build_decomp_dataset`` (before ``_read_aligned_frames``,
     # which this stub bypasses) -- degenerate but valid, so a bare
     # ``tmp_path`` keeps working; tests needing a specific id map call
     # ``_patch_shared_case`` again afterwards (monkeypatch's last ``setattr``
     # wins).
     _patch_shared_case(monkeypatch, id_map=DecompIdMap(bus_codes=(), bus_names=()))
-    # ticket-006: ``build_decomp_dataset`` also calls
+    # ``build_decomp_dataset`` also calls
     # ``read_cobre_bus_aggregates`` directly (outside ``_read_aligned_frames``).
     # Unlike the other cobre readers it does NOT degrade to empty on a missing
     # case -- it raises ``CobrePartitionMissingError`` for the pre-0.13
     # ``hydro_bus_generation`` partition, which a bare ``tmp_path`` always
     # trips. Stub it here too, so every fixture that does not care about
-    # ticket-006's Energy Balance metadata (the vast majority) keeps working
+    # the Energy Balance metadata (the vast majority) keeps working
     # against a bare ``tmp_path``; tests that DO care override this again
     # afterwards (monkeypatch's last ``setattr`` wins).
     monkeypatch.setattr(
@@ -68,25 +68,25 @@ def _patch_aligned_frames(
         "read_cobre_bus_aggregates",
         lambda *_args, **_kwargs: pl.DataFrame(),
     )
-    # ticket-010: ``build_decomp_dataset`` also calls ``_cost_frames`` directly
+    # ``build_decomp_dataset`` also calls ``_cost_frames`` directly
     # (outside ``_read_aligned_frames``), which reads ``read_relato_costs`` --
     # unlike every other reader here, it RAISES on a missing/empty parse
-    # (ticket-009's "no silent-empty" reader contract), which a bare
+    # (the "no silent-empty" reader contract), which a bare
     # ``tmp_path`` always trips. Stub it here too, so every fixture that does
-    # not care about ticket-010's cost metadata keeps working against a bare
+    # not care about the cost metadata keeps working against a bare
     # ``tmp_path``; tests that DO care override this again afterwards
     # (monkeypatch's last ``setattr`` wins).
     monkeypatch.setattr(
         "cobre_bridge.comparators.decomp.results._cost_frames",
         lambda *_args, **_kwargs: ({}, pl.DataFrame()),
     )
-    # ticket-014: ``build_decomp_dataset`` also calls
+    # ``build_decomp_dataset`` also calls
     # ``read_cobre_hydro_bus_labels`` directly (outside ``_read_aligned_frames``).
-    # Like ``read_cobre_bus_aggregates`` above (ticket-006), it reads the
+    # Like ``read_cobre_bus_aggregates`` above, it reads the
     # ``simulation/hydro_bus_generation/`` partition and RAISES
     # ``CobrePartitionMissingError`` on a bare ``tmp_path`` instead of
     # degrading to empty. Stub it here too, so every fixture that does not
-    # care about ticket-014's hydro metadata keeps working against a bare
+    # care about the hydro metadata keeps working against a bare
     # ``tmp_path``; tests that DO care override this again afterwards
     # (monkeypatch's last ``setattr`` wins).
     monkeypatch.setattr(
@@ -160,7 +160,7 @@ def _aligned_fixture() -> _AlignedDecompFrames:
 
 
 def _balance_fixture() -> _AlignedDecompFrames:
-    """``_aligned_fixture`` extended with ticket-006's Energy Balance
+    """``_aligned_fixture`` extended with the Energy Balance
     reference frames, keyed to the same bus (cobre id 0, name "SE")."""
     nw_market = pl.DataFrame(
         {

@@ -2,7 +2,7 @@
 
 ``build_comparison_report`` and ``print_results_summary_from_dataset`` hard-coded
 the reference series' display label as the literal string ``"NEWAVE"`` across
-~70 sites in ``charts.py`` / ``report_builder.py`` / ``report.py``. This ticket
+~70 sites in ``charts.py`` / ``report_builder.py`` / ``report.py``. The indirection
 threads an additive ``reference_label: str = "NEWAVE"`` keyword through every one
 of those sites (explicit parameter passing, no module-level render state, no
 post-render string rewrite) so a future DECOMP report can pass
@@ -12,11 +12,11 @@ post-render string rewrite) so a future DECOMP report can pass
 This module:
 
 * GOLDEN-guards that the default (no ``reference_label`` argument) renders
-  byte-identical HTML / terminal output to the pre-ticket behaviour, by reusing
-  the exact fixture/golden pair ``tests/test_chart_helpers.py`` already uses for
+  byte-identical HTML / terminal output to the baseline behaviour, by reusing
+  the exact fixture/golden pair ``tests/dashboard/test_chart_helpers.py`` already uses for
   ``build_comparison_report``'s dataset-seam golden test
   (``tests/golden/build_comparison_report_full.html``) — the ground truth
-  captured before this ticket's edit.
+  captured before the reference_label change.
 * Proves every one of the ~70 sites was threaded (no site missed) by asserting
   that ``reference_label="DECOMP"`` leaves zero "NEWAVE" substrings in the
   rendered HTML / printed terminal text, while the Cobre-side labels are
@@ -72,17 +72,17 @@ def _build_dataset() -> ComparisonDataset:
 
 # ---------------------------------------------------------------------------
 # GOLDEN: build_comparison_report(dataset) at the default label is
-# byte-identical to the pre-ticket output.
+# byte-identical to the baseline output.
 # ---------------------------------------------------------------------------
 
 
 def test_build_comparison_report_default_label_matches_golden() -> None:
-    """No ``reference_label`` argument renders byte-identical to the pre-ticket HTML.
+    """No ``reference_label`` argument renders byte-identical to the baseline HTML.
 
     Reuses the exact golden file
     ``tests/golden/build_comparison_report_full.html`` that
-    ``tests.test_chart_helpers.test_build_comparison_report_dataset_golden``
-    already guards — captured from the pre-ticket ``charts.py`` /
+    ``tests.dashboard.test_chart_helpers.test_build_comparison_report_dataset_golden``
+    already guards — captured from the baseline ``charts.py`` /
     ``report_builder.py`` — to prove the additive ``reference_label`` parameter
     changes nothing at its ``"NEWAVE"`` default.
     """
@@ -152,7 +152,7 @@ def test_build_comparison_report_default_label_report_title() -> None:
 
 
 def test_print_results_summary_default_label_unchanged() -> None:
-    """No ``reference_label`` argument prints the pre-ticket "NEWAVE" header/labels."""
+    """No ``reference_label`` argument prints the default "NEWAVE" header/labels."""
     dataset = _build_dataset()
 
     text = _capture(
@@ -214,7 +214,7 @@ def test_print_results_summary_decomp_label_relabels_header() -> None:
 def test_print_results_summary_decomp_label_keeps_newave_dir_param_name() -> None:
     """``newave_dir`` stays the parameter name; only its printed LABEL changes.
 
-    Calling with the ``newave_dir=`` keyword must still work post-ticket (the
+    Calling with the ``newave_dir=`` keyword must still work (the
     parameter was NOT renamed to ``reference_dir`` or similar) — only the
     printed prefix in front of the path derives from ``reference_label``.
     """
@@ -365,7 +365,7 @@ def test_compare_newave_quiet_suppresses_summary_but_writes_artifacts(
 
 
 class TestReportBuilderProductivityGateDecoupling:
-    """ticket-016 decoupled report_builder's single ``if prod_df.is_empty():
+    """report_builder decouples its single ``if prod_df.is_empty():
     ... else: ...`` Productivity-tab gate into two independent gates (one per
     frame) so DECOMP's realized-only shape can render. This guards the
     NEWAVE-shaped case -- both frames populated, which is what NEWAVE always
@@ -460,7 +460,7 @@ class TestReportBuilderProductivityGateDecoupling:
 
 
 class TestReportBuilderReeSectionByteIdentityGuard:
-    """ticket-018 requirement 5: the REE section is additive and must leave
+    """The REE section is additive and must leave
     ``compare newave`` untouched -- it renders only when ``entity_type ==
     "ree"`` rows exist, which a NEWAVE-shaped dataset never carries."""
 

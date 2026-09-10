@@ -89,7 +89,7 @@ def _case(calendar: list[OperativeStage]) -> DecompCase:
     return make_decomp_case(Path("unused"), calendar=calendar)
 
 
-# ticket-007 (epic-03): ``decomp/pipeline.py`` no longer exposes module-level
+# ``decomp/pipeline.py`` no longer exposes module-level
 # ``_write_json``/``_write_parquet`` helpers (they became dry-run-aware
 # closures local to ``_convert_decomp_case_impl``), so
 # ``test_synthetic_contracts_validate_in_a_real_case`` below carries its own
@@ -816,10 +816,10 @@ def test_integrated_json_schema_and_parquet_roundtrip(tmp_path: Path) -> None:
     ]
 
 
-# --- End-to-end d41 round-trip (ticket-007) ------------------------------
+# --- End-to-end d41 round-trip ------------------------------
 #
 # The d41 shape round-trip needs no cobre binary but is itself skipif-guarded
-# on the sibling ~/git/cobre checkout being present.
+# on the sibling cobre checkout being present.
 
 
 @pytest.mark.skipif(

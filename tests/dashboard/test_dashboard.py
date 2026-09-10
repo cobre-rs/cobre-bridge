@@ -188,7 +188,7 @@ def test_load_stage_labels_falls_back_to_stage_id_when_start_date_absent(
 
 
 def test_load_hydro_bus_map_returns_mapping(tmp_path: Path) -> None:
-    """AC2: 0.13-shaped hydros (unit_groups[].bus_id, no top-level bus_id)
+    """0.13-shaped hydros (unit_groups[].bus_id, no top-level bus_id)
     resolve to the same bus ids the pre-0.13 top-level ``bus_id`` field
     produced, proving the relocation is value-preserving."""
     hydros_json = {
@@ -211,7 +211,7 @@ def test_load_hydro_bus_map_missing_file_returns_empty(tmp_path: Path) -> None:
 
 
 def test_load_hydro_bus_map_omits_multi_bus_plant(tmp_path: Path) -> None:
-    """AC3: a plant whose unit_groups disagree on bus is dropped from the
+    """A plant whose unit_groups disagree on bus is dropped from the
     map entirely -- neither collapsed onto one of its buses nor kept at a
     guessed value -- and a Diagnostic is raised naming it."""
     ambiguous = hydro_with_group(1, 10)
@@ -235,7 +235,7 @@ def test_load_hydro_bus_map_omits_multi_bus_plant(tmp_path: Path) -> None:
 def test_load_hydro_bus_map_missing_unit_groups_raises_named_error(
     tmp_path: Path,
 ) -> None:
-    """AC4: a hand-edited/pre-0.13 hydro with no unit_groups raises a typed
+    """A hand-edited/pre-0.13 hydro with no unit_groups raises a typed
     error naming the plant, rather than a bare KeyError."""
     hydros_json = {"hydros": [{"id": 3, "name": "ORPHAN"}]}
     _write_json(tmp_path / "system" / "hydros.json", hydros_json)
@@ -247,7 +247,7 @@ def test_load_hydro_bus_map_missing_unit_groups_raises_named_error(
 def test_load_hydro_bus_map_empty_unit_groups_raises_named_error(
     tmp_path: Path,
 ) -> None:
-    """AC4, empty-list variant of the missing-unit_groups guard."""
+    """Empty-list variant of the missing-unit_groups guard."""
     hydros_json = {"hydros": [{"id": 4, "name": "EMPTY_GROUPS", "unit_groups": []}]}
     _write_json(tmp_path / "system" / "hydros.json", hydros_json)
 
@@ -339,7 +339,7 @@ def test_load_ncs_bus_map_missing_file_returns_empty(tmp_path: Path) -> None:
 
 
 def test_load_hydro_metadata_extracts_fields(tmp_path: Path) -> None:
-    """AC2: bus id relocated into unit_groups[0].bus_id still resolves to the
+    """Bus id relocated into unit_groups[0].bus_id still resolves to the
     same value (1) the pre-0.13 top-level ``bus_id`` field produced."""
     hydros_json = {
         "hydros": [
@@ -378,7 +378,7 @@ def test_load_hydro_metadata_missing_file_returns_empty(tmp_path: Path) -> None:
 def test_load_hydro_metadata_omits_bus_id_for_multi_bus_plant(
     tmp_path: Path,
 ) -> None:
-    """AC3: a plant whose unit_groups disagree on bus keeps its non-bus
+    """A plant whose unit_groups disagree on bus keeps its non-bus
     metadata (name, volumes, productivity, ...) but has no "bus_id" key --
     it is not collapsed onto one of its buses -- and a Diagnostic names it."""
     ambiguous = hydro_with_group(1, 10, name="AMBIGUOUS")
@@ -401,7 +401,7 @@ def test_load_hydro_metadata_omits_bus_id_for_multi_bus_plant(
 def test_load_hydro_metadata_missing_unit_groups_raises_named_error(
     tmp_path: Path,
 ) -> None:
-    """AC4: absent unit_groups raises the same typed error naming the plant,
+    """Absent unit_groups raises the same typed error naming the plant,
     from the metadata call site too."""
     hydros_json = {
         "hydros": [
@@ -422,7 +422,7 @@ def test_load_hydro_metadata_missing_unit_groups_raises_named_error(
 def test_resolve_hydro_bus_id_is_the_single_shared_implementation(
     tmp_path: Path,
 ) -> None:
-    """AC5: both load_hydro_bus_map and load_hydro_metadata derive a plant's
+    """Both load_hydro_bus_map and load_hydro_metadata derive a plant's
     bus by calling the one shared helper, rather than each inlining its own
     copy of the unit_groups scan."""
     hydros_json = {"hydros": [hydro_with_group(0, 7)]}
@@ -442,7 +442,7 @@ def test_resolve_hydro_bus_id_is_the_single_shared_implementation(
 def test_load_entity_metadata_emits_multi_bus_diagnostic_once(
     tmp_path: Path,
 ) -> None:
-    """FINDING-5 regression: load_entity_metadata calls both
+    """Regression: load_entity_metadata calls both
     load_hydro_bus_map and load_hydro_metadata over the same hydros.json.
     The existing ambiguous-plant tests above call one loader at a time, so
     the double emission through the real load_entity_metadata path was
@@ -630,7 +630,7 @@ def test_get_renderable_tabs_returns_correct_tuple_structure() -> None:
 
 
 # ---------------------------------------------------------------------------
-# collect_required_js — shared plant-explorer JS union (ticket-009 / DASH-02)
+# collect_required_js — shared plant-explorer JS union
 # ---------------------------------------------------------------------------
 
 
@@ -718,7 +718,7 @@ def test_collect_required_js_excludes_modules_where_can_render_is_false() -> Non
 
 
 # ---------------------------------------------------------------------------
-# build_html — required_js shell parameter (ticket-009 / DASH-02)
+# build_html — required_js shell parameter
 # ---------------------------------------------------------------------------
 
 
@@ -841,9 +841,9 @@ class TestDashboardIntegration:
 
         # ---- system/ JSON files ----
         # 0.13-shaped hydros.json (unit_groups[].bus_id, no top-level
-        # bus_id) — AC6 exercises the full DashboardData.load() pipeline,
+        # bus_id) — exercises the full DashboardData.load() pipeline,
         # including load_hydro_bus_map/load_hydro_metadata, against this
-        # shape end-to-end (epic-03 ticket-012).
+        # shape end-to-end.
         _write_json(
             case / "system" / "hydros.json",
             {
@@ -1163,7 +1163,7 @@ class TestDashboardIntegration:
     ) -> None:
         """build_dashboard() renders end-to-end on a 0.13 case whose
         constraints/line_bounds.parquet carries per-block (block_id
-        non-null) override rows alongside the stage-level base row (AC6).
+        non-null) override rows alongside the stage-level base row.
         """
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -1199,7 +1199,7 @@ class TestDashboardIntegration:
 
 
 # ---------------------------------------------------------------------------
-# DashboardData.load() — new v2 fields (ticket-001)
+# DashboardData.load() — new v2 fields
 #
 # These tests reuse the full minimal case directory from
 # TestDashboardIntegration via the module-level ``_v2_case`` fixture.
@@ -1427,7 +1427,7 @@ def test_simulation_metadata_field(_v2_case: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# DashboardData.load() — ticket-002: constraint bounds and scenario stats
+# DashboardData.load() — constraint bounds and scenario stats
 # ---------------------------------------------------------------------------
 
 
@@ -1540,8 +1540,8 @@ def test_load_line_block_bounds_present(_v2_case: Path) -> None:
     """line_block_bounds holds only the per-block (block_id non-null) rows.
 
     Cobre 0.13 deleted the standalone per-block exchange-factor JSON document
-    and folded it into absolute-MW override rows inside line_bounds.parquet
-    (ticket-013); the stage-level base row (block_id is null) must not leak
+    and folded it into absolute-MW override rows inside line_bounds.parquet;
+    the stage-level base row (block_id is null) must not leak
     into this field.
     """
     import pyarrow as pa
@@ -1576,7 +1576,7 @@ def test_load_line_block_bounds_absent_is_empty_not_raising(_v2_case: Path) -> N
     """A case whose lines are uniform across blocks has no override rows.
 
     Only the stage-level base row (block_id is null) is present; this is a
-    legitimate steady state (AC3), not a version problem, so it must degrade
+    legitimate steady state, not a version problem, so it must degrade
     to an empty frame rather than raise.
     """
     import pyarrow as pa
@@ -1614,7 +1614,7 @@ def test_load_line_block_bounds_no_file_is_empty_not_raising(_v2_case: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# ticket-003: stochastic data fields
+# stochastic data fields
 # ---------------------------------------------------------------------------
 
 
@@ -1728,7 +1728,7 @@ def test_load_inflow_lags_lf_present(_v2_case: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# compute_non_fictitious_bus_ids — ticket-004
+# compute_non_fictitious_bus_ids
 # ---------------------------------------------------------------------------
 
 
@@ -1822,7 +1822,7 @@ def test_non_fictitious_bus_ids_field_on_data(_v2_case: Path) -> None:
 def _make_timing_raw_multiworker(
     n_iters: int = 2, n_workers: int = 3, fwd_per_worker: int = 100
 ) -> pd.DataFrame:
-    """Simulate post-epic-04b timing shape: 1 rank row + N per-worker rows/iter."""
+    """Simulate the multi-worker timing shape: 1 rank row + N per-worker rows/iter."""
     rows: list[dict[str, Any]] = []
     for it in range(1, n_iters + 1):
         rows.append(
@@ -1944,7 +1944,7 @@ def test_correct_wall_times_partial_iteration_mapping() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tab registry smoke test — regression guard (ticket-023)
+# Tab registry smoke test — regression guard
 # ---------------------------------------------------------------------------
 
 

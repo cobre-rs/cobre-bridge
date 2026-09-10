@@ -75,10 +75,9 @@ _HAS_WRITER_BINDING = _has_writer_binding()
 
 
 def test_emit_import_diagnostics_ac1_ac2_from_synthetic() -> None:
-    """AC 1/AC 2 (ticket-015) — both diagnostics fire against fully synthetic
-    inputs: no deck, no cobre binary. ``dropped`` uses codes 20/30 (not a
-    real deck's plant codes), so this test carries no hidden dependency on
-    ``example/``.
+    """Both diagnostics fire against fully synthetic inputs: no deck, no cobre
+    binary. ``dropped`` uses codes 20/30 (not a real deck's plant codes), so
+    this test carries no hidden dependency on ``example/``.
     """
     cuts = make_boundary_cuts((1,), (make_cut_record(pi_varm=(1.5,), rhs=10.0),))
     mapping = MappingResult(
@@ -105,8 +104,8 @@ def test_emit_import_diagnostics_ac1_ac2_from_synthetic() -> None:
 
     summary_diagnostic = by_code["boundary-fcf-cut-family-summary"]
     summary = summarize_cut_families(cuts)
-    # ticket-013 Requirement C.1: the figures live in `summary` now, not a
-    # separate restating `notes` bullet (dropped as duplicate bloat).
+    # The figures live in `summary`, not a separate restating `notes` bullet
+    # (dropped as duplicate bloat).
     assert summary_diagnostic.notes == []
     assert str(summary.n_active_cuts) in summary_diagnostic.summary
     assert str(summary.storage_nonzero_plants) in summary_diagnostic.summary
@@ -114,10 +113,10 @@ def test_emit_import_diagnostics_ac1_ac2_from_synthetic() -> None:
 
 
 def test_emit_import_diagnostics_no_dropped_gates_dropped_diagnostic_off() -> None:
-    """AC 3 (ticket-015) — ``mapping.dropped == ()`` gates off the
-    dropped-plant diagnostic while the cut-family-summary diagnostic still
-    fires. No cobre binary or real deck needed: both payloads are hand-built
-    from the shared ``tests/_fcf_fixtures.py`` builders (ticket-003).
+    """``mapping.dropped == ()`` gates off the dropped-plant diagnostic while
+    the cut-family-summary diagnostic still fires. No cobre binary or real deck
+    needed: both payloads are hand-built from the shared
+    ``tests/_fcf_fixtures.py`` builders.
     """
     cuts = make_boundary_cuts((1,), (make_cut_record(pi_varm=(1.5,), rhs=10.0),))
     mapping = MappingResult(
@@ -156,11 +155,11 @@ def test_import_boundary_fcf_no_cut_files_is_noop(
 
 
 # ---------------------------------------------------------------------------
-# ticket-003/013: thread node_id/graph_stage_id from the bootstrap manifest
-# into `build_stage_cuts_payload`, and into `config.json`'s
+# Thread node_id/graph_stage_id from the bootstrap manifest into
+# `build_stage_cuts_payload`, and into `config.json`'s
 # `policy.boundary.source_stage` (never the cut file's own calendar
 # `boundary_stage`). Every cut-reader/cobre-import seam is monkeypatched
-# (mirrors `test_decomp_fcf_injection.py`'s seam-stubbing convention, kept
+# (mirrors `test_fcf_injection.py`'s seam-stubbing convention, kept
 # local per the one-home-per-source-module test convention) — no real deck,
 # cobre binary, or installed cobre wheel needed.
 # ---------------------------------------------------------------------------
@@ -319,11 +318,11 @@ def test_import_boundary_fcf_source_stage_is_graph_stage_id_not_boundary_stage(
 
 
 # ---------------------------------------------------------------------------
-# ticket-010: GnlRingPlan build (`_gnl_targets_from`) + the per-cut GNL
-# deviation diagnostic. All tier-1: pure Python, no deck, no cobre binary.
-# The entity_type code is restated locally rather than importing the
-# mapper module's private constant — mirrors ``test_decomp_fcf_mapper.py``'s
-# identical convention.
+# GnlRingPlan build (`_gnl_targets_from`) + the per-cut GNL deviation
+# diagnostic. All tier-1: pure Python, no deck, no cobre binary. The
+# entity_type code is restated locally rather than importing the mapper
+# module's private constant — mirrors ``test_fcf_mapper.py``'s identical
+# convention.
 # ---------------------------------------------------------------------------
 
 _HYDRO_STORAGE = 0
@@ -331,7 +330,7 @@ _ANTICIPATED_THERMAL_STATE = 2
 
 #: Every GNL fixture below builds an `n_patamares=3` header; a uniform split
 #: of `MONTH_HOURS` across those 3 coupling blocks is enough to satisfy
-#: `map_boundary_cuts`'s `coupling_block_hours` guard (ticket-001) — none of
+#: `map_boundary_cuts`'s `coupling_block_hours` guard — none of
 #: these tests assert on the placed GNL coefficient's magnitude, only on the
 #: deviation diagnostic, which recomputes straight from the raw `pi_gnl`.
 _UNIFORM_GNL_BLOCK_HOURS = (MONTH_HOURS / 3, MONTH_HOURS / 3, MONTH_HOURS / 3)
@@ -441,11 +440,11 @@ def test_gnl_targets_from_skips_plant_without_nl_lag(
 
 
 def test_emit_import_diagnostics_gnl_deviation_fires() -> None:
-    """AC — for (submercado 1, lag 2) with col(1,p,2) = (0.1, 0.2, 0.3), the
+    """For (submercado 1, lag 2) with col(1,p,2) = (0.1, 0.2, 0.3), the
     deviation diagnostic's row reports carried sum 0.6 and patamar spread
     (0.3 - 0.1) / 0.6. ``mapping`` is produced by the real
-    ``map_boundary_cuts`` (ticket-009's mapper), never hand-built, so the
-    diagnostic is exercised against the same placement it reports on.
+    ``map_boundary_cuts``, never hand-built, so the diagnostic is exercised
+    against the same placement it reports on.
     """
     id_map = make_id_map(())
     manifest = make_manifest(
@@ -490,9 +489,8 @@ def test_emit_import_diagnostics_gnl_deviation_fires() -> None:
 
 
 def test_emit_import_diagnostics_gnl_deviation_gated_off_without_plan() -> None:
-    """AC — ``gnl_plan=None`` (the default) gates the deviation diagnostic
-    off entirely: the sink carries only the pre-ticket-010 diagnostic(s),
-    unchanged."""
+    """``gnl_plan=None`` (the default) gates the deviation diagnostic off
+    entirely: the sink carries only the baseline diagnostic(s), unchanged."""
     cuts = make_boundary_cuts((1,), (make_cut_record(pi_varm=(1.5,), rhs=10.0),))
     mapping = MappingResult(
         cuts=(make_mapped_cut(coefficients=(1.5,), intercept=10.0),), dropped=()
@@ -507,7 +505,7 @@ def test_emit_import_diagnostics_gnl_deviation_gated_off_without_plan() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-013: covered-lane filter. `_post_horizon_start` (tier-1, no deck, no
+# Covered-lane filter. `_post_horizon_start` (tier-1, no deck, no
 # cobre binary) + the deviation diagnostic's dropped-coverage count reading
 # the new uncovered-lane drops from `mapping.gnl_dropped`; plus one tier-3
 # `@skipif` e2e boundary-load smoke against the real `decomp-mar-26-rv2`
@@ -705,8 +703,8 @@ def test_emit_import_diagnostics_gnl_deviation_dropped_count_includes_uncovered_
     )
     assert deviation.table is not None
     assert "1 GNL term(s) dropped" in deviation.summary
-    # ticket-013 Requirement C.2: no per-row `Dropped` column; the count
-    # above is the only place it is reported.
+    # No per-row `Dropped` column; the count above is the only place it is
+    # reported.
     assert deviation.table.columns == [
         "Submercado",
         "Lag",
@@ -717,7 +715,7 @@ def test_emit_import_diagnostics_gnl_deviation_dropped_count_includes_uncovered_
 
 
 def test_emit_import_diagnostics_c1_panel1_notes_deduped() -> None:
-    """Ticket-013 AC C.1 — Panel 1's `notes` no longer restate `summary`.
+    """Panel 1's `notes` no longer restate `summary`.
 
     `lag_nonzero_by_depth` is the one fact `notes` used to carry that
     `summary` did not already state; folded into `summary`, `notes` is now
@@ -748,7 +746,7 @@ def test_emit_import_diagnostics_c1_panel1_notes_deduped() -> None:
 
 
 def test_emit_import_diagnostics_c2_panel3_no_dropped_column() -> None:
-    """Ticket-013 AC C.2 — Panel 3's table drops the constant `Dropped`
+    """Panel 3's table drops the constant `Dropped`
     column; the dropped count stays in `summary` only.
     """
     id_map = make_id_map(())
@@ -792,11 +790,11 @@ def test_emit_import_diagnostics_c2_panel3_no_dropped_column() -> None:
 
 
 def test_emit_import_diagnostics_c3_headline_excludes_near_zero_sum_group() -> None:
-    """Ticket-013 AC C.3 — a noisy group's inflated relative spread does not
+    """A noisy group's inflated relative spread does not
     dominate the `max_spread` HEADLINE; the weight-carrying group's spread
     does, and an absolute spread is reported alongside.
 
-    Uses the REAL-DECK magnitudes cited by the epic-04 review that exposed
+    Uses the REAL-DECK magnitudes from the review that exposed
     the earlier fixed-magnitude floor's bug (`1e-6` failed to exclude a
     `4e-05` group, since `4e-05 >= 1e-6`): group `(submercado 1, lag 1)`
     carries the real weight (`Σ=-4412.0`, relative spread `392/4412 ≈
@@ -860,9 +858,9 @@ def test_emit_import_diagnostics_c3_headline_excludes_near_zero_sum_group() -> N
 
 
 def test_emit_import_diagnostics_c4_no_remediation_footer() -> None:
-    """Ticket-013 AC C.4 — Panel 3 no longer carries a `remediation`
-    footer; the C12 ledger row (`~/git/cobre/plans/conversion-found-
-    improvements.md`) is the record now, not a runtime paragraph.
+    """Panel 3 no longer carries a `remediation` footer; the C12 ledger row
+    in cobre's conversion-found-improvements registry is the record now, not
+    a runtime paragraph.
     """
     id_map = make_id_map(())
     manifest = make_manifest(
@@ -897,10 +895,9 @@ def test_emit_import_diagnostics_c4_no_remediation_footer() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-014: the dropped-coverage filter reconciled with the excised ring
-# (ticket-012's in-study-committed-window reason string, never the retired
-# post-study-horizon/K=0 framing). Tier-1: pure Python, no deck, no cobre
-# binary.
+# The dropped-coverage filter reconciled with the excised ring (the in-study
+# committed-window reason string, never the retired post-study-horizon/K=0
+# framing). Tier-1: pure Python, no deck, no cobre binary.
 # ---------------------------------------------------------------------------
 
 
@@ -1115,8 +1112,7 @@ def test_import_boundary_fcf_mar26rv2_covered_lane_and_case_validates(
     mar26rv2_imported_case: _Mar26ImportedCase,
 ) -> None:
     """Covered-lane + calendar + validate facts against the já-comandada
-    (class-4) / signaled (class-3) post-study calendar (ticket-006 AC4/AC5,
-    ticket-012's month-anchor covered-lane filter, ticket-013's node_id fix).
+    (class-4) / signaled (class-3) post-study calendar.
 
     Every anticipated plant carries a covered (class-3 signaled, month-anchor
     `>= horizon_start`) dated ring slot priced nonzero, and a non-covered
@@ -1143,7 +1139,7 @@ def test_import_boundary_fcf_mar26rv2_covered_lane_and_case_validates(
     entity_manifest = terminal["entity_manifest"]
     first_cut = terminal["cuts"][0]
 
-    # AC4/AC5: BOTH plants have a covered (post-horizon May, class-3 signaled)
+    # BOTH plants have a covered (post-horizon May, class-3 signaled)
     # dated ring slot priced nonzero -- PSERGIPE I (95) and thermal 94 alike. The
     # exact GAP-1 hours-weighted collapse is pinned by the tier-1 mapper tests;
     # the real-deck fact asserted here is that the covered lane is priced. The
@@ -1279,10 +1275,10 @@ def test_import_boundary_fcf_mar26rv2_run_loads_boundary(
 def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
     tmp_path: Path,
 ) -> None:
-    """Ticket-012 -- the real operator CLI command, driven as a subprocess.
+    """The real operator CLI command, driven as a subprocess.
 
-    Neither ticket-008 (CLI wiring, ``import_boundary_fcf`` mocked) nor
-    ticket-013 (the two tests above, which call the real importer as a
+    Neither the mocked-CLI-wiring test (``import_boundary_fcf`` mocked) nor
+    the library-level tests above (which call the real importer as a
     *library* function) exercises the actual, documented
     ``cobre-bridge convert decomp`` command (boundary FCF on by default) end to end.
     This test closes that seam: it drives the command as a subprocess
@@ -1294,7 +1290,7 @@ def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
     checkpoint, that the CLI path produced a *populated* GNL ring rather than
     all zeros. It deliberately does not re-run ``cobre validate`` or
     ``cobre run``, and does not re-assert the per-thermal covered/uncovered
-    placement identity -- both stay owned by the two ticket-013 tests above.
+    placement identity -- both stay owned by the two library-level tests above.
     """
     dst = tmp_path / "converted"
 
@@ -1354,7 +1350,7 @@ def test_convert_decomp_boundary_fcf_cli_mar26rv2_authors_populated_boundary(
 
 
 # ---------------------------------------------------------------------------
-# ticket-013: the flattened-bootstrap node_id fix, driven against the
+# The flattened-bootstrap node_id fix, driven against the
 # surviving fast fixture (a 2-leaf terminal fan — the shape that used to trip
 # the `node_id == -1` shared-pool sentinel on every boundary-FCF `convert
 # decomp`). Deck-guarded on `_MAR26_REDUCED_DECK` + writer binding only — no

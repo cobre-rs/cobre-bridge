@@ -1,4 +1,4 @@
-"""Unit tests for src/cobre_bridge/dashboard/tabs/v2_training.py."""
+"""Unit tests for cobre_bridge.dashboard.tabs.training (the Training tab)."""
 
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ def test_can_render_returns_true() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_build_metrics_row  (ticket-005: wireframe-aligned cards)
+# test_build_metrics_row  (wireframe-aligned cards)
 # ---------------------------------------------------------------------------
 
 
@@ -353,7 +353,7 @@ def test_chart_cut_activity_heatmap_sampling(n_iters: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ticket-006: Gap % dual-axis on convergence hero
+# Gap % dual-axis on convergence hero
 # ---------------------------------------------------------------------------
 
 

@@ -269,7 +269,7 @@ def test_validate_rejects_wrong_summary_dtype() -> None:
 
 
 # -------------------------------------------------------------------
-# CMP-04: RenderInputs round-trip
+# RenderInputs round-trip
 # -------------------------------------------------------------------
 
 
@@ -409,7 +409,7 @@ def test_empty_render_reproduces_report_byte_identically(tmp_path: Path) -> None
 
 def test_render_round_trip_reproduces_report_byte_identically(tmp_path: Path) -> None:
     """``to_dir`` -> ``from_dir`` -> ``build_comparison_report`` reproduces the
-    in-memory report byte-identically (the CMP-04 closer): a reloaded
+    in-memory report byte-identically: a reloaded
     dataset's render inputs are not degraded relative to the in-memory ones.
     Compared via :func:`_strip_chart_id` for the same reason as
     :func:`test_empty_render_reproduces_report_byte_identically`.

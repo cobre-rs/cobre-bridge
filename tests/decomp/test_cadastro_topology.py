@@ -1,4 +1,4 @@
-"""Tests for the topology/gauge ``AC`` override family (ticket-014, OQ-4).
+"""Tests for the topology/gauge ``AC`` override family.
 
 Covers the two plant-keyed, ``int``-valued mnemonics (``ACNUMJUS`` — the
 water-routing downstream plant — and ``ACNUMPOS`` — the inflow gauge),
@@ -39,9 +39,10 @@ class _FakeDadger:
     """Return a preset ``AC`` frame (or ``None``) dispatched by ``modificacao``
     class, plus a canned ``UH`` operated-plant frame.
 
-    Mirrors ``test_decomp_cadastro_head.py``'s double of the same name —
+    Mirrors ``test_cadastro_head.py``'s double of the same name —
     kept local rather than shared, per that file's own convention — extended
-    with ``.uh(df=True)`` since AC3 exercises ``convert_hydros`` directly.
+    with ``.uh(df=True)`` because the no-override case exercises
+    ``convert_hydros`` directly.
     """
 
     def __init__(
@@ -105,8 +106,9 @@ def _plant_row(
 ) -> dict:
     """One synthetic ``hidr`` row. ``produtibilidade_especifica=0.0`` keeps
     ``convert_hydros``'s head-correction branch (``_operating_head``)
-    defensively off (``rho_eq`` is then always non-positive), so AC3 does
-    not need to also pin a head-correction formula to check ``downstream_id``.
+    defensively off (``rho_eq`` is then always non-positive), so the
+    no-override case does not need to also pin a head-correction formula to
+    check ``downstream_id``.
     """
     row: dict = {
         "nome_usina": name,
@@ -152,7 +154,7 @@ def _uh_frame(codes: tuple[int, ...]) -> pd.DataFrame:
     )
 
 
-# The shared A -> B -> C cascade (base topology) exercised by AC1/AC2/AC5/AC6:
+# The shared A -> B -> C cascade (base topology) exercised across the topology tests:
 # A=1 (posto 11), B=2 (posto 12), C=3 (posto 13); A's base downstream is B,
 # B's base downstream is C, C is the sink.
 def _abc_hidr() -> pd.DataFrame:
@@ -185,7 +187,7 @@ def _numjus_override(
 
 
 # ---------------------------------------------------------------------------
-# AC1: ingestion + accessors (ACNUMJUS relinks A's downstream, B falls through).
+# Ingestion + accessors (ACNUMJUS relinks A's downstream, B falls through).
 # ---------------------------------------------------------------------------
 
 
@@ -201,14 +203,14 @@ def test_numjus_override_relinks_downstream() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC2: the incremental inflow values are invariant to a NUMJUS relink.
+# The incremental inflow values are invariant to a NUMJUS relink.
 # ---------------------------------------------------------------------------
 
 
 def test_relink_does_not_shift_incremental_inflows() -> None:
     """DECOMP's inflow file is already incremental per gauge column, so an
     ``AC NUMJUS`` relink changes only the routing topology (a plant's
-    ``downstream_id`` — see AC1/AC3), never the incremental inflow *values*,
+    ``downstream_id``), never the incremental inflow *values*,
     which are read straight from each plant's own gauge column.
     """
     hidr = _abc_hidr()
@@ -232,7 +234,7 @@ def test_relink_does_not_shift_incremental_inflows() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC3: no topology/gauge override -> byte-identical to the base-topology
+# No topology/gauge override -> byte-identical to the base-topology
 # result, for both the incremental table and every downstream_id.
 # ---------------------------------------------------------------------------
 
@@ -270,7 +272,7 @@ def test_no_topology_override_is_identical() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC4: an ACNUMPOS override re-attributes a plant's inflow to another column.
+# An ACNUMPOS override re-attributes a plant's inflow to another column.
 # ---------------------------------------------------------------------------
 
 
@@ -305,7 +307,7 @@ def test_numpos_override_changes_station() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC5: the pipeline's relink diagnostic.
+# The pipeline's relink diagnostic.
 # ---------------------------------------------------------------------------
 
 
@@ -321,7 +323,7 @@ def test_relink_diagnostic_lists_operated_plants() -> None:
     rows = {(row[1], row[2]): (row[3], row[4]) for row in diagnostic.table.rows}
     assert rows[(1, "downstream")] == (2, 3)
 
-    # The AC3 (no-override) deck must not produce a diagnostic.
+    # The no-override deck must not produce a diagnostic.
     no_override_hidr = _hidr_frame(
         {
             1: _plant_row(jusante=2, posto=11, name="A"),
@@ -340,7 +342,7 @@ def test_relink_diagnostic_lists_operated_plants() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC6: a temporal ACNUMJUS/ACNUMPOS is a tracked gap, not a silent per-stage
+# A temporal ACNUMJUS/ACNUMPOS is a tracked gap, not a silent per-stage
 # cascade -- warn and use the stage-0 effective value.
 # ---------------------------------------------------------------------------
 
@@ -368,7 +370,7 @@ def test_temporal_topology_warns_uses_stage0(caplog: pytest.LogCaptureFixture) -
 
 
 def test_temporal_gauge_warns_uses_stage0(caplog: pytest.LogCaptureFixture) -> None:
-    """AC6 sibling: a temporal ``ACNUMPOS`` triggers the same tracked-gap
+    """A temporal ``ACNUMPOS`` triggers the same tracked-gap
     warning, and the stage-0 gauge is used for the whole horizon.
     """
     hidr = _abc_hidr()

@@ -8,13 +8,13 @@ group's output (``network.append_iv_se_line`` /
 onto SE's real ``DP`` demand -- never replacing it).
 
 Stub-deck, tier-1 tests only: every fixture below is hand-built, mirroring
-the exact column shape idecomp's ``df=True`` accessors expand (per
-ticket-005's own ``_StubDadger``/``_ri`` fixtures in
-``test_decomp_libs_electrical.py``). These exercise the functions
+the exact column shape idecomp's ``df=True`` accessors expand (mirroring
+the ``_StubDadger``/``_ri`` fixtures in
+``test_libs_electrical.py``). These exercise the functions
 ``pipeline.py`` orchestrates with exactly the arguments it computes for
 each of Itaipu's three deck shapes (with ``RI``, without ``RI``, no Itaipu
-at all); a full ``convert_decomp_case`` run is out of this ticket's scope
-(tier 3, ticket-013 — see the ticket's "Integration Tests: None" note).
+at all); a full ``convert_decomp_case`` run is out of scope here
+(tier 3 integration).
 """
 
 from __future__ import annotations
@@ -226,7 +226,7 @@ class TestAppendIvSeLine:
         assert extended_bounds.num_rows == len(calendar)
 
     def test_dedup_skip_when_pair_already_wired(self) -> None:
-        """AC1: the deck's own ``IA`` register already connects the pair
+        """The deck's own ``IA`` register already connects the pair
         (either orientation) -- the call is a silent no-op, returning the
         docs unchanged with no duplicate line and no diagnostic (a line here
         is expected, so the reuse needs no announcement)."""
@@ -261,8 +261,8 @@ class TestAppendIvSeLine:
         assert collected == []
 
     def test_islanded_synthesize_emits_no_info(self) -> None:
-        """AC2: no existing line between the pair -- the line is
-        synthesized as before (pre-ticket behavior) and no diagnostic is
+        """No existing line between the pair -- the line is
+        synthesized as before (prior behavior) and no diagnostic is
         emitted."""
         calendar = _calendar()
         lines_doc = {"$schema": "irrelevant", "lines": []}

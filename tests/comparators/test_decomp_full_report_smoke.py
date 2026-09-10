@@ -1,11 +1,11 @@
-"""Final dead-code sweep + Tier-3 full multi-tab report smoke (ticket-024).
+"""Final dead-code sweep + Tier-3 full multi-tab report smoke.
 
 Two independent checks share this module:
 
 * **Tier 1** (:func:`test_no_retired_decomp_symbols_remain`) -- a plain text
   scan of ``src/`` and ``tests/`` asserting that none of the symbols/modules
   retired across the ``compare decomp`` render/export/verdict unification
-  (ticket-022 HTML unification, ticket-023 export + ``--json`` verdict
+  (HTML unification, export + ``--json`` verdict
   unification) survive anywhere in the tree. No ``example/`` read; runs on
   every CI job (3.12/3.13/3.14).
 * **Tier 3** (:func:`test_full_decomp_report_contains_every_parity_tab`, plus
@@ -34,12 +34,12 @@ from tests.comparators.conftest import _extract_tab_content
 # Tier 1 -- dead-code guard (no example/ read; runs in CI)
 # ---------------------------------------------------------------------------
 
-# Symbols/modules retired across the compare-decomp unification epic:
-# DecompComparison/compare_decomp_results/decomp_compare_summary (ticket-023,
-# folded onto build_decomp_dataset + the shared verdict/export path),
-# decomp_export/decomp_html_report (ticket-022/023, replaced by the shared
-# report_builder/export modules), render_decomp_comparison (ticket-023,
-# retired from ui/console.py under the ticket's gate-G7 scope expansion).
+# Symbols/modules retired across the compare-decomp unification:
+# DecompComparison/compare_decomp_results/decomp_compare_summary
+# (folded onto build_decomp_dataset + the shared verdict/export path),
+# decomp_export/decomp_html_report (replaced by the shared
+# report_builder/export modules), render_decomp_comparison
+# (retired from ui/console.py).
 _RETIRED_SYMBOLS = (
     "DecompComparison",
     "compare_decomp_results",
@@ -147,7 +147,7 @@ class TestBuildDecompDatasetEnergyBalanceE2E:
     reason="reduced deck + converted cobre output not present",
 )
 class TestBuildDecompDatasetNetworkE2E:
-    """Tier 3 (dev-only smoke, ticket-008): the reduced deck's real Network
+    """Tier 3 (dev-only smoke): the reduced deck's real Network
     tab renders end to end. Both directories are gitignored, so this never
     runs in CI."""
 
@@ -165,7 +165,7 @@ class TestBuildDecompDatasetNetworkE2E:
     reason="reduced deck + converted cobre output not present",
 )
 class TestBuildDecompDatasetCostsE2E:
-    """Tier 3 (dev-only smoke, ticket-010): the reduced deck's real Overview
+    """Tier 3 (dev-only smoke): the reduced deck's real Overview
     cost sections render end to end. Both directories are gitignored, so
     this never runs in CI."""
 
@@ -183,7 +183,7 @@ class TestBuildDecompDatasetCostsE2E:
     reason="reduced deck + converted cobre output not present",
 )
 class TestBuildDecompDatasetPerformanceE2E:
-    """Tier 3 (dev-only smoke, ticket-013): the reduced deck's real
+    """Tier 3 (dev-only smoke): the reduced deck's real
     Performance tab renders end to end. Both directories are gitignored, so
     this never runs in CI."""
 
@@ -204,7 +204,7 @@ class TestBuildDecompDatasetPerformanceE2E:
     reason="reduced deck + converted cobre output not present",
 )
 class TestBuildDecompDatasetFphaE2E:
-    """Tier 3 (dev-only smoke, ticket-017): the reduced deck's real FPHA
+    """Tier 3 (dev-only smoke): the reduced deck's real FPHA
     section renders end to end, and the full report renders without
     exception across every E1-E6 tab. Both directories are gitignored, so
     this never runs in CI."""
@@ -247,7 +247,7 @@ class TestBuildDecompDatasetFphaE2E:
     reason="reduced deck + converted cobre output not present",
 )
 class TestBuildDecompDatasetReeE2E:
-    """Tier 3 (dev-only smoke, ticket-018): the reduced deck's real REE
+    """Tier 3 (dev-only smoke): the reduced deck's real REE
     section renders end to end. Both directories are gitignored, so this
     never runs in CI."""
 
@@ -270,7 +270,7 @@ class TestBuildDecompDatasetReeE2E:
     reason="reduced deck + converted cobre output not present",
 )
 class TestBuildDecompDatasetEvaporationE2E:
-    """Tier 3 (dev-only smoke, ticket-020): the reduced deck's real
+    """Tier 3 (dev-only smoke): the reduced deck's real
     evaporation comparison renders end to end. Both directories are
     gitignored, so this never runs in CI."""
 
@@ -284,7 +284,7 @@ class TestBuildDecompDatasetEvaporationE2E:
         assert not evap_rows.is_empty()
         # The real deck's Cobre run also carries a p10/p50/p90 percentile
         # band for evaporation_m3s (generic per-variable percentile
-        # unpivoting, not ticket-020-specific) -- assert the two E1-shaped
+        # unpivoting, not evaporation-specific) -- assert the two E1-shaped
         # sources are present rather than an exact source set.
         assert {"newave", "cobre"} <= set(evap_rows["source"].unique().to_list())
 
@@ -297,7 +297,7 @@ class TestBuildDecompDatasetEvaporationE2E:
     reason="reduced deck + converted cobre output not present",
 )
 class TestBuildDecompDatasetConstraintsE2E:
-    """Tier 3 (dev-only smoke, ticket-019): the reduced deck's real
+    """Tier 3 (dev-only smoke): the reduced deck's real
     Constraints tab renders end to end. Both directories are gitignored, so
     this never runs in CI."""
 

@@ -53,7 +53,7 @@ def _assert_no_repo_internal_leaks(collected: list[dx.Diagnostic]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# max_turbined_m3s envelope declaration  (ticket-015b)
+# max_turbined_m3s envelope declaration
 # ---------------------------------------------------------------------------
 
 
@@ -68,7 +68,7 @@ def _head_corrected_two_plant_cadastro() -> pd.DataFrame:
     MW/(m³/s·m), not the toy 0.9 the shared fixture uses) so the installed-
     power cap (``cap_pinst``) stays a loose ceiling and the affinity-corrected
     flow term is what actually binds — matching the real deck behaviour the
-    ticket-015 spike found. The only thing that varies between the two plants
+    spike found. The only thing that varies between the two plants
     across this module's tests is whether a MODIF.DAT CFUGA record targets the
     plant, which is exactly the "with per-stage head variation" / "without"
     pairing acceptance criteria 5 and 6 need.
@@ -152,7 +152,7 @@ def _cfuga_modif_mock(code: int, *, month: int, year: int, nivel: float) -> Magi
 
 
 class TestConvertHydrosMaxTurbinedEnvelope:
-    """ticket-015b: declared ``max_turbined_m3s`` must rise to cover every
+    """Declared ``max_turbined_m3s`` must rise to cover every
     per-stage head-corrected cap ``convert_turbined_bounds_head_corrected``
     emits for that hydro (cobre rule 43), instead of staying pinned at the
     single reference-head value it used to declare unconditionally.
@@ -213,7 +213,7 @@ class TestConvertHydrosMaxTurbinedEnvelope:
         assert rows[0]["max_turbined_m3s"] > reference
 
     def test_declared_value_raised_to_per_stage_envelope(self, tmp_path: Path) -> None:
-        """AC #6: the declared value equals ``max(reference, per-stage max)``."""
+        """The declared value equals ``max(reference, per-stage max)``."""
         from cobre_bridge.newave.converters.hydro import convert_hydros
 
         case = self._case_with_cfuga_on_usina_a(tmp_path)
@@ -225,7 +225,7 @@ class TestConvertHydrosMaxTurbinedEnvelope:
         )
 
     def test_mirror_group_matches_raised_declared_value(self, tmp_path: Path) -> None:
-        """AC #3: the mirror unit group still carries the SAME (now-raised)
+        """The mirror unit group still carries the SAME (now-raised)
         value as ``generation.max_turbined_m3s`` — rule 41's mirror invariant
         holds at the envelope value, not just at the un-raised reference."""
         from cobre_bridge.newave.converters.hydro import convert_hydros
@@ -241,7 +241,7 @@ class TestConvertHydrosMaxTurbinedEnvelope:
     def test_plant_without_per_stage_variation_keeps_reference_value(
         self, tmp_path: Path
     ) -> None:
-        """AC #5: USINA_B carries no CFUGA/CMONT/VOLREF_SAZ override, so it is
+        """USINA_B carries no CFUGA/CMONT/VOLREF_SAZ override, so it is
         absent from the envelope and keeps its un-raised reference-head value
         — the CFUGA override on its sibling USINA_A must not leak into it."""
         from cobre_bridge.newave.converters.hydro import (
@@ -292,10 +292,10 @@ class TestConvertHydrosMaxTurbinedEnvelope:
     def test_per_stage_hydro_bounds_rows_unaffected_by_the_declaration_fix(
         self, tmp_path: Path
     ) -> None:
-        """AC #4 (LP-neutrality): the per-stage rows
+        """LP-neutrality: the per-stage rows
         ``convert_turbined_bounds_head_corrected`` emits for ``hydro_bounds.parquet``
         are IDENTICAL whether or not ``convert_hydros``'s envelope-raising
-        declaration fix (ticket-015b) already ran against an equivalent case —
+        declaration fix already ran against an equivalent case —
         the fix only ever raises the entity-level declaration, never the
         per-stage table. Two independently-built (but data-identical) cases
         isolate this: one has ``convert_hydros`` run against it FIRST, the
@@ -484,11 +484,11 @@ class TestConvertStorageBoundsPostStudy:
 
 
 class TestConvertStorageBoundsMaxGenColumn:
-    """ticket-010: the ``max_generation_mw`` column is gated on filling plants.
+    """The ``max_generation_mw`` column is gated on filling plants.
 
     EX-only cases (no ``NE``-with-filling plant) keep the existing 8-column
     schema byte-identical; a case with a filling plant gains a 9th
-    ``max_generation_mw`` float64 column that is all-null until ticket-011
+    ``max_generation_mw`` float64 column that is all-null until the ramp branch
     populates the per-stage ramp caps.
     """
 
@@ -590,9 +590,9 @@ class TestConvertStorageBoundsMaxGenColumn:
         assert names[names.index("min_generation_mw") + 1] == "max_generation_mw"
 
     def test_max_generation_populated_for_filling_ramp_rows(self, tmp_path) -> None:
-        """ticket-011 populates the column for JURUENA's ramp rows.
+        """The column is populated for JURUENA's ramp rows.
 
-        ticket-010 introduced the column all-null; ticket-011's ramp branch now
+        The column starts all-null; the ramp branch now
         emits explicit ``0.0`` caps for JURUENA's pre-operating stages (0–3) while
         the non-ramp GHMIN row (EX plant 1) keeps ``max_generation_mw`` null. So
         the column is no longer all-null: exactly the GHMIN row is null and the
@@ -608,7 +608,7 @@ class TestConvertStorageBoundsMaxGenColumn:
 
 
 class TestConvertStorageBoundsRamp:
-    """ticket-011: the filling-plant unit-ramp branch in ``convert_storage_bounds``.
+    """The filling-plant unit-ramp branch in ``convert_storage_bounds``.
 
     A ``NE``-with-filling plant (JURUENA, code 309) operates from its
     ``entry_stage_id`` but its turbine / generation capacity is whatever
@@ -694,7 +694,7 @@ class TestConvertStorageBoundsRamp:
         (3)`` — the plant never operates in-study, so the full pre-operating window
         ``[0, full_online_sid)`` clamps to ``[0, total_stages)`` and every in-study
         stage (0, 1, 2) gets an explicit ``0.0``-cap row. No row is emitted at/past
-        the horizon (no stage_id ≥ 3) and the clamp prevents the epic-03
+        the horizon (no stage_id ≥ 3) and the clamp prevents the
         IndexError.
         """
         from cobre_bridge.newave.converters.hydro import convert_storage_bounds
@@ -719,7 +719,7 @@ class TestConvertStorageBoundsRamp:
                 return_value={},
             ),
         ):
-            # Must not raise the epic-03 IndexError; the clamp keeps every emitted
+            # Must not raise an IndexError; the clamp keeps every emitted
             # stage in-study.
             tbl = convert_storage_bounds(case, id_map)
         assert tbl is not None
@@ -884,7 +884,7 @@ class TestConvertStorageBoundsRamp:
 
 
 class TestMergeHydroBoundsMaxGenColumn:
-    """ticket-010 C4: ``_merge_hydro_bounds`` carries ``max_generation_mw``.
+    """``_merge_hydro_bounds`` carries ``max_generation_mw``.
 
     The storage-side bounds table may include a ``max_generation_mw`` column
     (added for filling plants). The polars ``how="full"`` join in

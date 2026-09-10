@@ -11,7 +11,7 @@ import pytest
 
 
 class TestCompareDatasetWiring:
-    """ticket-008: compare handlers sourced from the canonical dataset.
+    """Compare handlers sourced from the canonical dataset.
 
     Patch the heavy readers (``NewaveCase``, alignment, ``compare_*``) so the real
     dataset build + ``write_artifacts`` + dataset-driven printers run without the source
@@ -325,7 +325,7 @@ class TestCompareDatasetWiring:
 
 
 class TestCompareJson:
-    """ticket-020: ``compare bounds``/``compare results`` ``--json`` verdict.
+    """``compare bounds``/``compare results`` ``--json`` verdict.
 
     Patches the heavy readers (``NewaveCase``, alignment, ``compare_*``) so the
     real dataset build + verdict derivation run without source-model/Cobre I/O,
@@ -438,7 +438,7 @@ class TestCompareJson:
     def test_compare_results_json_divergent_status_mismatch_exit_0(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AC3: divergent results → ``status="mismatch"`` but always exit 0."""
+        """Divergent results → ``status="mismatch"`` but always exit 0."""
         self._patch_results(monkeypatch, within_tol=False)
         cobre_dir = tmp_path / "cobre"
         cobre_dir.mkdir()
@@ -459,7 +459,7 @@ class TestCompareJson:
     def test_compare_results_json_within_tol_status_ok_exit_0(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AC4: fully-within-tol results → ``status="ok"`` and exit 0."""
+        """Fully-within-tol results → ``status="ok"`` and exit 0."""
         self._patch_results(monkeypatch, within_tol=True)
         cobre_dir = tmp_path / "cobre"
         cobre_dir.mkdir()
@@ -508,7 +508,7 @@ class TestCompareJson:
     def test_compare_results_partition_missing_exit_2_no_stdout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """FINDING-1 regression: CobrePartitionMissingError (raised by
+        """Regression: CobrePartitionMissingError (raised by
         read_cobre_bus_aggregates against a pre-0.13 / 0.13-incomplete
         output dir lacking simulation/hydro_bus_generation/) extends
         BridgeError -- a hierarchy disjoint from CobreReadError
@@ -548,7 +548,7 @@ class TestCompareJson:
 
 
 class TestCompareConfigEnvPrecedence:
-    """ticket-014: integration precedence tests for config/env wiring.
+    """Integration precedence tests for config/env wiring.
 
     Runs ``compare results`` in-process via ``cli.main``, with the heavy readers
     stubbed and ``compare_results`` / ``write_artifacts`` patched with recording

@@ -127,7 +127,7 @@ def _he_record(
 
 
 # ---------------------------------------------------------------------------
-# AC-1: single-REE, single monthly reservoir, tipo_limite=1 (absolute)
+# Single-REE, single monthly reservoir, tipo_limite=1 (absolute)
 # ---------------------------------------------------------------------------
 
 
@@ -176,7 +176,7 @@ def test_emit_rhe_generics_absolute_round_trip() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC-2: same record, tipo_limite=2 (percentage of rho_acum * volume_maximo)
+# Same record, tipo_limite=2 (percentage of rho_acum * volume_maximo)
 # ---------------------------------------------------------------------------
 
 
@@ -216,7 +216,7 @@ def test_emit_rhe_generics_percentage_rhs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC-3: two-reservoir cascade (code 5 -> code 6 -> sink), both "M"
+# Two-reservoir cascade (code 5 -> code 6 -> sink), both "M"
 # ---------------------------------------------------------------------------
 
 
@@ -276,7 +276,7 @@ def test_emit_rhe_generics_two_reservoir_cascade_override() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC-4: run-of-river ("D") plant excluded from the stored-energy sum
+# Run-of-river ("D") plant excluded from the stored-energy sum
 # ---------------------------------------------------------------------------
 
 
@@ -319,7 +319,7 @@ def test_emit_rhe_generics_run_of_river_excluded() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC-5: no cadastred stored-energy reservoir -> skip + WARNING
+# No cadastred stored-energy reservoir -> skip + WARNING
 # ---------------------------------------------------------------------------
 
 
@@ -390,7 +390,7 @@ def test_emit_rhe_generics_unmapped_ree_skips_and_warns() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC-6: weekly vs monthly energy-factor scaling
+# Weekly vs monthly energy-factor scaling
 # ---------------------------------------------------------------------------
 
 
@@ -432,7 +432,7 @@ def test_emit_rhe_generics_energy_factor_scales_with_stage_hours() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC-7: negative CM sign on the second REE term -> subtraction join
+# Negative CM sign on the second REE term -> subtraction join
 # ---------------------------------------------------------------------------
 
 

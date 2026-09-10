@@ -167,7 +167,7 @@ def _make_mock_data(
 
 
 def test_tab_constants() -> None:
-    """Module-level constants must match the ticket specification exactly."""
+    """Module-level constants must match their expected values exactly."""
     assert TAB_ID == "tab-network"
     assert TAB_LABEL == "Network"
     assert TAB_ORDER == 60
@@ -277,7 +277,7 @@ def test_build_line_explorer_empty_exchanges_returns_no_data() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_build_line_explorer — capacity utilisation (ticket-013)
+# test_build_line_explorer — capacity utilisation
 # ---------------------------------------------------------------------------
 
 
@@ -513,7 +513,7 @@ def test_build_heatmap_empty_exchanges_returns_no_data() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_build_heatmap — single net utilisation heatmap (ticket-013)
+# test_build_heatmap — single net utilisation heatmap
 # ---------------------------------------------------------------------------
 
 
@@ -714,9 +714,9 @@ def test_build_bus_balance_has_error_x_with_multiple_scenarios() -> None:
     """build_bus_balance must produce a trace with error_x set when there are
     multiple scenarios with different net balances.
 
-    Acceptance criterion from ticket-007: given 2 scenarios with net balances
-    [100, 200] for a bus, the bar trace must have error_x set with p10/p90
-    values computed from the scenario distribution.
+    Given 2 scenarios with net balances [100, 200] for a bus, the bar trace
+    must have error_x set with p10/p90 values computed from the scenario
+    distribution.
     """
     # Two scenarios, one stage, one line: source=0 target=1
     # scenario 0: net_flow=100, scenario 1: net_flow=200

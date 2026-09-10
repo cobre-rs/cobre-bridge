@@ -185,7 +185,7 @@ def _make_mock_data(
 
 
 def test_tab_constants() -> None:
-    """Module-level constants must match the ticket specification exactly."""
+    """Module-level constants must match their expected values exactly."""
     assert energy_balance_mod.TAB_ID == "tab-energy-balance"
     assert energy_balance_mod.TAB_LABEL == "Energy Balance"
     assert energy_balance_mod.TAB_ORDER == 30
@@ -565,7 +565,7 @@ def test_render_generation_labels_present() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Extended data factories for ticket-013 sections
+# Extended data factories for the deficit/storage/curtailment sections
 # ---------------------------------------------------------------------------
 
 
@@ -655,7 +655,7 @@ def _make_mock_data_full(
     line_meta: list[dict] | None = None,
     curtailment_mwh_per_stage: list[float] | None = None,
 ) -> MagicMock:
-    """Build a MagicMock with all columns needed for ticket-013 sections.
+    """Build a MagicMock with all columns needed for the extended sections.
 
     Provides buses_lf with excess_mwh, hydros_lf with block_id and
     storage_final_hm3, and ncs_lf with available_mw and block_id.
@@ -743,7 +743,7 @@ def _make_mock_data_full(
 
 
 # ---------------------------------------------------------------------------
-# test__render_deficit_excess (ticket-013 Section D)
+# test__render_deficit_excess (Section D)
 # ---------------------------------------------------------------------------
 
 
@@ -776,7 +776,7 @@ def test_render_deficit_excess_empty_buses_lf() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test__render_reservoir_storage (ticket-013 Section E)
+# test__render_reservoir_storage (Section E)
 # ---------------------------------------------------------------------------
 
 
@@ -855,7 +855,7 @@ def test_render_reservoir_storage_empty_hydros_lf_does_not_raise() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test__render_ncs_curtailment (ticket-013 Section F)
+# test__render_ncs_curtailment (Section F)
 # ---------------------------------------------------------------------------
 
 
@@ -903,7 +903,7 @@ def test_render_ncs_curtailment_empty_ncs_lf_does_not_raise() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_render — ticket-013 additions (full render with all 6 sections)
+# test_render — full render with all 6 sections
 # ---------------------------------------------------------------------------
 
 
@@ -940,7 +940,7 @@ def test_render_contains_ncs_curtailment_section() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test__build_hero_data (ticket-010)
+# test__build_hero_data
 # ---------------------------------------------------------------------------
 
 

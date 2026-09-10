@@ -198,7 +198,7 @@ def test_rich_import_only_inside_type_checking_guard() -> None:
 
 
 class TestParseFormats:
-    """ticket-016: ``_parse_formats`` token parsing and validation."""
+    """``_parse_formats`` token parsing and validation."""
 
     def test_parse_formats_default(self) -> None:
         from cobre_bridge.cli.args import _parse_formats

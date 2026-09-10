@@ -1,7 +1,7 @@
 """Hydro/Thermal detail tab tests for ``comparators.decomp.results``.
 
-Second carve out of the legacy ``test_decomp_results_compare.py`` mega file
-(TST-13): the hydro bus-id merge helper and the Hydro/Thermal detail tabs'
+Second carve out of the legacy ``test_decomp_results_compare.py`` mega file:
+the hydro bus-id merge helper and the Hydro/Thermal detail tabs'
 ``build_decomp_dataset`` rows, plus the hydro slack-aggregate chart's
 robustness guard on decomp-shaped input. The remaining concern bands
 (network, energy balance, costs, performance, productivity, FPHA, REE,
@@ -75,7 +75,7 @@ def _patch_hydro_detail_readers(
     bus_labels: dict[int, frozenset[int]] | None = None,
     per_stage_bounds: pl.DataFrame | None = None,
 ) -> None:
-    """Stub ticket-014's four cobre readers, each defaulting to empty --
+    """Stub the four cobre readers, each defaulting to empty --
     matching how a Cobre run with no hydro percentile/metadata output
     (e.g. the deterministic 2-node tree) degrades in production."""
     monkeypatch.setattr(
@@ -103,7 +103,7 @@ def _patch_hydro_detail_readers(
 
 
 class TestMergeHydroBusIds:
-    """ticket-014's ``bus_ids`` merge helper -- the per-bus hydro charts
+    """The ``bus_ids`` merge helper -- the per-bus hydro charts
     KeyError without it (see ``analyze._bus_name_lookups``)."""
 
     def test_injects_bus_ids_as_a_sorted_list_not_a_frozenset(self) -> None:
@@ -145,7 +145,7 @@ class TestMergeHydroBusIds:
 
 
 class TestBuildDecompDatasetHydroDetail:
-    """ticket-014: the Hydro Operation + Hydro Plant Details tabs' four
+    """The Hydro Operation + Hydro Plant Details tabs' four
     remaining ``PercentileData`` fields (``hydro``, ``cobre_hydro_meta``,
     ``cobre_hydro_per_stage_bounds``, ``nw_hydro_slacks``)."""
 
@@ -319,7 +319,7 @@ def _thermal_percentiles_fixture() -> pl.DataFrame:
 def _patch_thermal_percentiles(
     monkeypatch: pytest.MonkeyPatch, percentiles: pl.DataFrame | None = None
 ) -> None:
-    """Stub ticket-015's cobre thermal-percentile reader -- defaults to
+    """Stub the cobre thermal-percentile reader -- defaults to
     empty, matching how a Cobre run with no thermal percentile output
     (e.g. the deterministic 2-node tree) degrades in production."""
     monkeypatch.setattr(
@@ -330,8 +330,8 @@ def _patch_thermal_percentiles(
 
 
 class TestBuildDecompDatasetThermalDetail:
-    """ticket-015: fills ``PercentileData.thermal`` -- the disjoint thermal
-    counterpart to ticket-014's hydro percentile band -- for the shared
+    """Fills ``PercentileData.thermal`` -- the disjoint thermal
+    counterpart to the hydro percentile band -- for the shared
     Thermal Operation and Thermal Plant Details tabs."""
 
     def test_thermal_percentiles_populate_metadata_when_present(
@@ -367,8 +367,8 @@ class TestBuildDecompDatasetThermalDetail:
     def test_thermal_tidy_rows_carry_generation_mw_and_known_sources(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """E1 already emits the thermal ``ResultComparison`` rows -- this
-        ticket must not re-emit or re-map them (Pitfalls to Avoid)."""
+        """E1 already emits the thermal ``ResultComparison`` rows -- the
+        thermal-detail build must not re-emit or re-map them."""
         _patch_aligned_frames(monkeypatch, _aligned_fixture())
 
         dataset = build_decomp_dataset(tmp_path, tmp_path)

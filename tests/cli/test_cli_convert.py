@@ -481,7 +481,7 @@ class TestCliInProcess:
     ) -> None:
         """The manifest's ``min_cobre_version`` tracks the CLI constant, pinned.
 
-        ticket-005: a manifest written after the bump must record the real
+        A manifest written after the bump must record the real
         floor (``"0.15.0"``), not a stale value — the manifest is provenance,
         and a wrong floor there is false provenance. Pinning the literal (not
         just equality with the constant) catches an accidental revert of the
@@ -1193,7 +1193,7 @@ class TestCliInProcess:
     def test_validate_skipped_for_installed_0_12_below_new_min(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ticket-005: a 0.12 install is now too old and gets an honest skip.
+        """A 0.12 install is now too old and gets an honest skip.
 
         Before the ``MIN_COBRE_VERSION`` bump to ``"0.13.0"``, an installed
         ``0.12.0`` satisfied the gate and ``validate`` ran — against output
@@ -1356,7 +1356,7 @@ class TestCliInProcess:
         ``convert newave`` passes an empty whitelist to the shared
         ``_run_cobre_validation`` helper, so a warning DECOMP whitelists (the
         cobre external-solver-interop note) must still render here — the
-        byte-identical-behavior guarantee the ticket-007 helper extraction
+        byte-identical-behavior guarantee the helper extraction
         must not break. Contrast with
         ``test_convert_decomp_validate_whitelists_interop`` below.
         """
@@ -2286,11 +2286,11 @@ class TestCliInProcess:
     def test_convert_decomp_boundary_fcf_importer_diagnostics_reach_json(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ticket-010 (D): the importer runs inside a ``dx.collect()`` sink,
+        """The importer runs inside a ``dx.collect()`` sink,
         so a ``Diagnostic`` it emits — here the GNL anticipated-ring
         deviation — reaches the ``--json`` verdict's ``diagnostics`` array.
         This test fails against the pre-sink CLI (no ``dx.collect()``
-        wrapping ``import_boundary_fcf``), proving the deferred Epic-03 gap
+        wrapping ``import_boundary_fcf``), proving the previously deferred gap
         is closed."""
         from cobre_bridge.core import diagnostics as dx
         from cobre_bridge.core.conversion import ConversionReport
@@ -2347,7 +2347,7 @@ class TestCliInProcess:
     def test_convert_decomp_boundary_fcf_importer_diagnostics_render_panel(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ticket-010 (D): the same emitting mock, without ``--json`` — the
+        """The same emitting mock, without ``--json`` — the
         diagnostic's title renders on stderr (the Rich panel), and the
         existing happy-path C8-recipe assertions still hold (no
         double-render, no exit-code change)."""
@@ -2403,7 +2403,7 @@ class TestCliInProcess:
     def test_convert_decomp_boundary_fcf_importer_diagnostics_reach_sidecar(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Epic-04 boundary-review finding #2: the same emitting mock as
+        """The same emitting mock as
         ``..._reach_json``, but without ``--json`` and with
         ``--diagnostics-json`` — the importer's ``Diagnostic`` (captured by
         the ``dx.collect()`` sink) must reach the sidecar file too, not just

@@ -1,7 +1,7 @@
 """Network-tab tests for ``comparators.decomp.results``.
 
-Second carve out of the legacy ``test_decomp_results_compare.py`` mega file
-(TST-13): corridor/line alignment, the DECOMP interchange side, line entity
+Second carve out of the legacy ``test_decomp_results_compare.py`` mega file:
+corridor/line alignment, the DECOMP interchange side, line entity
 names and result comparisons, line bounds/metadata, and the Network tab's
 ``build_decomp_dataset`` rows. The remaining concern bands (energy balance,
 costs, performance, hydro/thermal detail, productivity, FPHA, REE,
@@ -74,7 +74,7 @@ def _write_lines_json(case_dir: Path, lines: list[dict[str, Any]]) -> Path:
 
 def _write_line_bounds_parquet(case_dir: Path, rows: list[dict[str, Any]]) -> None:
     """Write ``constraints/line_bounds.parquet`` under *case_dir* -- the
-    ticket-008 Network tab's per-stage capacity source (see
+    Network tab's per-stage capacity source (see
     ``decomp/network.py::convert_lines``'s own ``_LINE_BOUNDS_SCHEMA``)."""
     constraints_dir = case_dir / "constraints"
     constraints_dir.mkdir(parents=True, exist_ok=True)
@@ -82,7 +82,7 @@ def _write_line_bounds_parquet(case_dir: Path, rows: list[dict[str, Any]]) -> No
 
 
 class TestCorridorLineAlignment:
-    """ticket-007: ``_corridor_line_alignment`` -- corridor (bus_de, bus_para)
+    """``_corridor_line_alignment`` -- corridor (bus_de, bus_para)
     -> ordered cobre (line_id, sign) legs."""
 
     def test_direct_line_corridor_maps_with_positive_sign(self, tmp_path: Path) -> None:
@@ -175,7 +175,7 @@ def _dec_oper_interc_frame(
 
 
 class TestIntercSide:
-    """ticket-007: ``_interc_side`` -- the aligned per-(cobre line_id, stage)
+    """``_interc_side`` -- the aligned per-(cobre line_id, stage)
     DECOMP net-flow frame, plus the unresolved-corridor report."""
 
     def _patch_interc(
@@ -385,7 +385,7 @@ class TestIntercSide:
 
 
 class TestLineEntityNames:
-    """ticket-008: display name per cobre line id for the Network tab."""
+    """Display name per cobre line id for the Network tab."""
 
     def test_uses_the_name_from_line_meta_when_present(self) -> None:
         id_map = _decomp_id_map_three_subsystems()
@@ -415,8 +415,8 @@ class TestLineEntityNames:
 
 
 class TestLineResultComparisons:
-    """ticket-008: corridor-aligned line ``ResultComparison`` rows, joining
-    ticket-007's DECOMP net-flow onto Cobre's per-line simulation means."""
+    """Corridor-aligned line ``ResultComparison`` rows, joining
+    the DECOMP net-flow onto Cobre's per-line simulation means."""
 
     def test_id_map_none_returns_no_rows_and_no_unresolved(
         self, tmp_path: Path
@@ -503,7 +503,7 @@ class TestLineResultComparisons:
 
 
 class TestLineBoundsAndMeta:
-    """ticket-008: cobre-side line capacity bounds + metadata, read straight
+    """Cobre-side line capacity bounds + metadata, read straight
     from the converted case (mirrors ``results.compare_results``)."""
 
     def test_reads_line_bounds_parquet_and_lines_json(self, tmp_path: Path) -> None:
@@ -554,7 +554,7 @@ def _patch_network(
     cobre_line_means: pl.DataFrame,
     cobre_line_pct: pl.DataFrame | None = None,
 ) -> None:
-    """Stub the ticket-008 line seam: the deck's id map, its interchange
+    """Stub the line seam: the deck's id map, its interchange
     table, and Cobre's own per-line simulation output -- mirroring
     ``_patch_aligned_frames``'s "patch at the seam" convention."""
     _patch_shared_case(monkeypatch, id_map=id_map)
@@ -575,8 +575,8 @@ def _patch_network(
 
 
 class TestBuildDecompDatasetNetwork:
-    """ticket-008: line rows + Network tab metadata in
-    ``build_decomp_dataset``, on top of ticket-002's ``_aligned_fixture``."""
+    """Line rows + Network tab metadata in
+    ``build_decomp_dataset``, on top of the ``_aligned_fixture``."""
 
     def _case_dirs(self, tmp_path: Path) -> tuple[Path, Path]:
         """A deck dir and a converted-case ``output/`` dir, isolated under

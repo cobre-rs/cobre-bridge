@@ -45,7 +45,7 @@ COST_PARTITION_COLUMNS: frozenset[str] = frozenset(
 # : Every individual Cobre cost-component column, in a stable display-ish order.
 # : This is the single definition of "which columns are summable cost components".
 # : Both consumers must classify exactly these (enforced by
-# : ``tests/test_cost_categories.py``); a new Cobre cost column added here that a
+# : ``tests/cobre/test_cost_categories.py``); a new Cobre cost column added here that a
 # : consumer fails to map is a drift bug, caught by that test.
 COBRE_COST_COMPONENT_COLUMNS: tuple[str, ...] = (
     # Generation / operational

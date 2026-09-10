@@ -112,7 +112,7 @@ def _write_sim_entity_partition(
 
     Column dtypes are inferred by pyarrow from the Python values in *rows*
     (unlike :func:`_write_hydro_bus_generation_partition`, which pins the
-    ticket-009 partition's exact writer dtypes) -- fine here since these
+    hydro_bus_generation partition's exact writer dtypes) -- fine here since these
     fixtures exercise the unchanged thermal/NCS/bus map-and-join branches,
     not the dtype-sensitive new hydro path.
     """
@@ -369,7 +369,7 @@ class TestCorruptDrivesRealReaderPath:
 
 
 # ---------------------------------------------------------------------------
-# Ticket 009 -- hydro_bus_generation reader: loud absence (B2), never empty.
+# hydro_bus_generation reader: loud absence, never empty.
 # ---------------------------------------------------------------------------
 
 _HYDRO_BUS_GENERATION_COLUMNS = {
@@ -596,7 +596,7 @@ class TestHydroBusGenerationCorruptRaisesCobreReadError:
 
 
 # ---------------------------------------------------------------------------
-# Ticket 011 -- read_cobre_hydro_metadata drops "bus_id" (decision B1); the
+# read_cobre_hydro_metadata drops "bus_id"; the
 # plant->bus label is re-sourced from the hydro_bus_generation partition via
 # read_cobre_hydro_bus_labels.
 # ---------------------------------------------------------------------------
@@ -627,7 +627,7 @@ class TestHydroMetadataHasNoBusId:
 
 
 class TestHydroBusLabels:
-    """AC5: the plant->bus label map is derived from the hydro_bus_generation
+    """The plant->bus label map is derived from the hydro_bus_generation
 
     partition's distinct (hydro_id, bus_id) pairs; a plant genuinely present
     at more than one bus keeps every one of its buses here rather than
@@ -669,9 +669,9 @@ class TestHydroBusLabels:
         assert result == {1: frozenset({5})}
 
     def test_synthetic_two_bus_plant_keeps_every_bus(self, tmp_path: Path) -> None:
-        """Ticket-011 AC5's synthetic two-bus plant, at the reader level:
+        """A synthetic two-bus plant, at the reader level:
 
-        no real deck produces this today (epic 08 territory), but the
+        no real deck produces this today, but the
         partition itself imposes no one-bus-per-plant constraint, so a plant
         recorded at two buses across scenarios/stages must not be collapsed
         down to a single one here.
@@ -732,7 +732,7 @@ class TestHydroBusLabels:
 
 
 # ---------------------------------------------------------------------------
-# Ticket 010 -- read_cobre_bus_aggregates rewired onto hydro_bus_generation;
+# read_cobre_bus_aggregates rewired onto hydro_bus_generation;
 # the _load_entity_bus_map silent-failure clause is gone.
 # ---------------------------------------------------------------------------
 
@@ -755,7 +755,7 @@ def _build_full_bus_aggregates_case(tmp_path: Path) -> Path:
     _write_stages_json(tmp_path, _STAGE_BLOCKS)
 
     # Hydro: one plant on bus 5. generation_mwh is block_mw * block_hours,
-    # exactly as cobre's writer produces it (ticket-009 contract).
+    # exactly as cobre's writer produces it.
     _write_hydro_bus_generation_partition(
         out,
         scenario_id=0,
@@ -900,8 +900,8 @@ def _build_full_bus_aggregates_case(tmp_path: Path) -> Path:
 
 
 class TestBusAggregatesHydroReportsNonZero:
-    """AC1: hydro generation per bus is non-zero on a 0.13 output dir --
-    the regression that motivated this epic."""
+    """Hydro generation per bus is non-zero on a 0.13 output dir --
+    the regression this guards against."""
 
     def test_hydro_gen_mw_is_nonzero_and_matches_hand_computed_value(
         self, tmp_path: Path
@@ -932,7 +932,7 @@ class TestBusAggregatesHydroReportsNonZero:
     def test_hydros_json_absence_does_not_affect_hydro_generation(
         self, tmp_path: Path
     ) -> None:
-        """AC2 (behavioural): the hydro branch no longer depends on a
+        """The hydro branch no longer depends on a
         hydro plant->bus map at all, so it is unaffected by hydros.json
         being entirely absent -- proof that no caller of
         ``_load_entity_bus_map`` passes ``"hydros"`` any more."""
@@ -948,8 +948,8 @@ class TestBusAggregatesHydroReportsNonZero:
 
 
 class TestBusAggregatesThermalNcsUnchanged:
-    """AC4: thermal and NCS per-bus aggregates are unchanged by this
-    ticket -- pinned numerically against the pre-change formula (block-
+    """Thermal and NCS per-bus aggregates are unchanged --
+    pinned numerically against the pre-change formula (block-
     hours-weighted mean of generation_mw, exactly as ``_agg_entity_by_bus``
     computed before and still computes now, untouched)."""
 
@@ -980,7 +980,7 @@ class TestBusAggregatesThermalNcsUnchanged:
 
 
 class TestBusAggregatesMissingHydroPartitionRaisesNamed:
-    """AC5: a missing hydro_bus_generation partition surfaces ticket 009's
+    """A missing hydro_bus_generation partition surfaces the
     named error through read_cobre_bus_aggregates -- it is not caught and
     converted to empty here, even though thermal/NCS data is present."""
 
@@ -1014,7 +1014,7 @@ class TestBusAggregatesMissingHydroPartitionRaisesNamed:
 
 
 class TestBusAggregatesEnergyNotReweighted:
-    """AC6: energy aggregates use generation_mwh un-re-weighted -- pins one
+    """Energy aggregates use generation_mwh un-re-weighted -- pins one
     (bus, stage) energy figure against a hand-computed expectation. Single
     scenario so every percentile column collapses to the same exact value,
     isolating the sum(generation_mwh)/stage_hours computation from
@@ -1028,8 +1028,8 @@ class TestBusAggregatesEnergyNotReweighted:
         _write_stages_json(tmp_path, _STAGE_BLOCKS)
 
         # Two hydro plants on the same bus, one scenario. A null-block_id
-        # stage-level row is included to prove it is summed in (as
-        # ticket-009 established) without corrupting the result -- its
+        # stage-level row is included to prove it is summed in
+        # without corrupting the result -- its
         # generation_mwh is 0.0, a real value cobre could legitimately
         # write for a slack/violation-only stage-level row.
         _write_hydro_bus_generation_partition(
@@ -1102,7 +1102,7 @@ class TestBusAggregatesEnergyNotReweighted:
 
 
 class TestBusAggregatesHydroFallsBackToBlockZeroMwWithoutStagesJson:
-    """FINDING-2 regression: without ``stages.json`` (``block_hours`` is
+    """Regression: without ``stages.json`` (``block_hours`` is
     ``None``), the hydro branch has no stage-hours denominator to convert an
     energy total back into a power figure, so it must mirror every sibling
     aggregator in this module (``_agg_entity_by_bus``,
@@ -1186,13 +1186,13 @@ class TestBusAggregatesHydroFallsBackToBlockZeroMwWithoutStagesJson:
 
 
 # ---------------------------------------------------------------------------
-# Ticket 010 -- _load_entity_bus_map: bare except is gone, remaining callers
+# _load_entity_bus_map: bare except is gone, remaining callers
 # (thermal, NCS) still have a real bus_id to read.
 # ---------------------------------------------------------------------------
 
 
 class TestLoadEntityBusMapNoBareExcept:
-    """AC3: no bare except remains; a corrupt JSON raises a typed error
+    """No bare except remains; a corrupt JSON raises a typed error
     rather than yielding {}."""
 
     def test_corrupt_json_raises_cobrereaderror_not_empty_dict(
@@ -1231,18 +1231,18 @@ class TestLoadEntityBusMapNoBareExcept:
 
 
 # ---------------------------------------------------------------------------
-# Ticket 014 -- golden regeneration: the reader-level proof underneath the
+# Golden regeneration: the reader-level proof underneath the
 # per-bus chart goldens. The chart goldens themselves are guarded by
 # hand-built fixtures in test_chart_helpers.py that never touch these
-# readers; the two classes below are the honest substitute the ticket asks
-# for -- proving, on a synthetic 0.13 output dir, that
-# read_cobre_bus_aggregates' hydro branch is both correctly weighted (AC3)
-# and reconciles exactly with the unchanged plant-keyed path (AC4).
+# readers; the two classes below are the honest substitute --
+# proving, on a synthetic 0.13 output dir, that
+# read_cobre_bus_aggregates' hydro branch is both correctly weighted
+# and reconciles exactly with the unchanged plant-keyed path.
 # ---------------------------------------------------------------------------
 
 
 class TestEnergyNotReweightedHandComputedProof:
-    """Ticket-014 AC3: hand-computes one (bus, stage) energy figure from
+    """Hand-computes one (bus, stage) energy figure from
     ``stages.json`` ``blocks[].hours`` and a synthetic ``hydro_bus_generation``
     partition, and proves -- rather than merely asserts -- that
     ``read_cobre_bus_aggregates`` uses ``generation_mwh`` un-re-weighted.
@@ -1323,7 +1323,7 @@ class TestEnergyNotReweightedHandComputedProof:
 
 
 class TestBusSumMatchesPlantTotalCrossCheck:
-    """Ticket-014 AC4 -- the strongest guard on the whole epic: total hydro
+    """The strongest guard here: total hydro
     generation summed over buses (the new ``read_cobre_bus_aggregates``
     source) must equal the plant-keyed total from the unchanged
     ``simulation/hydros/`` (``read_cobre_hydro_means``), and no bus may gain
@@ -1524,7 +1524,7 @@ class TestBusSumMatchesPlantTotalCrossCheck:
 
 
 # ---------------------------------------------------------------------------
-# ticket-029: read_cobre_lines / read_cobre_line_bounds /
+# read_cobre_lines / read_cobre_line_bounds /
 # read_cobre_training_metadata -- the three previously-missing readers that
 # every ad-hoc lines.json / line_bounds.parquet / training/metadata.json
 # site now routes through.
@@ -1625,7 +1625,7 @@ class TestReadCobreTrainingMetadata:
     ) -> None:
         """A case layout with no doubled ``output/`` segment (the shape
         ``export._read_cobre_version`` used to resolve via its own fallback
-        but ``dashboard.load_output_metadata`` could not, CMP-11) still
+        but ``dashboard.load_output_metadata`` could not) still
         resolves through the one unified candidate search."""
         case_dir = tmp_path / "case"
         training_dir = case_dir / "training"

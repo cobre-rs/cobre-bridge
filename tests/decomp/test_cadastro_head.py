@@ -1,4 +1,4 @@
-"""Tests for the head/productivity ``AC`` override family (ticket-013).
+"""Tests for the head/productivity ``AC`` override family.
 
 Covers the three scalar mnemonics (``PROESP``/``PERHID``/``JUSMED``, flowing
 through the existing scalar-override machinery), the ``COTVOL`` polynomial
@@ -131,12 +131,12 @@ def _hidr_frame(rows: dict[int, dict]) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# AC1: the three scalar head/productivity mnemonics.
+# The three scalar head/productivity mnemonics.
 # ---------------------------------------------------------------------------
 
 
 def test_proesp_override_applies_all_stages() -> None:
-    """AC1: a blank-date ``AC PROESP`` row is permanent — it applies from
+    """A blank-date ``AC PROESP`` row is permanent — it applies from
     stage 0 forward, so ``effective.value(code,
     "produtibilidade_especifica", s)`` equals the override at every stage.
     """
@@ -166,7 +166,7 @@ def test_proesp_override_applies_all_stages() -> None:
 
 
 def test_perhid_override_applies_all_stages() -> None:
-    """AC1 sibling: ``AC PERHID`` maps to ``perdas``."""
+    """``AC PERHID`` maps to ``perdas``."""
     hidr = _hidr_frame({1: _plant_row(perdas=0.0)})
     dadger = _FakeDadger(
         {
@@ -189,7 +189,7 @@ def test_perhid_override_applies_all_stages() -> None:
 
 
 def test_jusmed_override_applies_all_stages() -> None:
-    """AC1 sibling: ``AC JUSMED`` maps to ``canal_fuga_medio``."""
+    """``AC JUSMED`` maps to ``canal_fuga_medio``."""
     hidr = _hidr_frame({1: _plant_row(cf=20.0)})
     dadger = _FakeDadger(
         {
@@ -216,12 +216,12 @@ def test_jusmed_override_applies_all_stages() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC2: the fifth shape, AC COTVOL (multi-row-per-plant polynomial).
+# The fifth shape, AC COTVOL (multi-row-per-plant polynomial).
 # ---------------------------------------------------------------------------
 
 
 def test_cotvol_polynomial_forward_fills() -> None:
-    """AC2: ``ACCOTVOL`` ``ordem`` 1..5 rows (the raw 1-based coefficient
+    """``ACCOTVOL`` ``ordem`` 1..5 rows (the raw 1-based coefficient
     index idecomp surfaces; the reader normalises it to a 0-based tuple slot)
     dated ``AGO semana 1`` (the 3-stage calendar's index-2 stage) replace the
     plant's forebay-cota polynomial from that stage forward; a missing
@@ -327,7 +327,7 @@ def test_cotvol_out_of_horizon_reported_not_dropped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC3: per-stage rho_eq no longer caps generation (availability owns the
+# Per-stage rho_eq no longer caps generation (availability owns the
 # generation cap; the head-corrected turbined-flow cap owns the physical
 # hydraulic limit).
 # ---------------------------------------------------------------------------
@@ -376,12 +376,12 @@ def test_per_stage_rho_eq_does_not_cap_generation() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC4: full-range head, no tipo_regulacao branch.
+# Full-range head, no tipo_regulacao branch.
 # ---------------------------------------------------------------------------
 
 
 def test_rho_eq_uses_full_range_for_all_classes() -> None:
-    """AC4: one ``M``, one ``S``, and one ``D`` plant, identical head inputs
+    """One ``M``, one ``S``, and one ``D`` plant, identical head inputs
     and a non-flat cota polynomial, all reduce to the SAME hand-computed
     full-range-mean formula — no ``tipo_regulacao``/``V_65`` branch.
     """
@@ -443,13 +443,13 @@ def test_rho_eq_uses_full_range_for_all_classes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC5: byte-identical when no head/productivity override is present.
+# Byte-identical when no head/productivity override is present.
 # ---------------------------------------------------------------------------
 
 
 def test_no_override_is_byte_identical() -> None:
-    """AC5: with no head/productivity override at all, the emitted rho_eq
-    equals the pre-ticket base-registry formula bit-for-bit — reconstructed
+    """With no head/productivity override at all, the emitted rho_eq
+    equals the base-registry formula bit-for-bit — reconstructed
     here independently via the same shared coeffs-keyed primitives
     (``mean_cota``, ``apply_hydraulic_loss``) the production code now calls.
     The head no longer feeds a generation cap, so the B8 overlay emits no
@@ -474,7 +474,7 @@ def test_no_override_is_byte_identical() -> None:
     id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
     effective = EffectiveCadastro(base=hidr, n_stages=3, stage_varying={})
 
-    # The pre-ticket formula, reconstructed verbatim off the base row.
+    # The base-registry formula, reconstructed verbatim off the base row.
     hreg = hidr.loc[1]
     v_min = float(hreg["volume_minimo"])
     v_max = float(hreg["volume_maximo"])
@@ -501,7 +501,7 @@ def test_no_override_is_byte_identical() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC6: all-zero cota coefficients (the shared-core guard gained by routing
+# All-zero cota coefficients (the shared-core guard gained by routing
 # through productivity.equivalent_productivity_from_coeffs).
 # ---------------------------------------------------------------------------
 

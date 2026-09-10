@@ -13,7 +13,7 @@ from tests.conftest import _make_fake_newave_dir
 
 
 class TestVerbosityAndLogFile:
-    """ticket-017: graduated ``-v/-vv`` verbosity and the shared ``--log-file``.
+    """Graduated ``-v/-vv`` verbosity and the shared ``--log-file``.
 
     Drives ``cli.main`` in-process (NOT the Typer ``CliRunner``) so the ``main``
     ``finally`` teardown that removes the ``--log-file`` ``FileHandler`` actually

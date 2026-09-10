@@ -313,7 +313,7 @@ def test_no_electrical_cards_returns_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# parse_linear_expression (TICKET-002)
+# parse_linear_expression
 # ---------------------------------------------------------------------------
 
 
@@ -326,7 +326,7 @@ def _model(
     """A minimal hand-built model for parser tests: named expressions keyed by
     ``{name: formula}``, bare alias names (their per-(stage,patamar) values are
     irrelevant to the parser, which never resolves them, but relevant to
-    ticket-008's ``build_data_context`` -- supply them via *alias_values*,
+    ``build_data_context`` -- supply them via *alias_values*,
     keyed by alias name), and restrictions keyed by ``{code: lhs}`` (used only
     to exercise ``re(R)`` expansion)."""
     return LibsElectricalModel(
@@ -474,7 +474,7 @@ def test_unbalanced_parentheses_raises_value_error() -> None:
     model = _model()
     with pytest.raises(ValueError, match="ger_usih") as exc_info:
         parse_linear_expression("ger_usih(261", model)
-    # AC2 (ticket-015): malformed syntax stays a plain ValueError, never the
+    # malformed syntax stays a plain ValueError, never the
     # well-formed-but-undeclared-identifier subclass.
     assert not isinstance(exc_info.value, UnrecognizedElectricalToken)
 
@@ -487,7 +487,7 @@ def test_non_numeric_function_argument_raises_value_error() -> None:
 
 
 def test_trailing_operator_with_no_operand_raises_plain_value_error() -> None:
-    # AC2 (ticket-015): a trailing '+' with no following operand is
+    # a trailing '+' with no following operand is
     # malformed syntax, not an unrecognized identifier -- stays fail-loud as
     # a plain ValueError.
     model = _model()
@@ -497,7 +497,7 @@ def test_trailing_operator_with_no_operand_raises_plain_value_error() -> None:
 
 
 def test_unrecognized_bare_identifier_raises_unrecognized_electrical_token() -> None:
-    # AC1 (ticket-015): a well-formed but undeclared identifier raises the
+    # a well-formed but undeclared identifier raises the
     # dedicated subclass -- still an instance of ValueError, so any existing
     # pytest.raises(ValueError) contract keeps passing.
     model = _model()
@@ -507,7 +507,7 @@ def test_unrecognized_bare_identifier_raises_unrecognized_electrical_token() -> 
 
 
 def test_unrecognized_token_message_names_identifier_and_expression() -> None:
-    # AC1 (ticket-015): the ticket's own motivating example -- an undeclared
+    # the motivating example -- an undeclared
     # peq_*gd_* MMGD token alongside a resolvable ger_usih(...) term. The
     # message must name both the offending identifier and the enclosing
     # expression, so a diagnostic built from it is actionable.
@@ -537,7 +537,7 @@ def test_se_preserved_as_one_structural_term() -> None:
 def test_se_condition_is_never_evaluated() -> None:
     # A condition referencing an undeclared identifier would raise if the
     # parser tried to evaluate/parse it as its own linear expression; it must
-    # not, since se(...)'s cond is opaque, unparsed text (ticket-008's job).
+    # not, since se(...)'s cond is opaque, unparsed text.
     model = _model()
     terms = parse_linear_expression(
         "se(totally_unparseable !! syntax, ger_usih(1), ger_usih(2))", model
@@ -557,7 +557,7 @@ def test_se_with_nested_parens_and_commas_in_branches() -> None:
 
 
 # ---------------------------------------------------------------------------
-# classify_term / classify_terms (TICKET-003)
+# classify_term / classify_terms
 # ---------------------------------------------------------------------------
 
 
@@ -640,7 +640,7 @@ def test_classify_terms_order_preserving_within_bucket() -> None:
 
 
 # ---------------------------------------------------------------------------
-# parse_activation_rule / evaluate_rule / is_always_active (TICKET-004)
+# parse_activation_rule / evaluate_rule / is_always_active
 # ---------------------------------------------------------------------------
 
 
@@ -781,7 +781,7 @@ def test_is_always_active_false_for_a_parsed_rule() -> None:
 
 
 # ---------------------------------------------------------------------------
-# read_carga_ande (TICKET-005)
+# read_carga_ande
 # ---------------------------------------------------------------------------
 
 
@@ -866,7 +866,7 @@ def test_carga_ande_missing_estagio_1_raises_value_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# build_data_context / assemble_bound / evaluate_se (TICKET-008)
+# build_data_context / assemble_bound / evaluate_se
 # ---------------------------------------------------------------------------
 
 
@@ -956,7 +956,7 @@ def test_build_data_context_constant_resolves_to_one_not_its_value() -> None:
     calendar = _ri_calendar(1, n_blocks=1)
     dadger = _StubElectricalDadger(dp=_dp((1, 1, 1, 0.0), n_patamares=1))
     ctx = build_data_context(_case(dadger, calendar), id_map, model=_model())(0, 0)
-    # epic-01-boundary carry-forward 4.2: the constant's own value lives in
+    # the constant's own value lives in
     # the term's coefficient; ctx must return 1.0, never the value itself.
     assert ctx(ParsedTerm(coefficient=42.0, token="__const__")) == 1.0
 
@@ -1039,7 +1039,7 @@ def test_assemble_bound_formula_two_sided_sentinel_maps_to_none() -> None:
 
 
 def test_assemble_bound_negates_a_lhs_bucket_b_term_sign_discipline() -> None:
-    # epic-01-boundary carry-forward 4.3: a bucket-B term on the LHS must be
+    # a bucket-B term on the LHS must be
     # negated when it moves to the bound side, not just summed in verbatim.
     # ger_usih(5) + val_demanda(1) >= 0, val_demanda(1) = 300 <=>
     # ger_usih(5) >= -300.
@@ -1053,7 +1053,7 @@ def test_assemble_bound_negates_a_lhs_bucket_b_term_sign_discipline() -> None:
 
 
 def test_assemble_bound_moves_rhs_bucket_a_term_to_lhs_negated() -> None:
-    # AC2: a plain INEQUACAO carrying a bucket-A term on the RHS (spec §2b's
+    # a plain INEQUACAO carrying a bucket-A term on the RHS (spec §2b's
     # +0.06*ger_pee(11)) must surface it on AssembledBound.terms with its
     # sign flipped -- reading restriction.rhs verbatim would reproduce the
     # A1 sign hazard for this shape too.
@@ -1070,7 +1070,7 @@ def test_assemble_bound_moves_rhs_bucket_a_term_to_lhs_negated() -> None:
 
 
 def test_assemble_bound_reserve_single_plant_sign_proof() -> None:
-    # AC1 (the A1 fix): disp_usih(1) - ger_usih(1) >= R, A_h(1) = 1000,
+    # The A1 fix: disp_usih(1) - ger_usih(1) >= R, A_h(1) = 1000,
     # R = 300 -> ger_usih(1) <= 700, with a POSITIVE surviving coefficient --
     # a generation cap, never an inverted lower bound.
     restriction = _inequacao(407, "disp_usih(1) - ger_usih(1)", ">=", "300")
@@ -1102,7 +1102,7 @@ def test_assemble_bound_drops_and_warns_on_unresolvable_carga_ande() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TICKET-014 — INEQUACAO-PERIODO-PATAMAR override precedence
+# INEQUACAO-PERIODO-PATAMAR override precedence
 # ---------------------------------------------------------------------------
 
 
@@ -1131,7 +1131,7 @@ def test_effective_inequacao_sides_later_declared_override_wins_tie() -> None:
 
 
 def test_assemble_bound_period_patamar_override_applies_only_to_matching_cell() -> None:
-    # AC1: base X<=5000, override for stages 1-2 patamar 1 (X<=6000). At
+    # base X<=5000, override for stages 1-2 patamar 1 (X<=6000). At
     # (stage 1, block 0 = patamar 1) the override matches; at (stage 1,
     # block 1 = patamar 2) no override matches this patamar, so the base
     # constant applies.
@@ -1150,7 +1150,7 @@ def test_assemble_bound_period_patamar_override_applies_only_to_matching_cell() 
 
 
 def test_assemble_bound_exact_patamar_override_beats_na_patamar_override() -> None:
-    # AC2: an exact-patamar override (patamar=1, X<=6000) and an NA-patamar
+    # an exact-patamar override (patamar=1, X<=6000) and an NA-patamar
     # override (patamar=None, X<=5500) both cover the same stage -- the
     # exact-patamar one wins at patamar 1.
     exact = PeriodPatamarOverride(0, 5, 1, "ger_usih(9)", "<=", "6000")
@@ -1166,7 +1166,7 @@ def test_assemble_bound_exact_patamar_override_beats_na_patamar_override() -> No
 
 
 def test_assemble_bound_period_patamar_override_flips_operator() -> None:
-    # AC3: base X>=100, override X<=900 -- the returned interval must
+    # base X>=100, override X<=900 -- the returned interval must
     # reflect the override's operator (upper=900, lower=None), not the
     # base's ">=" (which would have set lower=100, upper=None).
     override = PeriodPatamarOverride(0, 1, None, "ger_usih(9)", "<=", "900")
@@ -1182,8 +1182,8 @@ def test_assemble_bound_period_patamar_override_flips_operator() -> None:
 
 
 def test_assemble_bound_empty_overrides_matches_pre_ticket_base_fold() -> None:
-    # AC4: an empty overrides tuple must be byte-identical to folding
-    # restriction.lhs/.operator/.rhs verbatim (the pre-ticket behavior),
+    # an empty overrides tuple must be byte-identical to folding
+    # restriction.lhs/.operator/.rhs verbatim (the pre-override behavior),
     # for a cell nowhere near any override range.
     restriction = _inequacao(505, "ger_usih(9)", "<=", "1000 - 0.02*val_demanda(1)")
     ctx = _dict_context({"val_demanda(1)": 400.0})
@@ -1206,7 +1206,7 @@ def test_evaluate_se_folds_a_pure_bucket_b_selected_branch() -> None:
 
 
 def test_evaluate_se_raises_on_decision_bearing_selected_branch() -> None:
-    # epic-01-boundary carry-forward 4.1: a se(...) selected branch carrying
+    # a se(...) selected branch carrying
     # a bucket-A/-C term cannot be folded to a float without silently
     # dropping that term from the LP -- fail loud instead.
     model = _model()
@@ -1217,7 +1217,7 @@ def test_evaluate_se_raises_on_decision_bearing_selected_branch() -> None:
 
 
 # ---------------------------------------------------------------------------
-# active_cells (TICKET-009)
+# active_cells
 # ---------------------------------------------------------------------------
 
 
@@ -1249,7 +1249,7 @@ def _restriction_with_horizon(
 def _demanda_sin_context_factory(
     values: Mapping[tuple[int, int], float],
 ) -> Callable[[int, int], DataContext]:
-    """A per-cell :data:`DataContext` factory (ticket-008's shape) over a
+    """A per-cell :data:`DataContext` factory over a
     dict of ``demanda_sin`` values keyed by ``(stage_index, block_index)``;
     a cell absent from *values* defaults to ``0.0``."""
 
@@ -1354,7 +1354,7 @@ def test_active_cells_dangling_habilita_raises_value_error_naming_both() -> None
 
 
 # ---------------------------------------------------------------------------
-# AvailablePower / resolve_disp_usih / build_available_power (TICKET-010)
+# AvailablePower / resolve_disp_usih / build_available_power
 # ---------------------------------------------------------------------------
 
 
@@ -1405,7 +1405,7 @@ def test_build_available_power_for_disp_usih_sums_overlay_and_falls_back() -> No
 
 
 # ---------------------------------------------------------------------------
-# assemble_bound bucket-C disp_usih reserve -> gen-cap fold (TICKET-010)
+# assemble_bound bucket-C disp_usih reserve -> gen-cap fold
 # ---------------------------------------------------------------------------
 
 _RESERVE_LHS = "disp_usih(261) + disp_usih(262) - ger_usih(261) - ger_usih(262)"
@@ -1538,8 +1538,8 @@ def test_assemble_bound_formula_with_disp_usih_raises_value_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC3: the three folds share the harmonized pre-computed-partitions
-# signature -- none re-parses restriction.lhs/.rhs a second time (TICKET-011)
+# the three folds share the harmonized pre-computed-partitions
+# signature -- none re-parses restriction.lhs/.rhs a second time
 # ---------------------------------------------------------------------------
 
 
@@ -1576,9 +1576,8 @@ def test_fold_inequacao_bound_never_reparses_lhs_or_rhs() -> None:
 
 
 def test_fold_reserve_disp_usih_takes_precomputed_partitions() -> None:
-    # Already harmonized pre-ticket-011 (code-reviewer's paired minor
-    # finding) -- this pins the shared signature shape against the other
-    # two folds, now that all three match.
+    # Pins the shared signature shape against the other two folds, now
+    # that all three match.
     restriction = _inequacao(423, "disp_usih(1) - ger_usih(1)", ">=", "300")
     lhs_partition = classify_terms(
         parse_linear_expression("disp_usih(1) - ger_usih(1)", _model())

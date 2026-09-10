@@ -12,10 +12,9 @@ to the envelope emits no contribution and simply inherits it from the entity
 ``reservoir`` block; a stage that differs from the envelope — even by being
 *narrower* than it — emits an override contribution.
 
-Since epic-07 (ticket-023), ``convert_storage_bounds`` returns
-``list[BoundContribution]`` (the E2 accumulator's contribution type) instead
-of a ``pa.Table`` — the accumulator, not this emitter, fans contributions
-into the ``hydro_bounds`` parquet rows.
+``convert_storage_bounds`` returns ``list[BoundContribution]`` (the E2
+accumulator's contribution type) instead of a ``pa.Table`` — the accumulator,
+not this emitter, fans contributions into the ``hydro_bounds`` parquet rows.
 """
 
 from __future__ import annotations

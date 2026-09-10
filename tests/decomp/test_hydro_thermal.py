@@ -180,7 +180,7 @@ def _hidr_frame() -> pd.DataFrame:
 
 def _no_override_effective(hidr: pd.DataFrame, n_stages: int = 1) -> EffectiveCadastro:
     """Empty-override view of *hidr*: falls through to the base scalar at
-    every stage (outer envelope == base, stage-0 == base) — the ticket-007
+    every stage (outer envelope == base, stage-0 == base) — the
     regression fixture: reservoir/initial-storage output must be
     byte-identical to the pre-layer base-registry reads.
     """
@@ -212,8 +212,8 @@ _TEMPORAL_ID_MAP = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1
 
 def _raised_envelope_effective() -> EffectiveCadastro:
     """Plant 1: flat ``volume_minimo`` 20.0; ``volume_maximo`` raised to
-    250.0 at stage 2 (mirrors the storage-bounds emitter's own fixture,
-    ticket-006) — the outer envelope is ``(20.0, 250.0)``, wider than the
+    250.0 at stage 2 (mirrors the storage-bounds emitter's own fixture) —
+    the outer envelope is ``(20.0, 250.0)``, wider than the
     stage-0 ``(20.0, 100.0)`` used for the initial-storage % clamp.
     """
     return EffectiveCadastro(
@@ -289,7 +289,7 @@ def _uh_frame() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-#: ticket-006: a minimal per-frequency split-plant (Itaipu-shaped) fixture —
+#: A minimal per-frequency split-plant (Itaipu-shaped) fixture —
 #: two identical conjuntos (2 machines x 100 m3/s x 50 MW each), submercado
 #: 1 (SE) — so the bus-relocation math reuses the same 100.0 / 0.72 head-free
 #: engolimento ratio already pinned for ``UP_RES`` above, just per-conjunto.
@@ -357,7 +357,7 @@ class TestConvertHydros:
         }
         assert up["outflow"]["min_outflow_m3s"] == 30.0
         # 2 machines × 50 MW, no derating: max_generation_mw stays rated.
-        # max_turbined_m3s is head-corrected (ticket-017): this fixture
+        # max_turbined_m3s is head-corrected: this fixture
         # carries no queda_nominal_conjunto_1, so the affinity ratio is a
         # no-op (falls back to the rated 200 m³/s), but the installed-power
         # cap Σ n·p_nom / ρ_eq (= 100 / 0.72) still binds below it.
@@ -506,11 +506,11 @@ class TestItaipuBusRelabel:
 
 
 def test_deferred_note_excludes_head_productivity(caplog) -> None:
-    """ticket-013 (AC6) + ticket-015 (E6): the head/productivity ``AC``
+    """The head/productivity ``AC``
     family (``PROESP``/``PERHID``/``JUSMED``/``COTVOL``) has a live consumer
     (``_equivalent_productivity_mw_per_m3s``), so it was never listed as
-    deferred. ticket-015 retires the blanket, hand-maintained
-    "deferred hydro fidelity" warning entirely — deck-aware, per-family
+    deferred. The blanket, hand-maintained "deferred hydro fidelity" warning
+    is retired entirely — deck-aware, per-family
     ``AC`` coverage now lives in ``check decomp`` — while the module
     docstring still documents the genuinely-deferred families (``VI``
     travel time, ``COTVAZ``/``COTARE``/``COFEVA``) and now points at
@@ -537,14 +537,14 @@ def test_deferred_note_excludes_head_productivity(caplog) -> None:
 
 
 class TestEffectiveCadastroSourcing:
-    """ticket-007: the entity ``reservoir`` block and the initial-storage
+    """The entity ``reservoir`` block and the initial-storage
     start volume are re-sourced off the per-stage-effective cadastro layer.
     """
 
     def test_no_override_matches_the_pre_layer_base_registry_reads(self) -> None:
         """An ``EffectiveCadastro`` with no stage-varying volumes reduces to
         the base registry scalars everywhere, so the reservoir block and the
-        initial storage volume equal the pre-ticket base-registry reads."""
+        initial storage volume equal the base-registry reads."""
         hidr = _temporal_hidr_frame()
         effective = _no_override_effective(hidr)
         uh = _temporal_uh_frame(volume_inicial=50.0)
@@ -566,7 +566,7 @@ class TestEffectiveCadastroSourcing:
         self,
     ) -> None:
         """A temporal ``VOLMAX`` raise widens the entity ``reservoir`` block
-        to the outer envelope, so per-stage bound rows (ticket-006) always
+        to the outer envelope, so per-stage bound rows always
         sit inside it."""
         effective = _raised_envelope_effective()
         hidr = _temporal_hidr_frame()

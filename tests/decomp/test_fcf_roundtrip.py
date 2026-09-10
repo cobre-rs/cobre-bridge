@@ -1,4 +1,4 @@
-"""Cut-level round-trip test for the boundary FCF importer (epic 4 ticket-013).
+"""Cut-level round-trip test for the boundary FCF importer.
 
 Proves the authored checkpoint's coefficients are value-faithful to the
 source cuts: this module independently parses a hand-authored
@@ -59,7 +59,7 @@ _HYDRO_TRANSIT_BUCKET = 3
 _STORAGE_SUBINDEX = 0
 
 #: Random states in the AC 4 sweep beyond the all-zero and per-plant
-#: unit-storage states — 2 + 8 = 10, comfortably above the ticket's >= 8
+#: unit-storage states — 2 + 8 = 10, comfortably above the required >= 8
 #: floor. Shared by the tier-2 synthetic sweep test below.
 _N_RANDOM_STATES = 8
 

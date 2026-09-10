@@ -1,10 +1,10 @@
 """Unit tests for ``cobre_bridge.decomp.group_bounds`` and the
-``BoundFamily.group_column`` extension (ticket-025, epic-08).
+``BoundFamily.group_column`` extension.
 
 ``hydro_unit_group_bounds`` is a genuinely new table with no deck fixture to
-read it from yet (026 supplies the real values) — every test here works
-against hand-built, in-memory tables, matching ``test_emission_checks.py``'s
-own style and ``test_decomp_rq_bounds.py``'s synthetic-calendar fixture.
+read it from yet — every test here works against hand-built, in-memory
+tables, matching ``test_emission_checks.py``'s own style and
+``test_rq_bounds.py``'s synthetic-calendar fixture.
 """
 
 from __future__ import annotations
