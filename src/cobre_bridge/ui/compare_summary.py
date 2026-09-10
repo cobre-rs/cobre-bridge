@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cobre_bridge.core.summary_counts import footer_counts
 from cobre_bridge.ui.console import (
     compare_row_style,
     get_console,
@@ -118,7 +119,7 @@ def print_results_summary_from_dataset(
         )
     )
 
-    total, by_entity_type = _footer_counts(dataset)
+    total, by_entity_type = footer_counts(dataset.metadata)
 
     entity_parts = [
         f"{count} {etype}" for etype, count in sorted(by_entity_type.items())
@@ -133,34 +134,3 @@ def print_results_summary_from_dataset(
         markup=False,
     )
     target.print()
-
-
-# -------------------------------------------------------------------
-# Metadata accessors for the dataset-driven printers
-# -------------------------------------------------------------------
-
-
-def _footer_counts(dataset: ComparisonDataset) -> tuple[int, dict[str, int]]:
-    """Return the results footer ``(total, by_entity_type)`` from metadata.
-
-    Missing/ill-typed metadata yields ``(0, {})``.
-    """
-    raw = dataset.metadata.get("footer_counts")
-    if not isinstance(raw, dict):
-        return 0, {}
-    total = raw.get("total", 0)
-    return (
-        int(total) if isinstance(total, int) else 0,
-        _as_int_counts(raw.get("by_entity_type")),
-    )
-
-
-def _as_int_counts(value: object) -> dict[str, int]:
-    """Coerce a metadata mapping into a ``dict[str, int]`` (empty on mismatch)."""
-    if not isinstance(value, dict):
-        return {}
-    return {
-        key: count
-        for key, count in value.items()
-        if isinstance(key, str) and isinstance(count, int)
-    }

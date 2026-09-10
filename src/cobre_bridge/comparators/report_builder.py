@@ -49,7 +49,6 @@ from cobre_bridge.comparators.charts._shared import (
     _plant_max_reldiff_table,
 )
 from cobre_bridge.comparators.constraints import per_stage_bounds
-from cobre_bridge.comparators.dataset import footer_counts
 from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
@@ -63,6 +62,7 @@ from cobre_bridge.comparators.model import (
     ResultsSummary,
     ResultVariableStats,
 )
+from cobre_bridge.core.summary_counts import footer_counts
 from cobre_bridge.ui.html.plotly import plotly_div as _plotly_div
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ def _results_summary_from_dataset(dataset: ComparisonDataset) -> ResultsSummary:
     ``SUMMARY_SCHEMA`` (and aren't read by ``overview_metrics``); they keep their
     dataclass defaults of ``0.0``.
     """
-    total, by_entity_type = footer_counts(dataset)
+    total, by_entity_type = footer_counts(dataset.metadata)
 
     by_variable: dict[str, ResultVariableStats] = {}
     for row in dataset.summary.to_dicts():

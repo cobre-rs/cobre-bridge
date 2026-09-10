@@ -23,6 +23,13 @@ _VERDICT_EXIT_CODE: dict[PreflightVerdict, int] = {
 }
 
 
+def _gate_check_exit(verdict: PreflightVerdict) -> None:
+    """Preflight exit-code gate: ``OK`` (0) returns; 1/2 raise ``typer.Exit``."""
+    exit_code = _VERDICT_EXIT_CODE[verdict]
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+
+
 def _run_decomp_check(args: CheckArgs) -> None:
     """Execute the check decomp subcommand.
 
@@ -55,9 +62,7 @@ def _run_decomp_check(args: CheckArgs) -> None:
             quiet=args.quiet,
         )
 
-    exit_code = _VERDICT_EXIT_CODE[result.verdict]
-    if exit_code != 0:
-        raise typer.Exit(code=exit_code)
+    _gate_check_exit(result.verdict)
 
 
 def _run_check(args: CheckArgs) -> None:
@@ -101,6 +106,4 @@ def _run_check(args: CheckArgs) -> None:
             quiet=args.quiet,
         )
 
-    exit_code = _VERDICT_EXIT_CODE[result.verdict]
-    if exit_code != 0:
-        raise typer.Exit(code=exit_code)
+    _gate_check_exit(result.verdict)
