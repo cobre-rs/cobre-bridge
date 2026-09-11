@@ -33,8 +33,12 @@ and reports nothing**. Rules:
   constant, never inline in the decorator.
 - When retiring or renaming a deck under `example/`, retarget or delete every
   test that guards on it **in the same change** — a skip is not a pass.
-- Prefer guarding on the *surviving* fast fixture
-  (`example/decomp-mar-26-rv2-reduced`, the 2-fan case) over per-revision decks.
+- Prefer guarding on a small, fast fixture deck that the team keeps around
+  over a per-revision production deck.
+- Deck *presence* is never asserted by a test: `example/` differs per machine,
+  so a guarded deck that is absent locally is a skip, not a failure.
+  `tests/test_deck_inventory.py` audits only that no guard names a retired deck
+  and that every `example/` reference carries a guard.
 
 ## Test architecture
 

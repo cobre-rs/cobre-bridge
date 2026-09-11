@@ -56,10 +56,9 @@ one tier:
   runs in CI.
 
 `tests/decks/` holds two committed synthetic mini-decks (one per track) for
-CI-tier end-to-end tests; no tier-1 or tier-2 test reads `example/`. On a
-checkout without the local decks, one test in `tests/test_deck_inventory.py`
-reports the guarded decks it cannot find; that check is dev-only and expected
-to fail there.
+CI-tier end-to-end tests; no tier-1 or tier-2 test reads `example/`. A tier-3
+test whose deck is absent on your machine skips; `tests/test_deck_inventory.py`
+audits that every `example/` reference is guarded and names no retired deck.
 
 The `tests/` tree mirrors `src/cobre_bridge/`: one `test_<module>.py` per
 source module in the matching directory. Shared case builders (`make_case`,

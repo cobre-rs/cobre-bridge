@@ -65,8 +65,9 @@ Hard rules that are fixed before any commit:
 
 `example/` is gitignored. It holds real NEWAVE and DECOMP decks and their
 converted-and-solved Cobre cases for manual checks and tier-3 tests; nothing
-in CI reads it, and `tests/test_deck_inventory.py` reports which guarded decks
-are absent on a given machine. `tests/decks/` holds the committed synthetic
+in CI reads it, a tier-3 test whose deck is absent skips, and
+`tests/test_deck_inventory.py` audits that every `example/` reference is
+guarded and names no retired deck. `tests/decks/` holds the committed synthetic
 mini-decks CI-tier end-to-end tests use. When exercising a real deck, convert
 into a fresh directory and run cobre before comparing so an existing run's
 `output/` is not clobbered.
