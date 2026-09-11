@@ -1,8 +1,13 @@
 """Source-file override readers for hydro entity conversion.
 
-Reads MODIF.DAT (permanent + temporal overrides), GHMIN.DAT, and
-PENALID.DAT. The package's lowest layer: imports nothing from a sibling
-submodule.
+Reads MODIF.DAT (permanent + temporal overrides) and GHMIN.DAT. The
+package's lowest layer: imports nothing from a sibling submodule.
+
+MODIF.DAT volume records (VOLMAX, VOLMIN, VMAXT, VMINT) carry a unit column:
+``h`` is hm³ and ``%`` is a percentage of the plant's useful volume. The
+percentage always resolves against the ``hidr.dat`` registry volumes, never
+against a volume another record already changed, so the result does not
+depend on record order.
 """
 
 from __future__ import annotations
@@ -22,6 +27,56 @@ _LOG = logging.getLogger(__name__)
 _TEMPORAL_OVERRIDE_TYPES = frozenset(
     {"VAZMINT", "VMAXT", "VMINT", "CFUGA", "CMONT", "TURBMINT", "TURBMAXT"}
 )
+
+
+def _raw_unit(rec: object) -> str:
+    raw = getattr(rec, "unidade", None)
+    return raw if isinstance(raw, str) else ""
+
+
+def _volume_unit(rec: object) -> str | None:
+    """``"h"`` (hm³) or ``"%"`` (percent of the useful volume) of a MODIF.DAT
+    volume record; ``None`` when its ``unidade`` column is absent or unknown.
+    The file quotes the unit (``'%'``), so quotes are stripped first."""
+    unit = _raw_unit(rec).strip().strip("'\"").strip().lower()
+    if unit in ("h", "hm3", "hm³"):
+        return "h"
+    if unit == "%":
+        return "%"
+    return None
+
+
+def percent_of_useful_volume(percent: float, vol_min: float, vol_max: float) -> float:
+    """hm³ for a MODIF.DAT volume given as a percentage of the useful volume."""
+    return vol_min + (percent / 100.0) * (vol_max - vol_min)
+
+
+def _emit_unknown_volume_units(
+    code: str, scope: str, records: list[tuple[int, str, str]], assumed: str
+) -> None:
+    if not records:
+        return
+    emit(
+        Diagnostic(
+            code=code,
+            severity=Severity.WARNING,
+            category="Cadastro overrides",
+            title=f"Volume override(s) with unknown unit ({len(records)})",
+            summary=(
+                f"MODIF.DAT {scope} volume records carry a unit column ('h' = hm³, "
+                f"'%' = percent of the useful volume); {len(records)} record(s) "
+                f"have none the converter recognises, so their values are taken "
+                f"as {assumed}."
+            ),
+            table=DiagnosticTable(
+                columns=["Code", "Type", "Unit"],
+                rows=[[code_, type_name, unit] for code_, type_name, unit in records],
+                justify=["right", "left", "left"],
+            ),
+            remediation="Check the unit column of the listed records in MODIF.DAT.",
+        ),
+        logger=_LOG,
+    )
 
 
 def _apply_permanent_overrides(
@@ -73,6 +128,7 @@ def _apply_permanent_overrides(
     # emitted after the loop (see the module's finalize_diagnostics de-dup).
     uncadastred: list[int] = []
     unsupported_perm: list[tuple[int, str]] = []
+    unit_unknown: list[tuple[int, str, str]] = []
 
     for usina_rec in usina_records:
         code = int(usina_rec.codigo)
@@ -90,11 +146,21 @@ def _apply_permanent_overrides(
             if type_name == "VAZMIN":
                 result.loc[code, "vazao_minima_historica"] = float(rec.vazao)
 
-            elif type_name == "VOLMAX":
-                result.loc[code, "volume_maximo"] = float(rec.volume)
-
-            elif type_name == "VOLMIN":
-                result.loc[code, "volume_minimo"] = float(rec.volume)
+            elif type_name in ("VOLMAX", "VOLMIN"):
+                unit = _volume_unit(rec)
+                if unit is None:
+                    unit_unknown.append((code, type_name, _raw_unit(rec)))
+                    unit = "h"
+                value = float(rec.volume)
+                if unit == "%":
+                    base = cadastro.loc[code]
+                    value = percent_of_useful_volume(
+                        value,
+                        float(base["volume_minimo"]),
+                        float(base["volume_maximo"]),
+                    )
+                column = "volume_maximo" if type_name == "VOLMAX" else "volume_minimo"
+                result.loc[code, column] = value
 
             elif type_name == "NUMCNJ":
                 result.loc[code, "numero_conjuntos_maquinas"] = int(rec.numero)
@@ -163,6 +229,9 @@ def _apply_permanent_overrides(
             ),
             logger=_LOG,
         )
+    _emit_unknown_volume_units(
+        "modif-permanent-volume-unit-unknown", "permanent", unit_unknown, "hm³"
+    )
 
     return result
 
@@ -197,8 +266,11 @@ def _extract_temporal_overrides(
         {"type": str, "month": int, "year": int, "value": float}
 
     For CFUGA/CMONT the ``"value"`` field is the level in metres.  For
-    TURBMINT/TURBMAXT it is the turbined flow in m³/s.  For VAZMINT/VMAXT/
-    VMINT it is the volume or flow as stored in the record.
+    TURBMINT/TURBMAXT it is the turbined flow in m³/s and for VAZMINT the flow
+    in m³/s.  For VMAXT/VMINT it is the volume as stored in the record, with a
+    ``"unit"`` key saying how to read it: ``"h"`` (hm³) or ``"%"`` (percent of
+    the useful volume); a record with no recognisable unit is taken as ``"%"``
+    and reported.
 
     Parameters
     ----------
@@ -228,6 +300,7 @@ def _extract_temporal_overrides(
 
     # Loop-accumulate-then-emit-once (see _apply_permanent_overrides above).
     unknown_temporal: list[tuple[int, str]] = []
+    unit_unknown: list[tuple[int, str, str]] = []
 
     for usina_rec in usina_records:
         code = int(usina_rec.codigo)
@@ -244,10 +317,15 @@ def _extract_temporal_overrides(
             month = int(data.month)
             year = int(data.year)
 
+            unit: str | None = None
             if type_name in ("VAZMINT",):
                 value = float(rec.vazao)
             elif type_name in ("VMAXT", "VMINT"):
                 value = float(rec.volume)
+                unit = _volume_unit(rec)
+                if unit is None:
+                    unit_unknown.append((code, type_name, _raw_unit(rec)))
+                    unit = "%"
             elif type_name in ("CFUGA", "CMONT"):
                 value = float(rec.nivel)
             elif type_name in ("TURBMINT", "TURBMAXT"):
@@ -256,9 +334,15 @@ def _extract_temporal_overrides(
                 unknown_temporal.append((code, type_name))
                 continue
 
-            plant_overrides.append(
-                {"type": type_name, "month": month, "year": year, "value": value}
-            )
+            override: dict = {
+                "type": type_name,
+                "month": month,
+                "year": year,
+                "value": value,
+            }
+            if unit is not None:
+                override["unit"] = unit
+            plant_overrides.append(override)
 
         if plant_overrides:
             result[code] = plant_overrides
@@ -282,6 +366,12 @@ def _extract_temporal_overrides(
             ),
             logger=_LOG,
         )
+    _emit_unknown_volume_units(
+        "modif-temporal-volume-unit-unknown",
+        "dated",
+        unit_unknown,
+        "a percentage of the useful volume",
+    )
 
     return result
 
@@ -386,72 +476,6 @@ def _read_ghmin_per_stage(
 
         if per_stage:
             result[code_int] = per_stage
-
-    return result
-
-
-# Mapping from PENALID.DAT variable names to Cobre penalty field names.
-_PENALID_VAR_MAP: dict[str, str] = {
-    "DESVIO": "water_withdrawal_violation_cost",
-    "VAZMIN": "outflow_violation_below_cost",
-    "VAZMAX": "outflow_violation_above_cost",
-    "GHMIN": "generation_violation_below_cost",
-    "TURBMN": "turbined_violation_below_cost",
-    "TURBMX": "outflow_violation_above_cost",
-}
-
-
-def _read_penalid(case: NewaveCase) -> dict[int, dict[str, float]]:
-    """Read PENALID.DAT and return per-REE penalty override mappings.
-
-    If ``PENALID.DAT`` is absent (``case.penalid is None``), returns an
-    empty dict.  Only the first patamar tier (``patamar_penalidade == 1``)
-    is used — tier 2 has NaN costs (unbounded) and is skipped.  NaN values
-    within tier 1 are also skipped.
-
-    Parameters
-    ----------
-    case:
-        Parsed the source model case.
-
-    Returns
-    -------
-    dict[int, dict[str, float]]
-        Mapping from REE/subsystem code to a dict of Cobre penalty field
-        names -> cost in R$/MWh.  Only fields with valid (non-NaN) values
-        are included.  Returns an empty dict if the file is absent or
-        contains no usable rows.
-    """
-    penalid = case.penalid
-    if penalid is None:
-        _LOG.debug("PENALID.DAT not found; leaving all plant penalties as None.")
-        return {}
-
-    df: pd.DataFrame | None = penalid.penalidades
-    if df is None or df.empty:
-        return {}
-
-    # Keep only first-tier rows (patamar_penalidade == 1).
-    tier1 = df[df["patamar_penalidade"] == 1]
-    if tier1.empty:
-        return {}
-
-    result: dict[int, dict[str, float]] = {}
-    for _, row in tier1.iterrows():
-        variavel = str(row["variavel"]).strip()
-        cobre_field = _PENALID_VAR_MAP.get(variavel)
-        if cobre_field is None:
-            # Variable not mapped (e.g. TURBMX, ELETRI) — skip silently.
-            continue
-
-        ree_code = int(row["codigo_ree_submercado"])
-        valor = row["valor_R$_MWh"]
-
-        if pd.isna(valor):
-            continue
-
-        cost = float(valor)
-        result.setdefault(ree_code, {})[cobre_field] = cost
 
     return result
 

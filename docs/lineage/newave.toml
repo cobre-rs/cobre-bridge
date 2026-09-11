@@ -1460,9 +1460,9 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (existentes
     { file = "hidr", item = "volume_minimo" },
     { file = "hidr", item = "tipo_regulacao" },
     { file = "hidr", item = "volume_referencia" },
-    { file = "modif", item = "VOLMIN · volume" },
+    { file = "modif", item = "VOLMIN · volume, unidade" },
   ]
-  how = "`volume_minimo` do cadastro (sobrescrito pelo registro permanente `VOLMIN` de `modif.dat`). Usinas de regulação diária (`tipo_regulacao = D`) recebem `volume_referencia`, colapsando a faixa útil a um ponto."
+  how = "`volume_minimo` do cadastro (sobrescrito pelo registro permanente `VOLMIN` de `modif.dat`, em hm³ com `unidade` = h ou, com `%`, como percentual do volume útil do cadastro). Usinas de regulação diária (`tipo_regulacao = D`) recebem `volume_referencia`, colapsando a faixa útil a um ponto."
 
   [[output.field]]
   path = "hydros[].reservoir.max_storage_hm3"
@@ -1471,10 +1471,10 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (existentes
     { file = "hidr", item = "volume_minimo" },
     { file = "hidr", item = "tipo_regulacao" },
     { file = "hidr", item = "volume_referencia" },
-    { file = "modif", item = "VOLMAX · volume" },
+    { file = "modif", item = "VOLMAX · volume, unidade" },
     { file = "modif", item = "VOLMIN · volume" },
   ]
-  how = "`volume_maximo` do cadastro (sobrescrito por `VOLMAX` de `modif.dat`). Regulação diária (`D`) recebe `volume_referencia`; fio d'água (`S`) recebe `volume_minimo`, pois o NEWAVE não acumula água entre estágios nessas usinas."
+  how = "`volume_maximo` do cadastro (sobrescrito por `VOLMAX` de `modif.dat`, em hm³ com `unidade` = h ou, com `%`, como percentual do volume útil do cadastro). Regulação diária (`D`) recebe `volume_referencia`; fio d'água (`S`) recebe `volume_minimo`, pois o NEWAVE não acumula água entre estágios nessas usinas."
 
   [[output.field]]
   path = "hydros[].outflow.min_outflow_m3s"
@@ -2179,7 +2179,7 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
   [[output.field]]
   path = "min_storage_hm3"
   from = [
-    { file = "modif", item = "VMINT · volume" },
+    { file = "modif", item = "VMINT · volume, unidade" },
     { file = "modif", item = "VMINT · data_inicio" },
     { file = "hidr", item = "volume_minimo" },
     { file = "hidr", item = "volume_maximo" },
@@ -2187,12 +2187,12 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
     { file = "modif", item = "VOLMAX · volume" },
     { file = "dger", item = "sazonaliza_vmint" },
   ]
-  how = "Armazenamento mínimo (hm³) de `VMINT`: `volume_minimo + (volume / 100) · volume útil`, função degrau a partir de `data_inicio` até o próximo registro; valor maior ou igual a 99990 restaura o padrão (linha sem valor). No pós-estudo repete o padrão mensal do último ano de estudo se `sazonaliza_vmint = 1`, senão congela o último estágio. Ignorado para usina sem volume útil."
+  how = "Armazenamento mínimo (hm³) de `VMINT`: o `volume` em hm³ quando `unidade` = h ou, com `%`, `volume_minimo + (volume / 100) · volume útil`; função degrau a partir de `data_inicio` até o próximo registro; valor maior ou igual a 99990 restaura o padrão (linha sem valor). No pós-estudo repete o padrão mensal do último ano de estudo se `sazonaliza_vmint = 1`, senão congela o último estágio. Ignorado para usina sem volume útil."
 
   [[output.field]]
   path = "max_storage_hm3"
   from = [
-    { file = "modif", item = "VMAXT · volume" },
+    { file = "modif", item = "VMAXT · volume, unidade" },
     { file = "modif", item = "VMAXT · data_inicio" },
     { file = "hidr", item = "volume_minimo" },
     { file = "hidr", item = "volume_maximo" },
@@ -2200,7 +2200,7 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
     { file = "modif", item = "VOLMAX · volume" },
     { file = "dger", item = "sazonaliza_vmaxt" },
   ]
-  how = "Armazenamento máximo (hm³) de `VMAXT` (volume de espera): `volume_minimo + (volume / 100) · volume útil`, função degrau a partir de `data_inicio`; valor maior ou igual a 99990 restaura o padrão. No pós-estudo repete o padrão mensal do último ano de estudo se `sazonaliza_vmaxt = 1`, senão congela o último estágio."
+  how = "Armazenamento máximo (hm³) de `VMAXT` (volume de espera): o `volume` em hm³ quando `unidade` = h ou, com `%`, `volume_minimo + (volume / 100) · volume útil`; função degrau a partir de `data_inicio`; valor maior ou igual a 99990 restaura o padrão. No pós-estudo repete o padrão mensal do último ano de estudo se `sazonaliza_vmaxt = 1`, senão congela o último estágio."
 
   [[output.field]]
   path = "min_turbined_m3s"
@@ -3019,11 +3019,6 @@ note = "Registros permanentes `VAZMIN`, `VOLMAX`, `VOLMIN`, `NUMCNJ`, `NUMMAQ` s
   item = "COTAREA · VOLCOTA (registros que o inewave lê como DefaultRegister)"
   status = "unread"
   note = "Substituição dos polinômios cota × área e volume × cota. Só um log de depuração; o bridge sempre usa os polinômios do `hidr.dat` em `system/hydro_geometry.parquet`."
-
-  [[source.item]]
-  item = "VMAXT · VMINT · VOLMAX · VOLMIN · unidade"
-  status = "unread"
-  note = "A coluna de unidade (`h` = hm³, `%` = percentual do volume útil) não é lida: `VMAXT`/`VMINT` são sempre tratados como percentual e `VOLMAX`/`VOLMIN` sempre como hm³. Um `VOLMAX` ou `VOLMIN` declarado em `%` é gravado como se fosse hm³."
 
 [[source]]
 file = "ghmin"

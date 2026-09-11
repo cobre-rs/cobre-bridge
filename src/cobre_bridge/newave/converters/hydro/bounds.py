@@ -24,12 +24,14 @@ from cobre_bridge.core.productivity import (
     evaluate_cota,
     mean_cota,
 )
+from cobre_bridge.core.tolerances import BIG_M
 from cobre_bridge.newave.case import NewaveCase
 from cobre_bridge.newave.converters.hydro.geometry import _read_volref_saz
 from cobre_bridge.newave.converters.hydro.overrides import (
     _apply_permanent_overrides,
     _extract_temporal_overrides,
     _read_ghmin_per_stage,
+    percent_of_useful_volume,
     read_cadastro,
 )
 from cobre_bridge.newave.converters.hydro.productivity import (
@@ -639,8 +641,9 @@ def convert_storage_bounds(
 
     Handles four override types:
 
-    - **VMAXT / VMINT**: storage volume overrides as percentage of useful
-      volume (vol_max - vol_min).  Flood control and operational minimums.
+    - **VMAXT / VMINT**: storage volume overrides, in hm³ (unit ``h``) or as a
+      percentage of the useful volume (unit ``%``, vol_max - vol_min).  Flood
+      control and operational minimums.
     - **TURBMAXT / TURBMINT**: turbined flow overrides in absolute m³/s.
       Values of 99999 mean "no limit" (restore default).
     - **VAZMINT**: minimum outflow overrides in absolute m³/s.
@@ -758,20 +761,26 @@ def convert_storage_bounds(
         vol_max = float(hreg["volume_maximo"])
         useful = vol_max - vol_min
 
-        def _pct_to_hm3(pct: float) -> float:
-            return vol_min + (pct / 100.0) * useful
+        def _storage_hm3(rec: dict) -> dict | None:
+            """The record with its volume in hm³; ``None`` drops a percentage
+            record on a plant without useful volume. A big-M sentinel passes
+            through untouched so the step function still reads it as "restore"."""
+            value = float(rec["value"])
+            if value >= BIG_M or rec.get("unit", "%") == "h":
+                return rec
+            if useful <= 0:
+                return None
+            return {**rec, "value": percent_of_useful_volume(value, vol_min, vol_max)}
 
-        # Storage bounds (percentage -> hm³). Seasonal post-study iff the
-        # corresponding dger flag is set; otherwise freeze.
-        vmaxt_by_stage: dict[int, float] = {}
-        vmint_by_stage: dict[int, float] = {}
-        if useful > 0:
-            vmaxt_by_stage = _build_step_function(
-                vmaxt, _pct_to_hm3, seasonalize=sazonaliza_vmaxt
-            )
-            vmint_by_stage = _build_step_function(
-                vmint, _pct_to_hm3, seasonalize=sazonaliza_vmint
-            )
+        vmaxt_hm3 = [r for r in map(_storage_hm3, vmaxt) if r is not None]
+        vmint_hm3 = [r for r in map(_storage_hm3, vmint) if r is not None]
+        # Seasonal post-study iff the corresponding dger flag is set; else freeze.
+        vmaxt_by_stage = _build_step_function(
+            vmaxt_hm3, lambda v: v, seasonalize=sazonaliza_vmaxt
+        )
+        vmint_by_stage = _build_step_function(
+            vmint_hm3, lambda v: v, seasonalize=sazonaliza_vmint
+        )
 
         # Turbined bounds (absolute m³/s) — no seasonalize flag → freeze.
         turbmaxt_by_stage = _build_step_function(turbmaxt, _identity, seasonalize=False)

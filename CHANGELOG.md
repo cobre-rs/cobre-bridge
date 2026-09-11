@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both pages are generated from `docs/lineage/` and gated by tests against a
   real conversion of the mini decks, so they cannot drift from the code.
 
+### Fixed
+
+- `modif.dat` volume records (`VOLMAX`, `VOLMIN`, `VMAXT`, `VMINT`) now honour
+  their unit column: `h` is hm³ and `%` is a percentage of the plant's useful
+  volume, resolved against the `hidr.dat` registry. Before, permanent records
+  were always read as hm³ and dated records always as a percentage, so a
+  `VOLMAX` declared in percent became an absolute volume of a few hm³. A
+  record with no recognisable unit keeps the old reading and raises a warning.
+- `check decomp` no longer reports GNL anticipated dispatch and `MP`
+  availability factors as deferred; both are converted, and the stale
+  warnings padded the list of what the conversion leaves out.
+
 ### Changed
 
 - Internal package layout reorganised (`core/`, `cobre/`, `newave/`, `cli/`,
@@ -32,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- The unused per-REE `penalid.dat` reader in the NEWAVE hydro converters;
+  penalties are converted once, system-wide, into `penalties.json`.
 - **The real-deck test tier.** Forty-six tests skipped unless real decks were
   present under the gitignored `example/` tree (some also needed a locally
   built cobre binary at a fixed home-directory path), so they ran on one

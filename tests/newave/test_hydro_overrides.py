@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -11,7 +10,7 @@ import pytest
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.core.diagnostics import Severity, finalize_diagnostics
 from tests.conftest import make_case, make_nw_files
-from tests.newave.conftest import _make_hidr_cadastro, _make_penalid_df
+from tests.newave.conftest import _make_hidr_cadastro
 
 # The title/summary/remediation/notes strings overrides.py emits reach a
 # pip-installed user with no repo checkout — none may leak a repo-internal
@@ -73,6 +72,7 @@ class TestApplyPermanentOverrides:
         volmax_rec.__class__.__name__ = "VOLMAX"
         type(volmax_rec).__name__ = "VOLMAX"
         volmax_rec.volume = 2000.0
+        volmax_rec.unidade = "'h'"
 
         usina_rec = MagicMock()
         usina_rec.codigo = 1
@@ -88,6 +88,57 @@ class TestApplyPermanentOverrides:
         assert float(result.loc[1, "volume_maximo"]) == pytest.approx(2000.0)
         # Plant 2 must be unchanged.
         assert float(result.loc[2, "volume_maximo"]) == pytest.approx(500.0)
+
+    @staticmethod
+    def _volume_rec(type_name: str, volume: float, unidade: str) -> MagicMock:
+        rec = MagicMock()
+        type(rec).__name__ = type_name
+        rec.volume = volume
+        rec.unidade = unidade
+        return rec
+
+    def _apply(self, tmp_path, code: int, records: list) -> pd.DataFrame:
+        from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = code
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = records
+        return _apply_permanent_overrides(
+            self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+        )
+
+    def test_volmax_percent_is_of_the_useful_volume(self, tmp_path) -> None:
+        """``VOLMAX 55 '%'`` on [100, 1000] is 100 + 0.55 * 900, not 55 hm³."""
+        result = self._apply(tmp_path, 1, [self._volume_rec("VOLMAX", 55.0, "'%'")])
+        assert float(result.loc[1, "volume_maximo"]) == pytest.approx(595.0)
+
+    def test_volmin_percent_is_of_the_useful_volume(self, tmp_path) -> None:
+        """``VOLMIN 20 '%'`` on [50, 500] is 50 + 0.20 * 450."""
+        result = self._apply(tmp_path, 2, [self._volume_rec("VOLMIN", 20.0, "'%'")])
+        assert float(result.loc[2, "volume_minimo"]) == pytest.approx(140.0)
+
+    def test_percent_resolves_against_the_registry_regardless_of_order(
+        self, tmp_path
+    ) -> None:
+        """A ``VOLMIN`` in hm³ before a ``VOLMAX`` in percent does not move the
+        base the percentage is taken from: hidr.dat's [100, 1000] stays the
+        reference, so 50 % is 550, not 200 + 0.5 * 800."""
+        result = self._apply(
+            tmp_path,
+            1,
+            [
+                self._volume_rec("VOLMIN", 200.0, "'h'"),
+                self._volume_rec("VOLMAX", 50.0, "'%'"),
+            ],
+        )
+        assert float(result.loc[1, "volume_minimo"]) == pytest.approx(200.0)
+        assert float(result.loc[1, "volume_maximo"]) == pytest.approx(550.0)
+
+    def test_unit_is_read_case_and_quote_insensitively(self, tmp_path) -> None:
+        result = self._apply(tmp_path, 1, [self._volume_rec("VOLMAX", 800.0, " H ")])
+        assert float(result.loc[1, "volume_maximo"]) == pytest.approx(800.0)
 
     def test_vazmin_override(self, tmp_path) -> None:
         """VAZMIN record updates vazao_minima_historica for the target plant."""
@@ -268,6 +319,69 @@ class TestExtractTemporalOverrides:
         assert result[1] == [
             {"type": "VAZMINT", "month": 1, "year": 2025, "value": 50.0}
         ]
+
+    def test_vmaxt_and_vmint_carry_their_unit(self, tmp_path) -> None:
+        """Dated volume records keep the unit column so the bounds converter
+        can tell hm³ from percent of the useful volume."""
+        import datetime
+
+        from cobre_bridge.newave.converters.hydro import _extract_temporal_overrides
+
+        vmaxt_rec = MagicMock()
+        type(vmaxt_rec).__name__ = "VMAXT"
+        vmaxt_rec.data_inicio = datetime.datetime(2025, 1, 1)
+        vmaxt_rec.volume = 73.2
+        vmaxt_rec.unidade = "'%'"
+        vmint_rec = MagicMock()
+        type(vmint_rec).__name__ = "VMINT"
+        vmint_rec.data_inicio = datetime.datetime(2025, 2, 1)
+        vmint_rec.volume = 1500.0
+        vmint_rec.unidade = "'h'"
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [vmaxt_rec, vmint_rec]
+
+        with dx.collect() as collected:
+            result = _extract_temporal_overrides(
+                self._modif_case(tmp_path, mock_modif), [1, 2]
+            )
+
+        assert collected == []
+        assert result[1] == [
+            {"type": "VMAXT", "month": 1, "year": 2025, "value": 73.2, "unit": "%"},
+            {"type": "VMINT", "month": 2, "year": 2025, "value": 1500.0, "unit": "h"},
+        ]
+
+    def test_dated_volume_without_unit_is_percent_and_reported(self, tmp_path) -> None:
+        import datetime
+
+        from cobre_bridge.newave.converters.hydro import _extract_temporal_overrides
+
+        vmaxt_rec = MagicMock()
+        type(vmaxt_rec).__name__ = "VMAXT"
+        vmaxt_rec.data_inicio = datetime.datetime(2025, 1, 1)
+        vmaxt_rec.volume = 73.2
+        vmaxt_rec.unidade = None
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [vmaxt_rec]
+
+        with dx.collect() as collected:
+            result = _extract_temporal_overrides(
+                self._modif_case(tmp_path, mock_modif), [1, 2]
+            )
+
+        assert result[1][0]["unit"] == "%"
+        assert [d.code for d in collected] == ["modif-temporal-volume-unit-unknown"]
+        assert collected[0].severity is Severity.WARNING
+        assert collected[0].table is not None
+        assert collected[0].table.rows == [[1, "VMAXT", ""]]
 
     def test_filters_by_confhd_codes(self, tmp_path) -> None:
         """Plants not in confhd_codes are excluded from the result."""
@@ -533,101 +647,6 @@ class TestReadGhminPerStage:
 
 
 # ---------------------------------------------------------------------------
-# _read_penalid unit tests
-# ---------------------------------------------------------------------------
-
-
-class TestReadPenalid:
-    """Unit tests for ``_read_penalid``."""
-
-    def _penalid_case(self, tmp_path, mock_penalid):
-        """Build a case whose PENALID reader is *mock_penalid* (path set)."""
-        return make_case(
-            make_nw_files(tmp_path, penalid=tmp_path / "penalid.dat"),
-            penalid=mock_penalid,
-        )
-
-    def test_reads_penalties_by_ree(self, tmp_path) -> None:
-        """Correct Cobre field names and values are returned per REE."""
-        from cobre_bridge.newave.converters.hydro import _read_penalid
-
-        mock_penalid = MagicMock()
-        mock_penalid.penalidades = _make_penalid_df()
-
-        result = _read_penalid(self._penalid_case(tmp_path, mock_penalid))
-
-        # REE 1 checks.
-        assert 1 in result
-        assert result[1]["water_withdrawal_violation_cost"] == pytest.approx(8300.0)
-        assert result[1]["outflow_violation_below_cost"] == pytest.approx(3179.35)
-        assert result[1]["generation_violation_below_cost"] == pytest.approx(4500.0)
-        # TURBMX must not appear (no Cobre mapping).
-        assert "turbined_violation_below_cost" not in result[1]
-
-        # REE 2 checks.
-        assert 2 in result
-        assert result[2]["water_withdrawal_violation_cost"] == pytest.approx(9100.0)
-        assert result[2]["outflow_violation_below_cost"] == pytest.approx(2800.0)
-
-    def test_missing_file_returns_empty(self, tmp_path) -> None:
-        """Absent PENALID.DAT returns an empty dict without raising."""
-        from cobre_bridge.newave.converters.hydro import _read_penalid
-
-        # No penalid.dat — pass penalid=None.
-        result = _read_penalid(make_case(tmp_path, penalid=None))
-
-        assert result == {}
-
-    def test_nan_values_are_skipped(self, tmp_path) -> None:
-        """NaN cost values at patamar 1 do not appear in the output dict."""
-        from cobre_bridge.newave.converters.hydro import _read_penalid
-
-        df = pd.DataFrame(
-            {
-                "variavel": ["DESVIO", "VAZMIN"],
-                "codigo_ree_submercado": [1, 1],
-                "patamar_penalidade": [1, 1],
-                "patamar_carga": [1, 1],
-                "valor_R$_MWh": [math.nan, 5000.0],
-                "valor_R$_hm3": [0.0, 0.0],
-            }
-        )
-
-        mock_penalid = MagicMock()
-        mock_penalid.penalidades = df
-
-        result = _read_penalid(self._penalid_case(tmp_path, mock_penalid))
-
-        assert 1 in result
-        # DESVIO had NaN — must be absent.
-        assert "water_withdrawal_violation_cost" not in result[1]
-        # VAZMIN had 5000.0 — must be present.
-        assert result[1]["outflow_violation_below_cost"] == pytest.approx(5000.0)
-
-    def test_patamar2_rows_ignored(self, tmp_path) -> None:
-        """Tier-2 patamar rows are excluded even when they have numeric values."""
-        from cobre_bridge.newave.converters.hydro import _read_penalid
-
-        df = pd.DataFrame(
-            {
-                "variavel": ["DESVIO", "DESVIO"],
-                "codigo_ree_submercado": [1, 1],
-                "patamar_penalidade": [2, 2],  # only tier-2 rows — should be skipped
-                "patamar_carga": [1, 1],
-                "valor_R$_MWh": [8300.0, 8300.0],
-                "valor_R$_hm3": [0.0, 0.0],
-            }
-        )
-
-        mock_penalid = MagicMock()
-        mock_penalid.penalidades = df
-
-        result = _read_penalid(self._penalid_case(tmp_path, mock_penalid))
-
-        assert result == {}
-
-
-# ---------------------------------------------------------------------------
 # Structured-diagnostic coverage for the MODIF.DAT override readers
 # ---------------------------------------------------------------------------
 
@@ -742,12 +761,37 @@ class TestApplyPermanentOverridesDiagnostics:
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 1
 
+    def test_permanent_volume_without_unit_is_hm3_and_reported(self, tmp_path) -> None:
+        from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
+
+        volmax_rec = MagicMock()
+        type(volmax_rec).__name__ = "VOLMAX"
+        volmax_rec.volume = 2000.0
+        volmax_rec.unidade = "??"
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [volmax_rec]
+
+        with dx.collect() as collected:
+            result = _apply_permanent_overrides(
+                self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+            )
+
+        assert float(result.loc[1, "volume_maximo"]) == pytest.approx(2000.0)
+        assert [d.code for d in collected] == ["modif-permanent-volume-unit-unknown"]
+        assert collected[0].table is not None
+        assert collected[0].table.rows == [[1, "VOLMAX", "??"]]
+
     def test_no_findings_emits_nothing(self, tmp_path) -> None:
         from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
 
         volmax_rec = MagicMock()
         type(volmax_rec).__name__ = "VOLMAX"
         volmax_rec.volume = 2000.0
+        volmax_rec.unidade = "'h'"
         usina_rec = MagicMock()
         usina_rec.codigo = 1
 

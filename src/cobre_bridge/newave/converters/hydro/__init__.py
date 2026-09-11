@@ -51,9 +51,6 @@ from cobre_bridge.newave.converters.hydro.overrides import (
     _read_ghmin_per_stage as _read_ghmin_per_stage,
 )
 from cobre_bridge.newave.converters.hydro.overrides import (
-    _read_penalid as _read_penalid,
-)
-from cobre_bridge.newave.converters.hydro.overrides import (
     read_cadastro as read_cadastro,
 )
 from cobre_bridge.newave.converters.hydro.productivity import (

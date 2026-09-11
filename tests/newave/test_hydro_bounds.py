@@ -381,7 +381,16 @@ class TestConvertStorageBoundsPostStudy:
     (TURBMINT/TURBMAXT) have no flag and freeze the last study stage value.
     """
 
-    def _run(self, tmp_path, overrides, *, vmaxt_flag=1, vmint_flag=1):
+    def _run(
+        self,
+        tmp_path,
+        overrides,
+        *,
+        vmaxt_flag=1,
+        vmint_flag=1,
+        vol_min=0.0,
+        vol_max=100.0,
+    ):
         from cobre_bridge.newave.converters.hydro import convert_storage_bounds
 
         # start_month=1, 1 study year → study_months=12 (Jan–Dec); 1 post-study
@@ -404,7 +413,7 @@ class TestConvertStorageBoundsPostStudy:
         mock_confhd = MagicMock()
         mock_confhd.usinas = confhd_df
         cadastro = pd.DataFrame(
-            {"volume_minimo": [0.0], "volume_maximo": [100.0]}, index=[10]
+            {"volume_minimo": [vol_min], "volume_maximo": [vol_max]}, index=[10]
         )
         id_map = MagicMock()
         id_map.hydro_id = lambda c: 0
@@ -481,6 +490,19 @@ class TestConvertStorageBoundsPostStudy:
         # Post-study frozen at Dec=80, NOT seasonal Jan=50.
         assert df.loc[12, "max_storage_hm3"] == pytest.approx(80.0)
         assert df.loc[23, "max_storage_hm3"] == pytest.approx(80.0)
+
+    def test_volume_unit_selects_hm3_or_percent_of_useful(self, tmp_path) -> None:
+        """Unit ``h`` is absolute hm³; ``%`` (and no unit) is a share of the
+        useful volume on top of the minimum."""
+        overrides = [
+            {"type": "VMAXT", "year": 2024, "month": 1, "value": 250.0, "unit": "h"},
+            {"type": "VMINT", "year": 2024, "month": 1, "value": 10.0, "unit": "%"},
+            {"type": "VMINT", "year": 2024, "month": 6, "value": 25.0},
+        ]
+        df = self._run(tmp_path, overrides, vol_min=100.0, vol_max=300.0)
+        assert df.loc[0, "max_storage_hm3"] == pytest.approx(250.0)
+        assert df.loc[0, "min_storage_hm3"] == pytest.approx(120.0)
+        assert df.loc[5, "min_storage_hm3"] == pytest.approx(150.0)
 
 
 class TestConvertStorageBoundsMaxGenColumn:

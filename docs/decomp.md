@@ -39,10 +39,11 @@ cobre issue. None is dropped silently: `check decomp` lists them per deck,
 `convert decomp` reports each as a warning naming the affected records, and
 the same diagnostics land in `--diagnostics-json` and the `--json` verdict.
 Examples at the time of writing are water travel time (the `VI` register),
-per-stage maintenance and availability factors (the converted capacity is
-static), and a few restriction-register term types. Each warning's remediation
-line states whether any action is needed; usually none, and the conversion
-proceeds.
+the boundary coupling volume limit (the `EZ` register), and a few
+restriction-register term types; the [DECOMP data map](decomp-data-map.md)
+lists every register and field the converter leaves out. Each warning's
+remediation line states whether any action is needed; usually none, and the
+conversion proceeds.
 
 ## The boundary cost-to-go function
 
