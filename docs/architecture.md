@@ -1,76 +1,135 @@
 # Architecture
 
-`cobre-bridge`'s source lives under `src/cobre_bridge/`, split into eight
-top-level packages layered by an enforced import direction, plus a twin-track
-spine shared by the `newave/` and `decomp/` conversion packages. This page
-maps that structure for a reader with no local checkout of the repository.
+This page is the map for someone about to change the code: how a command's
+data flows from source files to output, how the package tree is layered, which
+direction imports may flow, and how the two conversion tracks mirror each
+other. Every structural claim below is enforced by a named test, so the page
+cannot drift far from the tree without a failing build. All paths are under
+`src/cobre_bridge/`.
+
+## A command, end to end
+
+`cobre-bridge convert newave SRC DST` crosses four layers, top to bottom:
+
+1. **`cli/`** parses the command line into a frozen args dataclass
+   (`cli/args.py`) and calls one handler per command (`cli/convert.py`,
+   `cli/check.py`, `cli/compare.py`, `cli/dashboard.py`). The handler owns
+   what the user sees: exit codes, the `--json` envelope (`cli/verdict.py`),
+   `--force` and `--validate`, and the provenance manifest
+   (`cli/conversion_manifest.py`).
+2. **`newave/`** is the track. `files.py` discovers the source files,
+   `case.py` parses each one once and caches it, `id_map.py` fixes the
+   deterministic 1-based to 0-based id mapping, `preflight.py` implements
+   `check`, and `pipeline.py` calls the converters under `converters/` in
+   order, reporting coarse phases to the progress bar.
+3. **`core/`** holds the track-independent building blocks: the `Diagnostic`
+   model and its `collect()`/`emit()` sink, the typed `BridgeError`
+   hierarchy, hydro physics and productivity, calendar and stage weighting,
+   the generic-constraint builder, bound-table merging, and the emission
+   self-checks run on output tables before they are written.
+4. **`cobre/`** is the Cobre side: `CaseWriter`, the single funnel every JSON
+   and Parquet file passes through (it owns `--dry-run`); the `$schema` URL
+   registry; the minimum-cobre-version policy; and readers for Cobre's
+   `output/` tree.
+
+Converters are functions from the parsed case to tables and dicts. They do
+not write files, print, or format messages. A degraded input becomes a
+`Diagnostic` (code, severity, title, summary, an optional per-entity table,
+a remediation hint) emitted into the sink the CLI opened around the run.
+Afterwards the CLI renders the collected diagnostics through `ui/console.py`
+or serialises them into the `--json` verdict. Rich is imported nowhere else.
+
+`compare` has the same shape with `comparators/` in the track's place:
+readers for the source model (`comparators/newave/readers.py`,
+`comparators/decomp/readers.py`) and for Cobre (`cobre/readers.py`), an
+alignment step that reuses the track's id mapping, one `ComparisonDataset`
+model, exporters, and the HTML report assembled from `comparators/charts/`.
+`dashboard/` loads a solved case's `output/` into one `DashboardData` object
+and renders one module per tab under `dashboard/tabs/`. Both reuse
+`ui/theme.py` and `ui/html/` and neither touches the Rich console.
 
 ## Package map
 
-| Package | Path | Role |
-| --- | --- | --- |
-| `core` | `src/cobre_bridge/core/` | Cross-track shared foundation — diagnostics, errors, units, productivity, generic-constraint format and builder, calendar and physics kernels. Imports only itself. |
-| `cobre` | `src/cobre_bridge/cobre/` | Cobre-side I/O, schemas, and version compatibility (`MIN_COBRE_VERSION`). |
-| `newave` | `src/cobre_bridge/newave/` | The NEWAVE conversion track: spine modules, track-specific infrastructure, and a `converters/` subpackage. |
-| `decomp` | `src/cobre_bridge/decomp/` | The DECOMP conversion track: spine modules, track-specific infrastructure, a `converters/` subpackage, and a `fcf/` subpackage for boundary-FCF import. |
-| `comparators` | `src/cobre_bridge/comparators/` | NEWAVE-vs-Cobre comparison, twin-tracked under `comparators/newave/` and `comparators/decomp/`, with shared chart code under `comparators/charts/`. |
-| `ui` | `src/cobre_bridge/ui/` | Rich terminal rendering and HTML rendering — the only package that constructs a Rich `Console` or imports Rich, with HTML rendering under `ui/html/`. |
-| `dashboard` | `src/cobre_bridge/dashboard/` | The interactive Plotly dashboard, with one module per tab under `dashboard/tabs/`. |
-| `cli` | `src/cobre_bridge/cli/` | Typer CLI wiring. The top of the stack — no other package imports it. |
+| Package       | Role                                                                                                                                                      |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `core`        | Shared foundation for both tracks: diagnostics, errors, units, physics, calendar, generic-constraint format and builder. Imports only itself.               |
+| `cobre`       | Cobre-side I/O: the case writer, the schema registry, version compatibility, output readers.                                                              |
+| `newave`      | The NEWAVE track: spine modules plus `converters/`.                                                                                                       |
+| `decomp`      | The DECOMP track: spine modules plus `converters/` and `fcf/` (boundary cost-to-go import).                                                               |
+| `comparators` | Source-vs-Cobre comparison, twin-tracked under `comparators/newave/` and `comparators/decomp/`, with shared chart code under `comparators/charts/`.       |
+| `ui`          | Rich terminal rendering (`ui/console.py`) and the HTML theme and document helpers (`ui/theme.py`, `ui/html/`). The only package that imports Rich.       |
+| `dashboard`   | The interactive Plotly dashboard: a data layer plus one module per tab.                                                                                  |
+| `cli`         | Typer wiring and the command handlers. Top of the stack; nothing imports it.                                                                             |
 
-Several packages carry a subpackage that refines this map:
-`src/cobre_bridge/newave/converters/`, `src/cobre_bridge/decomp/converters/`,
-`src/cobre_bridge/decomp/fcf/`, `src/cobre_bridge/comparators/newave/`,
-`src/cobre_bridge/comparators/decomp/`, `src/cobre_bridge/comparators/charts/`,
-`src/cobre_bridge/ui/html/`, and `src/cobre_bridge/dashboard/tabs/`.
+There are no loose modules at the package root, and no module shadows a
+standard-library name (`test_no_loose_root_modules`,
+`test_no_stdlib_shadowing_modules`).
 
 ## Import direction
 
-Imports are layered: a package may reach into itself and into the packages
-below it, never sideways or up. Readable summary:
+A package may import itself and the packages below it, never sideways or up:
 
-| Package | May import |
-| --- | --- |
-| `core` | `core` |
-| `cobre` | `core`, `cobre` |
-| `ui` | `core`, `cobre`, `ui` |
-| `newave` | `core`, `cobre`, `newave` |
-| `decomp` | `core`, `cobre`, `decomp` |
-| `comparators` | `core`, `cobre`, `comparators`, and `ui`'s theme/HTML-rendering modules (not its Rich console) |
-| `dashboard` | `core`, `cobre`, `dashboard`, and `ui`'s theme/HTML-rendering modules (not its Rich console) |
-| `cli` | everything below it — `core`, `cobre`, `ui`, `newave`, `decomp`, `comparators`, `dashboard`, `cli` |
+| Package       | May import                                                                          |
+| ------------- | ----------------------------------------------------------------------------------- |
+| `core`        | `core`                                                                              |
+| `cobre`       | `core`, `cobre`                                                                     |
+| `ui`          | `core`, `cobre`, `ui`                                                               |
+| `newave`      | `core`, `cobre`, `newave`                                                           |
+| `decomp`      | `core`, `cobre`, `decomp`                                                           |
+| `comparators` | `core`, `cobre`, `comparators`, plus `ui.theme` and `ui.html` (not the Rich console) |
+| `dashboard`   | `core`, `cobre`, `dashboard`, plus `ui.theme` and `ui.html`                         |
+| `cli`         | everything                                                                          |
 
-`comparators`'s reach into a conversion track is scoped to its twin-tracked
-subpackages: `comparators/newave/` may additionally import `newave`, and
-`comparators/decomp/` may additionally import `decomp` — modules directly
-under `comparators/` import neither track.
+Two refinements: `comparators/newave/` may additionally import `newave`, and
+`comparators/decomp/` may additionally import `decomp`; modules directly under
+`comparators/` import neither track. `ui/theme.py` is a leaf that depends only
+on `core`, so presentation-consuming packages share colours and layout
+without pulling in Rich.
 
-This table is a readability aid, not the enforced rule. `tests/test_package_boundaries.py`
-is the authoritative, enforced source of the import direction — its
-`_ALLOWED` map and `test_import_direction` fail the build on any import edge
-this table does not capture precisely. Two invariants matter most to a reader
-working in this tree:
-
-- `core` imports only itself — it has no outward dependency on any other
-  package.
-- Nothing imports `cli` — checked with no allowlist by
-  `test_nothing_imports_cli` in the same file, since `cli` sits at the top of
-  the stack.
+The table is a readability aid. The enforced rule is the `_ALLOWED` map in
+`tests/test_package_boundaries.py`: `test_import_direction` fails on any edge
+the map does not permit, `test_no_private_cross_package_imports` forbids
+importing an underscore-private name across any package boundary, and
+`test_nothing_imports_cli` holds with no allowlist at all. Imports made only
+under `TYPE_CHECKING` are exempt from the direction rule but pinned as an
+exact census in the same file, so adding one is a visible diff.
 
 ## Twin-track spine
 
 `newave/` and `decomp/` are two conversions of the same shape. Each exposes
-five spine modules at its package top — `case`, `files`, `id_map`, `pipeline`,
-and `preflight` — and each carries a `converters/` subpackage
-(`src/cobre_bridge/newave/converters/`, `src/cobre_bridge/decomp/converters/`);
-`decomp/` additionally carries `src/cobre_bridge/decomp/fcf/` for
-boundary-FCF import. `tests/test_package_boundaries.py`'s
-`test_track_packages_are_structurally_symmetric` enforces both facts.
+the same five spine modules at its top (`case`, `files`, `id_map`,
+`pipeline`, `preflight`) and each carries a `converters/` subpackage;
+`decomp/` also has `fcf/`. `test_track_packages_are_structurally_symmetric`
+enforces this. Other loose modules at a track's top are that track's shared
+infrastructure; converter-role code belongs under `converters/`.
 
-That guard does not require every module at a track's top to be one of the
-five spine stems. The rule it enforces is narrower: no converter-role module
-may sit loose at a track's top level — it belongs under `converters/`, or
-`fcf/` for `decomp/` — while shared infrastructure helpers legitimately stay
-loose on both tracks alongside the spine. Read "structurally symmetric" as
-this rule — no converter-role module loose; shared infra helpers stay loose
-on both tracks — not as "nothing else loose."
+The rule the spine serves: a behaviour added to one track (a CLI flag, an
+exit-code rule, an emission check, a preflight policy) lands on both tracks in
+the same change, and physics or calendar math both tracks need has one
+implementation in `core/`. Two near-identical implementations that differ at
+the edges is the bug class `compare` exists to catch, in our own tool.
+Track-private helpers are never imported across the boundary; when both
+tracks need one, it moves to `core/`.
+
+## Extension points
+
+- **A new converter** is a module under a track's `converters/` that takes
+  the parsed case and the id map and returns tables or dicts. Wire it into
+  that track's `pipeline.py`, write its output through the `CaseWriter`, and
+  for a new output file register the `$schema` URL in `cobre/schemas.py`.
+  Emit a `Diagnostic` for anything degraded.
+- **A shared rule** (physics, calendar, a constraint expression) goes in
+  `core/`, with both tracks calling it.
+- **A new CLI flag** is declared in `cli/app.py` on both tracks' commands,
+  threaded through `cli/args.py`, and handled in the handler module.
+  Regenerate `docs/cli.md` afterwards.
+- **A cobre limitation** the bridge has to work around is marked at the site
+  with a `TRACKED COBRE-GAP` comment, surfaced as a log line or diagnostic,
+  and recorded with its removal condition in the cobre repository. It is never
+  adopted silently, and the comment is never removed in a cleanup pass.
+- **User-facing text** is self-contained: no repository paths, internal
+  symbols, or build tooling in a CLI message, because most users have no
+  checkout.
+
+Testing conventions, quality gates, and the contribution workflow are in
+`CONTRIBUTING.md`.

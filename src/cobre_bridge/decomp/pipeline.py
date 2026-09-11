@@ -2,12 +2,10 @@
 
 ``convert_decomp_case(src, dst)`` discovers the deck (``caso.dat`` names
 the revision extension; the ``rvN`` index file names the data files),
-parses it, and writes a Cobre case directory. Scope is the ratified
-loop-closing milestone: the deferred families (exchange network pending
-the upstream accessor fix, renewables pending their reader, boundary FCF,
-and the per-block/fidelity items) are logged loudly by their emitters or
-here. GNL anticipation is now emitted (the anticipated ring + both temporal
-boundaries), no longer deferred.
+parses it once, and writes a Cobre case directory. A deck feature the
+conversion leaves out (water travel time behind a tracked cobre gap, the
+register term types their emitters name) is reported as a diagnostic by the
+emitter that detects it, never dropped silently.
 """
 
 from __future__ import annotations

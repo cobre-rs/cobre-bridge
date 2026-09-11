@@ -7,7 +7,8 @@ not how the work was organized (`.claude/rules/comments.md` N4,
 
 Three HARD scopes (any non-empty ⇒ exit 1):
 
-* shipped docs — whole-file scan of README.md, CHANGELOG.md, docs/**/*.md.
+* shipped docs — whole-file scan of README.md, CONTRIBUTING.md, CHANGELOG.md,
+  docs/**/*.md.
 * src/ prose — comments + docstrings under src/. The pre-existing debt was
   burned down to zero, so this scope is now enforced rather than advisory; a
   new ``ticket-NNN``/``epic-NN`` in shipped source fails the build. On failure
@@ -43,7 +44,7 @@ PATTERN = re.compile(
     r"|\bFINDING-[0-9]+\b|\bAC[0-9]+\b|\bAC ?#[0-9]+"
 )
 
-HARD_DOCS = ["README.md", "CHANGELOG.md"]
+HARD_DOCS = ["README.md", "CONTRIBUTING.md", "CHANGELOG.md"]
 HARD_GLOBS = ["docs/**/*.md"]
 
 

@@ -1,10 +1,10 @@
-"""Bus conversion for DECOMP-like decks (``SB`` + ``CD`` → ``buses.json``).
+"""Network conversion for DECOMP-like decks (``SB`` + ``CD`` → ``buses.json``,
+``IA`` → ``lines.json`` and the line bounds).
 
 Declared subsystems become buses with their deficit curves; the implicit
 transhipment node becomes a converter-created zero-load bus with no
 deficit curve of its own (it carries no demand, so no deficit is ever
-priced there). Exchange lines (``IA``) join this module once the upstream
-accessor fix lands.
+priced there).
 
 The deficit emitters are deliberately gated: the decks in hand carry a
 single 100 %-depth segment with one cost, uniform across blocks and

@@ -273,8 +273,8 @@ def _convert_decomp(
 ) -> None:
     """Convert a DECOMP deck revision to a Cobre case directory.
 
-    Loop-closing subset: the exchange network, renewables card file, and GNL
-    anticipation are deferred and reported as warnings. The boundary FCF is
+    Deck features the conversion leaves out (``check decomp`` lists them per
+    deck) are reported as warnings, never dropped silently. The boundary FCF is
     imported by default whenever the deck declares its cut files; ``--no-fcf``
     skips it.
     """

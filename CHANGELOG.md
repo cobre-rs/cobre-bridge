@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Internal package layout reorganised (`core/`, `cobre/`, `newave/`, `cli/`,
   `comparators/{newave,decomp}/`, `ui/html/`); no CLI or output change.
+- **Documentation overhaul for onboarding.** The README now walks the
+  check → convert → solve → compare → dashboard flow and states every
+  command's exit codes, the `--json` envelope, and the configuration file
+  shape. New per-track pages `docs/newave.md` and `docs/decomp.md` (the latter
+  absorbs the former boundary-FCF page), a rewritten `docs/architecture.md`
+  with the end-to-end data flow and extension points, a new `CONTRIBUTING.md`,
+  and a project `CLAUDE.md` reduced to pointers instead of a stale module map.
+- `convert decomp --help` no longer describes the exchange network,
+  renewables, and GNL anticipation as deferred; all three are converted.
 
 ## [0.15.0] - 2026-08-24
 
@@ -925,11 +934,7 @@ MA → SOBRADINHO`) are correctly wired in `hydros.json::downstream_id`.
   The legacy field stayed in the converted output and confused users
   about which value the LP would actually use.
 
-## [0.5.1] - earlier
+## Earlier releases
 
-## [0.5.0] - earlier
-
-## [0.4.x] - earlier
-
-See git history (`git log v0.4.0..v0.5.1`) for the 0.4 / 0.5 entries —
-those were never recorded in this CHANGELOG.
+Releases 0.4.0 through 0.5.1 predate this changelog; their history is in the
+git log (`git log v0.4.0..v0.5.1`).

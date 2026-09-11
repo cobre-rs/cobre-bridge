@@ -8,8 +8,8 @@ paths:
 # Cobre-Bridge Prose Documentation Integrity Rules
 
 Governs every Markdown file that serves as a user-facing or agent-facing
-artifact: `CLAUDE.md`, `README.md`, `CHANGELOG.md`, `docs/**`, and
-`.claude/rules/*`. Port of cobre's doc-integrity rule; the code-comment
+artifact: `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`,
+`docs/**`, and `.claude/rules/*`. Port of cobre's doc-integrity rule; the code-comment
 counterpart is `.claude/rules/comments.md`.
 
 ## 1. Reader per doc
@@ -20,6 +20,10 @@ counterpart is `.claude/rules/comments.md`.
   job); plan-leakage still applies (no epic/ticket tokens in released entries).
 - **README.md / docs/** — newcomers and users, most with **no repo checkout**
   (pip install). Teaching voice is the job; promotional voice is not (§4).
+  README.md doubles as the PyPI description, so it links to `docs/` by
+  absolute URL.
+- **CONTRIBUTING.md** — a contributor with a checkout. Repo paths are fine;
+  every other rule here (durability, voice, plan-leakage) applies unchanged.
 
 ## 2. The one adaptation that does the heavy lifting
 
@@ -48,7 +52,7 @@ Bridge guards that pin literals so prose doesn't have to:
    paths shown to pip users. Match content to the doc's reader.
 4. **Unresolvable claims.** Every cited repo-relative path, command, and flag
    must resolve against the live tree (`scripts/ci/check_doc_paths.py` gates
-   README/docs). Never cite gitignored dirs (`plans/`, `example/` decks) or
+   README/CONTRIBUTING/docs). Never cite gitignored dirs (`plans/`, `example/` decks) or
    machine-local paths (`~/git/...`) in *shipped* docs — the reader cannot
    resolve them. (`example/` is allowed in CLAUDE.md, which documents the
    local-deck convention for this checkout.)

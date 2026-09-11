@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """check_doc_paths.py — resolvable-path gate for shipped docs.
 
-Every repo-relative path cited in README.md, docs/**/*.md, and CLAUDE.md must
-resolve against the live tree (`.claude/rules/doc-integrity.md` §3.4). Citing
-a gitignored dir (``plans/``) or a machine-local path (``~/git/...``) in a
-shipped doc is a violation outright — no reader can resolve it.
+Every repo-relative path cited in README.md, CONTRIBUTING.md, docs/**/*.md,
+and CLAUDE.md must resolve against the live tree
+(`.claude/rules/doc-integrity.md` §3.4). Citing a gitignored dir (``plans/``)
+or a machine-local path (``~/git/...``) in a shipped doc is a violation
+outright — no reader can resolve it.
 
 CLAUDE.md is hard-gated like README.md and docs/**/*.md, with one narrow
 allowance: it documents this checkout, so its own ``example/`` deck-path
@@ -35,6 +36,7 @@ TOKEN = re.compile(r"`([^`\s]+)`")
 PATH_PREFIXES = ("src/", "docs/", "scripts/", "tests/", ".github/", ".claude/")
 ROOT_FILES = {
     "README.md",
+    "CONTRIBUTING.md",
     "CHANGELOG.md",
     "CLAUDE.md",
     "pyproject.toml",
@@ -50,7 +52,7 @@ ROOT_FILES = {
 # looks_like_repo_path() already ignores it everywhere, CLAUDE.md included.
 ALWAYS_DEAD_PREFIXES = ("plans/", "~/git/")
 
-HARD_FILES = ["README.md", "CLAUDE.md"]
+HARD_FILES = ["README.md", "CONTRIBUTING.md", "CLAUDE.md"]
 HARD_GLOBS = ["docs/**/*.md"]
 # No file is advisory-only today; CLAUDE.md was promoted to HARD_FILES above.
 # Kept as a hook for a future doc that needs the same non-failing treatment.

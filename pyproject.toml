@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "cobre-bridge"
 version = "0.15.0"
-description = "Anything-to-Cobre converter"
+description = "Convert NEWAVE and DECOMP cases to Cobre input format and compare the results"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
