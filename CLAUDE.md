@@ -14,6 +14,9 @@ adds only what an agent working in this checkout needs beyond them.
 - `docs/newave.md`, `docs/decomp.md` — per-track behaviour and caveats.
 - `CONTRIBUTING.md` — dev setup, test tiers, gates, conventions, releasing.
 - `docs/cli.md` — generated from the Typer app; never hand-edit it.
+- `docs/newave-data-map.md`, `docs/decomp-data-map.md` — generated (pt-BR)
+  maps from deck file, record, and column to each converted field, plus what
+  is not converted yet; edit `docs/lineage/*.toml`, never the pages.
 
 ## Quick commands
 
@@ -25,6 +28,7 @@ python3 scripts/ci/check_no_plan_leaks.py    # hard gates, also run by CI
 python3 scripts/ci/check_comment_refs.py
 python3 scripts/ci/check_doc_paths.py
 scripts/gen-cli-docs.sh                      # regenerate docs/cli.md after any help-text change
+scripts/gen-lineage-docs.py                  # regenerate docs/*-data-map.md after editing docs/lineage/*.toml
 scripts/regen-goldens.sh                     # regenerate tests/golden/, then review the diff
 ln -sf ../../scripts/pre-commit .git/hooks/pre-commit
 ```

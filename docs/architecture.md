@@ -117,7 +117,9 @@ tracks need one, it moves to `core/`.
   the parsed case and the id map and returns tables or dicts. Wire it into
   that track's `pipeline.py`, write its output through the `CaseWriter`, and
   for a new output file register the `$schema` URL in `cobre/schemas.py`.
-  Emit a `Diagnostic` for anything degraded.
+  Emit a `Diagnostic` for anything degraded. Describe the output's fields and
+  their deck sources in the track's TOML under `docs/lineage/` and regenerate
+  the data map; the lineage tests fail on an emitted field with no entry.
 - **A shared rule** (physics, calendar, a constraint expression) goes in
   `core/`, with both tracks calling it.
 - **A new CLI flag** is declared in `cli/app.py` on both tracks' commands,

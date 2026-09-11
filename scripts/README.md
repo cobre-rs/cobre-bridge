@@ -10,6 +10,12 @@ to run them in a normal development loop.
   `ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`.
 - **`gen-cli-docs.sh`** — regenerates `docs/cli.md` from the Typer app
   (content-guarded by `tests/test_docs.py`; never hand-edit the output).
+- **`gen-lineage-docs.py`** — renders `docs/newave-data-map.md` and
+  `docs/decomp-data-map.md` (pt-BR) from `docs/lineage/*.toml`; `--check`
+  validates the TOML, reports a stale page, and cross-checks the outputs'
+  declared sources against an AST trace of the pipelines. `tests/test_lineage.py`
+  runs the same checks plus emission coverage against the mini decks. The
+  loader, tracer, and renderer live in `lineage/`.
 - **`regen-goldens.sh`** — regenerates the `tests/golden/` snapshots by running
   their consumer tests with `COBRE_BRIDGE_UPDATE_GOLDENS=1`. Goldens are
   regenerated via this path, never hand-edited; review the resulting

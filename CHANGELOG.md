@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Data maps, in Portuguese.** `docs/newave-data-map.md` and
+  `docs/decomp-data-map.md` trace every file and field of the converted case
+  back to the deck file, record, and column it comes from, state the
+  transformation applied, and list what the converter does not convert yet.
+  Both pages are generated from `docs/lineage/` and gated by tests against a
+  real conversion of the mini decks, so they cannot drift from the code.
+
 ### Changed
 
 - Internal package layout reorganised (`core/`, `cobre/`, `newave/`, `cli/`,

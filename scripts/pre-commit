@@ -22,4 +22,9 @@ python3 scripts/ci/check_comment_refs.py
 echo "==> shipped-doc path gate..."
 python3 scripts/ci/check_doc_paths.py
 
+echo "==> data-map lineage gate..."
+PYTHON="${PYTHON:-.venv/bin/python}"
+command -v "$PYTHON" >/dev/null 2>&1 || PYTHON=python3
+"$PYTHON" scripts/gen-lineage-docs.py --check
+
 echo "==> Pre-commit checks passed."

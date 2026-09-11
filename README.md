@@ -151,6 +151,7 @@ environment > file > built-in default.
 - [CLI reference](https://github.com/cobre-rs/cobre-bridge/blob/main/docs/cli.md), generated from the command help.
 - [NEWAVE track](https://github.com/cobre-rs/cobre-bridge/blob/main/docs/newave.md): inputs, what the converter changes, comparing results.
 - [DECOMP track](https://github.com/cobre-rs/cobre-bridge/blob/main/docs/decomp.md): inputs, deferred features, the boundary cost-to-go import, running the case.
+- [Mapa de dados NEWAVE](https://github.com/cobre-rs/cobre-bridge/blob/main/docs/newave-data-map.md) and [Mapa de dados DECOMP](https://github.com/cobre-rs/cobre-bridge/blob/main/docs/decomp-data-map.md), in Portuguese: which deck file, record, and column feeds each Cobre file and field, and what is not converted yet.
 - [Architecture](https://github.com/cobre-rs/cobre-bridge/blob/main/docs/architecture.md): how the code is organised, for contributors.
 - [Contributing](https://github.com/cobre-rs/cobre-bridge/blob/main/CONTRIBUTING.md): development setup, tests, quality gates, releasing.
 - [Changelog](https://github.com/cobre-rs/cobre-bridge/blob/main/CHANGELOG.md).

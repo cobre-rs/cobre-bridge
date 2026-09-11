@@ -20,6 +20,10 @@ missing or unreadable makes `check` exit 2, and `convert` fails before writing
 anything. Run `check newave` first when a case comes from an unfamiliar
 source.
 
+The field-by-field map from deck files to the converted case, including what
+the converter does not convert yet, is the [NEWAVE data map](newave-data-map.md)
+(in Portuguese).
+
 ## What the converter changes
 
 Cobre's input format differs from NEWAVE's in ways the converter has to

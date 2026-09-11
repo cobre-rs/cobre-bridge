@@ -19,6 +19,10 @@ every converter.
 the conversion will leave behind for this particular deck. Exit 0 means ready,
 1 ready with warnings, 2 the deck will not convert.
 
+The register-by-register map from the deck to the converted case, including
+what the converter does not convert yet, is the
+[DECOMP data map](decomp-data-map.md) (in Portuguese).
+
 ## What is converted, and what is deferred
 
 The converter emits buses with their deficit curves plus the transshipment

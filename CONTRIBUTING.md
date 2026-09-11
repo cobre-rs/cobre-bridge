@@ -100,6 +100,14 @@ on them, and they are the canonical statements for humans too. In short:
 - `docs/cli.md` is generated from the Typer app. After changing any command
   or option help text, run `scripts/gen-cli-docs.sh` and commit the result;
   `tests/test_docs.py` fails when a command or flag is missing from it.
+- `docs/newave-data-map.md` and `docs/decomp-data-map.md` (in Portuguese)
+  are generated from `docs/lineage/newave.toml` and `docs/lineage/decomp.toml`
+  by `scripts/gen-lineage-docs.py`. Edit the TOML, never the page.
+  `tests/test_lineage.py` fails when a page is stale, when a real conversion of
+  the mini decks emits a field the TOML does not describe (or the TOML
+  describes one that is not emitted), when an entry cites a deck file or
+  register that does not exist, and when the code reads a deck file an
+  output's entry does not list.
 - `README.md` is also the PyPI description, so it links to `docs/` with
   absolute URLs and cites no repository-only paths.
 - Add a line under `Unreleased` in `CHANGELOG.md` for every user-visible
@@ -114,12 +122,17 @@ on them, and they are the canonical statements for humans too. In short:
    faithfully, with the affected entities and stages in its detail table.
 3. Wire it into the track's `pipeline.py`. Write output only through the
    `CaseWriter`; register a new file's `$schema` URL in `cobre/schemas.py`.
-4. Mirror it on the other track, or record the asymmetry where the team tracks
+4. Describe the new output or field in the track's TOML under `docs/lineage/`
+   (the deck file, record or column it comes from, and the transformation, in
+   Portuguese) and regenerate the data map with `scripts/gen-lineage-docs.py`.
+   A deck record the converter reads but does not convert is listed there too,
+   as deferred, so the page shows what is still open.
+5. Mirror it on the other track, or record the asymmetry where the team tracks
    architecture debt.
-5. Add a tier-1 test with synthetic input, an emission-shape test for a new
+6. Add a tier-1 test with synthetic input, an emission-shape test for a new
    output file, and a CliRunner or subprocess test for a new flag or exit
    path.
-6. Regenerate `docs/cli.md` if help text changed, and add a `CHANGELOG.md`
+7. Regenerate `docs/cli.md` if help text changed, and add a `CHANGELOG.md`
    entry.
 
 ## Releasing
