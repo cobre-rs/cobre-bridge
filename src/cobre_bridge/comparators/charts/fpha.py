@@ -15,8 +15,8 @@ from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
 )
-from cobre_bridge.ui.html import escape_text, json_for_script
-from cobre_bridge.ui.plotly_helpers import MARGIN_DEFAULTS as _MARGIN
+from cobre_bridge.ui.html.document import escape_text, json_for_script
+from cobre_bridge.ui.html.plotly import MARGIN_DEFAULTS as _MARGIN
 
 
 def fpha_metrics_table(metrics: pl.DataFrame, reference_label: str = "NEWAVE") -> str:

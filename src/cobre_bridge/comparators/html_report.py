@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from cobre_bridge.ui.css import comparison_css
-from cobre_bridge.ui.html import (
+from cobre_bridge.ui.html.css import comparison_css
+from cobre_bridge.ui.html.document import (
     build_html,
     chart_grid,
     metric_card,
@@ -11,7 +11,7 @@ from cobre_bridge.ui.html import (
     section_title,
     wrap_chart,
 )
-from cobre_bridge.ui.js import PLOTLY_TITLE_SHIM_JS, TAB_SWITCH_JS
+from cobre_bridge.ui.html.js import PLOTLY_TITLE_SHIM_JS, TAB_SWITCH_JS
 from cobre_bridge.ui.theme import COMPARISON_COLORS
 
 CSS = comparison_css()

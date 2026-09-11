@@ -22,7 +22,7 @@ import plotly.subplots as ps
 import polars as pl
 
 from cobre_bridge.dashboard.chart_helpers import make_chart_card
-from cobre_bridge.ui.html import (
+from cobre_bridge.ui.html.document import (
     chart_grid,
     collapsible_section,
     escape_attr,
@@ -31,8 +31,8 @@ from cobre_bridge.ui.html import (
     plant_explorer_table,
     wrap_chart,
 )
-from cobre_bridge.ui.js import PLANT_EXPLORER_JS
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.js import PLANT_EXPLORER_JS
+from cobre_bridge.ui.html.plotly import (
     LEGEND_DEFAULTS,
     MARGIN_DEFAULTS,
     apply_stage_date_axis,

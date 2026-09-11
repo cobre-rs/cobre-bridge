@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from cobre_bridge.constraint_expr import (
+from cobre_bridge.cobre.constraint_expr import (
     evaluate_constraint_expressions,
     load_rho_acum_overrides,
 )
@@ -23,14 +23,14 @@ from cobre_bridge.dashboard.tabs.constraints_utils import (
     build_constraints_summary_table,
     derive_constraint_shape,
 )
-from cobre_bridge.ui.html import (
+from cobre_bridge.ui.html.document import (
     escape_attr,
     json_for_script,
     metric_card,
     metrics_grid,
     section_title,
 )
-from cobre_bridge.ui.plotly_helpers import stage_x_dates, stage_x_labels
+from cobre_bridge.ui.html.plotly import stage_x_dates, stage_x_labels
 
 if TYPE_CHECKING:
     from cobre_bridge.dashboard.data import DashboardData
@@ -210,7 +210,7 @@ def _build_constraint_lhs_data(
             ``stage_id``, ``block_id``, ``lhs_value``.
         gc_bounds: DataFrame with columns ``constraint_id``, ``stage_id``,
             ``block_id``, ``bound_lower``, ``bound_upper`` (the F3 sense-free
-            interval; see :mod:`cobre_bridge.generic_constraint_format`).
+            interval; see :mod:`cobre_bridge.core.generic_constraint_format`).
         stage_labels: Stage id to human-readable label mapping.
 
     Returns:

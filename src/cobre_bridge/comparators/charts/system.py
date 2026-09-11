@@ -15,8 +15,8 @@ from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
 )
-from cobre_bridge.comparators.results import ResultComparison
-from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
+from cobre_bridge.comparators.model import ResultComparison
+from cobre_bridge.ui.html.plotly import plotly_div as _plotly_div
 
 
 def system_comparison_chart(
@@ -78,7 +78,7 @@ def ree_energy_chart(
     shape (the source model's own value vs Cobre's, summed across every
     matched REE per stage), keyed on ``entity_type == "ree"`` instead of
     ``"bus"``. REE carries no Cobre percentile band --
-    :class:`~cobre_bridge.comparators.results.PercentileData` has no ``ree``
+    :class:`~cobre_bridge.comparators.model.PercentileData` has no ``ree``
     field -- so this omits the optional p10-p90 overlay entirely rather than
     fabricating one.
     """

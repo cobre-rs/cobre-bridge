@@ -220,7 +220,7 @@ CliRunner invocation can't leak logging state into a later `caplog` test.
 
 ### Boundary-FCF test tiers
 
-The boundary-FCF import tests (`tests/test_decomp_fcf_*.py`) sit in three
+The boundary-FCF import tests (`tests/decomp/test_fcf_*.py`) sit in three
 tiers, so the suite still collects and runs meaningfully even in an
 environment without cobre (e.g. a partial dev checkout) or without a real,
 gitignored deck under `example/`:

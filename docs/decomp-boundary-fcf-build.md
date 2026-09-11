@@ -16,7 +16,7 @@ the `cobre-python` wheel — the import needs no external `cobre` binary.
   core `dependencies`). A normal `pip install cobre-bridge` therefore installs
   everything the import needs — no wheel to build, no binary to supply. The
   version floor is stated once, in `pyproject.toml`, in lockstep with
-  `MIN_COBRE_VERSION` in `src/cobre_bridge/cli.py`; `tests/test_packaging.py`
+  `MIN_COBRE_VERSION` in `src/cobre_bridge/cobre/compat.py`; `tests/test_packaging.py`
   guards that lockstep, so this doc deliberately repeats no number.
 
 An external `cobre` binary is needed only later, to _solve_ the converted case

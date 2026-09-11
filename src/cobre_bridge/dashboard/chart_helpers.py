@@ -13,18 +13,21 @@ from __future__ import annotations
 
 import plotly.graph_objects as go
 
-from cobre_bridge.cost_categories import AGGREGATE_COST_COLUMNS, COST_PARTITION_COLUMNS
-from cobre_bridge.ui.html import wrap_chart
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.cobre.cost_categories import (
+    AGGREGATE_COST_COLUMNS,
+    COST_PARTITION_COLUMNS,
+)
+from cobre_bridge.ui.html.document import wrap_chart
+from cobre_bridge.ui.html.plotly import (
     LEGEND_DEFAULTS as _LEGEND,
 )
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.plotly import (
     MARGIN_DEFAULTS as _MARGIN,
 )
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.plotly import (
     add_mean_p50_band as add_mean_p50_band,
 )
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.plotly import (
     fig_to_html,
 )
 
@@ -213,9 +216,9 @@ def make_chart_card(
     """Wrap a Plotly figure in a standard ``.chart-card`` HTML fragment.
 
     Applies default layout (template, margins, legend position) from
-    :func:`~cobre_bridge.ui.plotly_helpers.fig_to_html`, sets the figure
+    :func:`~cobre_bridge.ui.html.plotly.fig_to_html`, sets the figure
     height, and embeds the result inside the ``.chart-card`` div with an
-    expand button (via :func:`~cobre_bridge.ui.html.wrap_chart`).
+    expand button (via :func:`~cobre_bridge.ui.html.document.wrap_chart`).
 
     The output does **not** include a ``<script src="plotly.js">`` tag —
     callers are responsible for including Plotly exactly once in the outer

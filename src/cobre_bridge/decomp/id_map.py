@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cobre_bridge.errors import FieldParseError
+from cobre_bridge.core.errors import FieldParseError
 
 if TYPE_CHECKING:
     from idecomp.decomp import Dadger

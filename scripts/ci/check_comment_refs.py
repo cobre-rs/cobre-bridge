@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """check_comment_refs.py — un-rottable-reference gate for shipped prose.
 
-Enforces `.claude/rules/comments.md` N3: a comment or docstring in src/ must
-reference only things that cannot rot for a reader without this checkout — a
-symbol, a named test, or a stable external anchor (the cobre book, a schema
-name, a published reference manual `§`). Everything below rots for a reader
-who has only the pip-installed package.
+Enforces `.claude/rules/comments.md` N3: a comment or docstring in src/ or
+tests/ must reference only things that cannot rot for a reader — a symbol, a
+named test, or a stable external anchor (the cobre book, a schema name, a
+published reference manual `§`). Everything below rots.
 
 HARD (exit 1):
   * source-file line references — this repo's ``file.py:NNN`` and cobre's
@@ -20,7 +19,13 @@ HARD (exit 1):
     symbol or the cobre book instead,
   * the bridge's own design-doc section refs (``design §5``): those docs live
     in gitignored ``plans/`` — inline the durable content or name a shipped
-    ``docs/`` path.
+    ``docs/`` path,
+  * a repo-relative ``src/cobre_bridge/...`` or ``tests/...`` ``.py`` path that
+    no longer resolves — a sibling-test / module pointer that rotted when the
+    file moved. Repoint it to the live path or (better) name the symbol/test.
+
+Scanned scopes: src/ and tests/ prose (comments + docstrings). Test *file
+names* and *function names* are never scanned — only comments and docstrings.
 
 Exit codes: 0 = no violations; 1 = violations (details printed).
 """
@@ -30,7 +35,7 @@ from __future__ import annotations
 import re
 import sys
 
-from _scan import SRC_ROOT, iter_prose, iter_py_files, rel
+from _scan import REPO_ROOT, SRC_ROOT, TESTS_ROOT, iter_prose, iter_py_files, rel
 
 HARD_PATTERNS = [
     # Source-file line references drift on every edit above the line — this
@@ -54,29 +59,46 @@ HARD_PATTERNS = [
     ("internal-design-ref", re.compile(r"\bdesign[ \-]*§")),
 ]
 
+# A repo-relative source/test .py path cited in prose. The match stops at
+# ``.py`` (``:`` and ``::`` are not in the class), so a ``…py::symbol`` or
+# ``…py:NNN`` suffix is dropped before the existence check.
+_REPO_PY_PATH = re.compile(r"\b(?:src/cobre_bridge|tests)/[\w./-]+\.py\b")
+
+
+def _stale_path_hits(line: str, where: str) -> list[str]:
+    """Flag cited src/tests .py paths that no longer resolve against the tree."""
+    hits: list[str] = []
+    for path in _REPO_PY_PATH.findall(line):
+        if not (REPO_ROOT / path).exists():
+            hits.append(f"{where}: [stale-path] {path}")
+    return hits
+
 
 def main() -> int:
     hard: list[str] = []
-    for path in iter_py_files(SRC_ROOT):
-        for lineno, text in iter_prose(path):
-            for offset, line in enumerate(text.splitlines()):
-                where = f"{rel(path)}:{lineno + offset}"
-                for tag, pattern in HARD_PATTERNS:
-                    for match in pattern.findall(line):
-                        hard.append(f"{where}: [{tag}] {match}")
+    for root in (SRC_ROOT, TESTS_ROOT):
+        for path in iter_py_files(root):
+            for lineno, text in iter_prose(path):
+                for offset, line in enumerate(text.splitlines()):
+                    where = f"{rel(path)}:{lineno + offset}"
+                    for tag, pattern in HARD_PATTERNS:
+                        for match in pattern.findall(line):
+                            hard.append(f"{where}: [{tag}] {match}")
+                    hard.extend(_stale_path_hits(line, where))
 
     if hard:
-        print("FAIL: un-rottable-reference violations in src/ prose.")
+        print("FAIL: un-rottable-reference violations in src/ or tests/ prose.")
         print()
         print("\n".join(hard))
         print()
         print(
             "Reference by symbol, named test, or stable external anchor; strip "
-            ":NNN line numbers and cross-repo paths — .claude/rules/comments.md N3."
+            ":NNN line numbers and cross-repo paths, and repoint moved paths "
+            "— .claude/rules/comments.md N3."
         )
         return 1
 
-    print("OK: no hard rot-ref violations in src/ prose.")
+    print("OK: no hard rot-ref violations in src/ or tests/ prose.")
     return 0
 
 

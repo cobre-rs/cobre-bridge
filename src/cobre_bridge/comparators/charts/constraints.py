@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import polars as pl
 
-from cobre_bridge.comparators.constraints_compare import ResolvedBound
+from cobre_bridge.comparators.constraints import ResolvedBound
 from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
 )
-from cobre_bridge.ui.plotly_helpers import facet_grid
-from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
+from cobre_bridge.ui.html.plotly import facet_grid
+from cobre_bridge.ui.html.plotly import plotly_div as _plotly_div
 
 
 def constraints_comparison_chart(
@@ -37,7 +37,7 @@ def constraints_comparison_chart(
         ``lhs_value``.
     bound_by_constraint:
         Output of
-        :func:`cobre_bridge.comparators.constraints_compare.per_stage_bounds`
+        :func:`cobre_bridge.comparators.constraints.per_stage_bounds`
         — maps ``constraint_id`` to ``{stage_id: ResolvedBound}`` (the
         resolved limit value plus its derived shape label).
 

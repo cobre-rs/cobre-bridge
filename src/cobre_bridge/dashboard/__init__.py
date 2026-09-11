@@ -12,9 +12,9 @@ from pathlib import Path
 
 from cobre_bridge.dashboard.data import DashboardData
 from cobre_bridge.dashboard.tabs import collect_required_js, get_renderable_tabs
-from cobre_bridge.ui.css import dashboard_css
-from cobre_bridge.ui.html import build_html
-from cobre_bridge.ui.js import PLOTLY_TITLE_SHIM_JS, TAB_SWITCH_JS
+from cobre_bridge.ui.html.css import dashboard_css
+from cobre_bridge.ui.html.document import build_html
+from cobre_bridge.ui.html.js import PLOTLY_TITLE_SHIM_JS, TAB_SWITCH_JS
 
 logger = logging.getLogger(__name__)
 

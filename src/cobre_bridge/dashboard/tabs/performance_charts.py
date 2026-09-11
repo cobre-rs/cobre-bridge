@@ -36,13 +36,13 @@ from cobre_bridge.dashboard.tabs.timing_phases import (
     active_top_level_phases,
     build_timing_stacked_figure,
 )
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.plotly import (
     LEGEND_DEFAULTS as _LEGEND,
 )
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.plotly import (
     MARGIN_DEFAULTS as _MARGIN,
 )
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.plotly import (
     fig_to_html,
     render_figure,
 )

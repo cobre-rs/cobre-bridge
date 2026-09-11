@@ -21,8 +21,8 @@ the named layout, not raw byte arithmetic.
 path directly (confirmed against both a non-GNL deck,
 ``example/newave_rodada/cortesh.dat``, and a GNL deck,
 ``example/decomp-set-24-rv0/cortesh.dat``) — the same ``Cortesh.read(str(path))``
-idiom :func:`cobre_bridge.decomp.hydro.read_hidr` uses for ``Hidr.read``, not
-a decoded-text buffer.
+idiom :func:`cobre_bridge.decomp.converters.hydro.entity.read_hidr` uses
+for ``Hidr.read``, not a decoded-text buffer.
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ class CutFamilySummary:
     A header triage over the active cuts: which plants carry a nonzero
     storage or inflow-lag coefficient, which GNL slots are live, and the
     RHS coefficient scale. Plain data — no logging, no
-    :class:`~cobre_bridge.diagnostics.Diagnostic` — so it stays reusable
+    :class:`~cobre_bridge.core.diagnostics.Diagnostic` — so it stays reusable
     both as a self-check and as diagnostic input.
     """
 

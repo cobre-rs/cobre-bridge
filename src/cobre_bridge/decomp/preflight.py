@@ -24,24 +24,28 @@ from typing import TYPE_CHECKING, cast
 import pandas as pd
 from idecomp.decomp.modelos import dadger as _dadger_models
 
-from cobre_bridge.decomp import constraint_registers
-from cobre_bridge.decomp.cadastro import APPLIED_AC_CLASSES, UNINGESTABLE_AC_CLASSES
-from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
-from cobre_bridge.errors import FieldParseError, diagnostic_from_exception
-from cobre_bridge.preflight import (
+from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity
+from cobre_bridge.core.errors import FieldParseError, diagnostic_from_exception
+from cobre_bridge.core.preflight import (
     CheckItem,
     PreflightResult,
     PreflightVerdict,
     optional_input_advisory,
 )
+from cobre_bridge.decomp import constraint_registers
+from cobre_bridge.decomp.converters.cadastro import (
+    APPLIED_AC_CLASSES,
+    UNINGESTABLE_AC_CLASSES,
+)
+from cobre_bridge.decomp.files import discover_decomp_files
 
 if TYPE_CHECKING:
     from idecomp.decomp import Dadger, Vazoes
 
-    from cobre_bridge.decomp.cadastro import CadastroResolutionReport
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.converters.cadastro import CadastroResolutionReport
+    from cobre_bridge.decomp.files import DecompFiles
     from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import DecompFiles
     from cobre_bridge.decomp.temporal import OperativeStage
 
 _CONTEXT = "Preflight"
@@ -253,9 +257,9 @@ def _ac_present(dadger: Dadger, classes: frozenset[type]) -> list[type]:
 
     A class is present iff its ``AC`` frame is a non-empty
     ``pd.DataFrame`` — mirrors the resolver's own guard
-    (:func:`cobre_bridge.decomp.cadastro._read_scalar_overrides` and its
-    siblings), so a ``None``/empty frame (an unregistered mnemonic, or an
-    absent one) contributes nothing.
+    (:func:`cobre_bridge.decomp.converters.cadastro.overrides.
+    _read_scalar_overrides` and its siblings), so a ``None``/empty frame
+    (an unregistered mnemonic, or an absent one) contributes nothing.
     """
     present = [
         cls
@@ -284,8 +288,9 @@ def _ac_coverage(
     *report* (for ``out_of_horizon``) — no file I/O, no calendar, no
     ``hidr``. The three buckets are computed once by set arithmetic against
     the module-level :data:`_ALL_AC_CLASSES` reflection and the resolver's
-    own :data:`~cobre_bridge.decomp.cadastro.APPLIED_AC_CLASSES` /
-    :data:`~cobre_bridge.decomp.cadastro.UNINGESTABLE_AC_CLASSES` registries
+    own :data:`~cobre_bridge.decomp.converters.cadastro.overrides.
+    APPLIED_AC_CLASSES` / :data:`~cobre_bridge.decomp.converters.cadastro.
+    overrides.UNINGESTABLE_AC_CLASSES` registries
     — enumerate-and-diff, never a hand-maintained list, so a newly-applied
     family automatically drops off the deferred bucket and a new idecomp
     class automatically lands in it.
@@ -490,7 +495,6 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
 
     from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import discover_decomp_files
 
     try:
         files = discover_decomp_files(src)
@@ -575,8 +579,8 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
         else:
             checks.extend(_tree_checks(vazoes, calendar))
 
-        from cobre_bridge.decomp.cadastro import build_effective_cadastro
-        from cobre_bridge.decomp.hydro import read_hidr
+        from cobre_bridge.decomp.converters.cadastro import build_effective_cadastro
+        from cobre_bridge.decomp.converters.hydro import read_hidr
 
         try:
             hidr = read_hidr(files.hidr)

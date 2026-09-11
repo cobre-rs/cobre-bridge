@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cobre_bridge.converters.network import MONTH_HOURS
+from cobre_bridge.core.units import MONTH_HOURS
 from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
 from cobre_bridge.decomp.fcf.cortes import BoundaryCuts, CortesHeader, StageCutRecord
 from cobre_bridge.decomp.fcf.mapper import GnlRingPlan, MappedCut, map_boundary_cuts
