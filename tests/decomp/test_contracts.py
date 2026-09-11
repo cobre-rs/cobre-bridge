@@ -29,17 +29,12 @@ from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 from tests.conftest import make_decomp_case
 
-_COBRE_SCHEMA = (
-    Path.home() / "git" / "cobre" / "schemas" / "energy_contracts.schema.json"
-)
-_D41_DIR = (
-    Path.home()
-    / "git"
-    / "cobre"
-    / "examples"
-    / "deterministic"
-    / "d41-energy-contracts"
-)
+# Vendored from the cobre repository (``schemas/`` and the
+# ``d41-energy-contracts`` deterministic example) at the paired cobre release;
+# refresh both when MIN_COBRE_VERSION moves.
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+_COBRE_SCHEMA = _FIXTURES / "cobre_schemas" / "energy_contracts.schema.json"
+_D41_DIR = _FIXTURES / "cobre_d41"
 _D41_REQUIRED_CONTRACT_KEYS = frozenset(
     {
         "id",
@@ -362,10 +357,6 @@ def test_convert_energy_contracts_export_price_is_negative() -> None:
     assert result["contracts"][0]["price_per_mwh"] == -150.0
 
 
-@pytest.mark.skipif(
-    not _COBRE_SCHEMA.exists(),
-    reason="cobre schema not present (sibling checkout ~/git/cobre required)",
-)
 def test_convert_energy_contracts_validates_against_schema() -> None:
     calendar = _uniform_calendar()
     id_map = _bus_id_map()
@@ -777,10 +768,6 @@ def test_integrated_carry_forward_and_per_block_sparsity() -> None:
     assert [o["block_id"] for o in overrides_stage2] == [0, 1, 2]
 
 
-@pytest.mark.skipif(
-    not _COBRE_SCHEMA.exists(),
-    reason="cobre schema not present (sibling checkout ~/git/cobre required)",
-)
 def test_integrated_json_schema_and_parquet_roundtrip(tmp_path: Path) -> None:
     calendar = _calendar()
     id_map = _bus_id_map()
@@ -816,16 +803,9 @@ def test_integrated_json_schema_and_parquet_roundtrip(tmp_path: Path) -> None:
     ]
 
 
-# --- End-to-end d41 round-trip ------------------------------
-#
-# The d41 shape round-trip needs no cobre binary but is itself skipif-guarded
-# on the sibling cobre checkout being present.
+# --- End-to-end d41 round-trip (vendored fixture) --------------------------
 
 
-@pytest.mark.skipif(
-    not _D41_DIR.exists(),
-    reason="d41 example not present (sibling checkout ~/git/cobre required)",
-)
 def test_d41_json_shape_roundtrip() -> None:
     """Every d41 ``RawContract`` required key must also be present in the
     bridge's emitted contracts for an equivalent import+export pair.
@@ -884,10 +864,6 @@ def test_d41_json_shape_roundtrip() -> None:
         assert _D41_REQUIRED_CONTRACT_KEYS.issubset(entry.keys())
 
 
-@pytest.mark.skipif(
-    not _D41_DIR.exists(),
-    reason="d41 example not present (sibling checkout ~/git/cobre required)",
-)
 def test_d41_parquet_schema_superset() -> None:
     """The bridge's ``contract_bounds`` schema is a superset of d41's
     hand-built 5-column shape, with identical arrow types on the shared
