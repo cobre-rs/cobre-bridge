@@ -1606,6 +1606,40 @@ class TestParseCadical:
         assert bus0[0] == pytest.approx(1050.0)  # Jan load + C_ADIC
         assert bus0[1] == pytest.approx(1000.0)  # Feb load, no C_ADIC
 
+    @patch("cobre_bridge.newave.converters.stochastic.Cadic")
+    def test_switched_off_cadic_is_never_read(self, mock_cadic_cls, tmp_path) -> None:
+        """``CONS. CARGA ADICIONAL = 0`` leaves a present c_adic.dat unread and
+        the load unchanged, with one INFO diagnostic naming the switch."""
+        from cobre_bridge.core import diagnostics as dx
+        from cobre_bridge.newave.converters.stochastic import convert_load_stats
+
+        mock = MagicMock()
+        mock.mercado_energia = pd.DataFrame(
+            [
+                {
+                    "codigo_submercado": 1,
+                    "data": datetime.datetime(2024, month, 1),
+                    "valor": 1000.0,
+                }
+                for month in (1, 2)
+            ]
+        )
+        dger = _make_load_stats_dger_mock(ano_inicio=2024, num_anos=1)
+        dger.considera_carga_adicional = 0
+        case = make_case(
+            make_nw_files(tmp_path, c_adic=tmp_path / "c_adic.dat"),
+            sistema=mock,
+            dger=dger,
+        )
+
+        with dx.collect() as collected:
+            df = convert_load_stats(case, _make_id_map_buses([1])).to_pydict()
+
+        mock_cadic_cls.read.assert_not_called()
+        assert df["mean_mw"][:2] == [pytest.approx(1000.0), pytest.approx(1000.0)]
+        assert [d.code for d in collected] == ["dger-switch-off"]
+        assert "c_adic.dat" in collected[0].title
+
 
 # ---------------------------------------------------------------------------
 # Helpers for convert_past_inflows tests

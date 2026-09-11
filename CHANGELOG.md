@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`dger.dat` switches are honoured.** `agrint.dat`, `c_adic.dat`,
+  `ghmin.dat`, `re.dat`, `restricao-eletrica.csv`, minimum outflow, and the
+  dated `TURBMAXT`/`TURBMINT` records of `modif.dat` are now left out when the
+  corresponding switch line (`AGRUPAMENTO LIVRE`, `CONS. CARGA ADICIONAL`,
+  `CONSIDERA GHMIN`, the two `RESTRICOES ELETRICAS` lines, `DESCONSIDERA
+  VAZMIN`, `REST. TURBINAMENTO`) turns them off, as NEWAVE leaves them out.
+  Each ignored input is reported by `check newave` and `convert newave` with an
+  informational `dger-switch-off` diagnostic; an absent switch line counts as
+  on, so decks without the line convert as before.
 - Internal package layout reorganised (`core/`, `cobre/`, `newave/`, `cli/`,
   `comparators/{newave,decomp}/`, `ui/html/`); no CLI or output change.
 - **Documentation overhaul for onboarding.** The README now walks the

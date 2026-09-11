@@ -46,6 +46,7 @@ from cobre_bridge.newave.converters.hydro import (
 from cobre_bridge.newave.converters.temporal import _month_hours
 from cobre_bridge.newave.id_map import NewaveIdMap
 from cobre_bridge.newave.plants import active_hydros
+from cobre_bridge.newave.switches import switch_off_diagnostic
 
 _LOG = logging.getLogger(__name__)
 
@@ -1349,9 +1350,15 @@ def convert_electric_constraints(
         single-sided (a ``<=`` ceiling or a ``>=`` floor, never both), so
         exactly one endpoint is populated per row.
     """
-    # Check for data sources before reading DGER.
+    switches = case.switches
     re_path = _find_restricao_eletrica(case.files.directory)
+    if re_path is not None and not switches.restricao_eletrica.on:
+        emit(switch_off_diagnostic(switches.restricao_eletrica), logger=_LOG)
+        re_path = None
     has_re_dat = case.files.re_dat is not None
+    if has_re_dat and not switches.re_dat.on:
+        emit(switch_off_diagnostic(switches.re_dat), logger=_LOG)
+        has_re_dat = False
 
     if re_path is None and not has_re_dat:
         _LOG.debug("No electric constraints found; skipping.")
@@ -1377,10 +1384,12 @@ def convert_electric_constraints(
     # Individualised period cutoff.
     cutoff = _get_individualizado_cutoff(case, start_year, start_month)
 
-    # Parse RE.DAT (post-individualised bounds + plant sets).
-    re_conjuntos, re_dat_bounds = _parse_re_dat(
-        case, start_year, start_month, num_stages, num_patamares
-    )
+    re_conjuntos: dict[int, list[int]] = {}
+    re_dat_bounds: dict[int, dict[tuple[int, int], float]] = {}
+    if has_re_dat:
+        re_conjuntos, re_dat_bounds = _parse_re_dat(
+            case, start_year, start_month, num_stages, num_patamares
+        )
 
     if not expressions and not re_conjuntos:
         _LOG.debug("No electric constraints found; skipping.")
@@ -1900,6 +1909,9 @@ def convert_agrint_constraints(
     """
     if case.files.agrint is None:
         _LOG.debug("agrint.dat not found; skipping AGRINT constraints.")
+        return None
+    if not case.switches.agrint.on:
+        emit(switch_off_diagnostic(case.switches.agrint), logger=_LOG)
         return None
 
     patamar_ag = case.patamar

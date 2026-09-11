@@ -58,6 +58,7 @@ from inewave.newave import (
 )
 
 from cobre_bridge.newave.files import NewaveFiles
+from cobre_bridge.newave.switches import DgerSwitches
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -224,6 +225,11 @@ class NewaveCase:
         ⇒ linear, the safe default for older cases without the field.
         """
         return self.dger.funcao_producao_uhe == 0
+
+    @cached_property
+    def switches(self) -> DgerSwitches:
+        """The ``dger.dat`` switches gating optional inputs (cached)."""
+        return DgerSwitches.from_dger(self.dger)
 
     @cached_property
     def horizon(self) -> StudyHorizon:

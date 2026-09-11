@@ -20,6 +20,15 @@ missing or unreadable makes `check` exit 2, and `convert` fails before writing
 anything. Run `check newave` first when a case comes from an unfamiliar
 source.
 
+Several optional inputs are also gated by a switch line in `dger.dat`, such
+as `CONSIDERA GHMIN` for `ghmin.dat`, `AGRUPAMENTO LIVRE` for `agrint.dat`,
+`CONS. CARGA ADICIONAL` for `c_adic.dat`, the two `RESTRICOES ELETRICAS`
+lines for `re.dat` and `restricao-eletrica.csv`, `DESCONSIDERA VAZMIN` for
+minimum outflow, and `REST. TURBINAMENTO` for the dated turbining records of
+`modif.dat`. A file that is present but switched off is ignored, as NEWAVE
+ignores it, and both `check newave` and `convert newave` say so with an
+informational diagnostic. A switch line absent from `dger.dat` counts as on.
+
 The field-by-field map from deck files to the converted case, including what
 the converter does not convert yet, is the [NEWAVE data map](newave-data-map.md)
 (in Portuguese).

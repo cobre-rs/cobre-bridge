@@ -41,6 +41,7 @@ _DERIVED: dict[str, dict[str, tuple[Token, ...]]] = {
         ),
         "horizon": (("dger", None),),
         "fpha_enabled": (("dger", None),),
+        "switches": (("dger", None),),
     },
     "decomp": {
         "id_map": (("dadger", "SB"), ("dadger", "CT"), ("dadger", "UH")),

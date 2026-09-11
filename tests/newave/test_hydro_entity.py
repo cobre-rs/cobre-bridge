@@ -47,6 +47,29 @@ class TestConvertHydros:
         result = convert_hydros(case, self._make_id_map())
         assert len(result["hydros"]) == 2
 
+    def test_min_outflow_switch_zeroes_every_plant(self, tmp_path) -> None:
+        """``DESCONSIDERA VAZMIN = 1`` writes no static outflow floor, as the
+        source model applies none, with one INFO diagnostic."""
+        from cobre_bridge.newave.converters.hydro import convert_hydros
+
+        cadastro = _make_hidr_cadastro()
+        cadastro["vazao_minima_historica"] = [30.0, 0.0]
+        on = _hydro_case(tmp_path, cadastro=cadastro)
+        floors = {
+            h["name"]: h["outflow"]["min_outflow_m3s"]
+            for h in convert_hydros(on, self._make_id_map())["hydros"]
+        }
+        assert max(floors.values()) == pytest.approx(30.0)
+
+        dger = _make_hydro_dger_mock()
+        dger.desconsidera_vazao_minima = 1
+        off = _hydro_case(tmp_path, cadastro=cadastro, dger=dger)
+        with dx.collect() as collected:
+            result = convert_hydros(off, self._make_id_map())
+        assert all(h["outflow"]["min_outflow_m3s"] == 0.0 for h in result["hydros"])
+        assert [d.code for d in collected] == ["dger-switch-off"]
+        assert collected[0].severity is Severity.INFO
+
     def test_hydro_ids_are_zero_based_and_sorted(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
         from cobre_bridge.newave.converters.hydro import convert_hydros

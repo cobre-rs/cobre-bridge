@@ -856,6 +856,35 @@ def _make_electric_re_case(tmp_path: Path) -> tuple[NewaveCase, NewaveIdMap]:
 
 
 class TestConvertElectricConstraints:
+    def test_switched_off_csv_is_ignored_and_reported(self, tmp_path: Path) -> None:
+        case, id_map = _make_electric_re_case(tmp_path)
+        case.dger.restricoes_eletricas_especiais = 0
+
+        with dx.collect() as collected:
+            assert convert_electric_constraints(case, id_map) is None
+
+        assert [d.code for d in collected] == ["dger-switch-off"]
+        assert "restricao-eletrica.csv" in collected[0].title
+
+    def test_switched_off_re_dat_is_ignored_and_reported(self, tmp_path: Path) -> None:
+        """With ``RESTRICOES ELETRICAS = 0`` a present re.dat is never parsed."""
+        from unittest.mock import MagicMock
+
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2020
+        dger.num_anos_estudo = 1
+        dger.num_anos_pos_estudo = 0
+        dger.restricoes_eletricas = 0
+        case = make_case(make_nw_files(tmp_path, re_dat=tmp_path / "re.dat"), dger=dger)
+        id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+
+        with dx.collect() as collected:
+            assert convert_electric_constraints(case, id_map) is None
+
+        assert [d.code for d in collected] == ["dger-switch-off"]
+        assert "re.dat" in collected[0].title
+
     def test_returns_none_when_no_indices_csv(self, tmp_path: Path) -> None:
         """Return None gracefully when indices.csv is absent."""
         case = make_case(tmp_path, re_dat=None)
@@ -1389,6 +1418,23 @@ class TestConvertAgrintConstraints:
         case = _make_minimal_case(tmp_path, agrint=None)
         id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
         assert convert_agrint_constraints(case, id_map) is None
+
+    def test_switched_off_agrint_is_ignored_and_reported(self, tmp_path: Path) -> None:
+        """``AGRUPAMENTO LIVRE = 0`` leaves a present agrint.dat out, as the
+        source model does, with one INFO diagnostic naming the switch."""
+        agrint_path = tmp_path / "agrint.dat"
+        agrint_path.write_text(_AGRINT_CONTENT, encoding="latin-1")
+        dger = _make_dger_mock_for_agrint()
+        dger.agrupamento_livre = 0
+        case = _make_minimal_case(tmp_path, agrint=agrint_path, dger=dger)
+        id_map = NewaveIdMap(subsystem_ids=[1, 3], hydro_codes=[], thermal_codes=[])
+
+        with dx.collect() as collected:
+            assert convert_agrint_constraints(case, id_map) is None
+
+        assert [d.code for d in collected] == ["dger-switch-off"]
+        assert collected[0].severity is Severity.INFO
+        assert "agrint.dat" in collected[0].title
 
     def test_produces_constraints_from_agrint_dat(self, tmp_path: Path) -> None:
         """Parses a minimal AGRINT file and produces one constraint per group."""

@@ -36,6 +36,7 @@ from cobre_bridge.newave.filling import stage_id as filling_stage_id
 from cobre_bridge.newave.horizon import build_stage_dates, historical_start_date
 from cobre_bridge.newave.id_map import NewaveIdMap
 from cobre_bridge.newave.plants import filling_hydro_codes
+from cobre_bridge.newave.switches import switch_off_diagnostic
 
 _LOG = logging.getLogger(__name__)
 
@@ -115,6 +116,10 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     ree_df = ree_file.rees  # columns: codigo, nome, submercado, ...
 
     cadastro = _apply_permanent_overrides(cadastro, case)
+
+    min_outflow_on = case.switches.min_outflow.on
+    if not min_outflow_on:
+        emit(switch_off_diagnostic(case.switches.min_outflow), logger=_LOG)
 
     # Seasonal reference volumes per plant — when present, fed back into the evaporation
     # block as ``reference_volumes_hm3`` so cobre's evaporation linearization matches
@@ -332,7 +337,9 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         # Minimum outflow from historical minimum (may have been overridden by MODIF).
         vazao_min_hist = hreg.get("vazao_minima_historica")
         vazao_min_hist_val = float(vazao_min_hist) if vazao_min_hist else 0.0
-        min_outflow = vazao_min_hist_val if vazao_min_hist_val > 0 else 0.0
+        min_outflow = (
+            vazao_min_hist_val if min_outflow_on and vazao_min_hist_val > 0 else 0.0
+        )
 
         # VAZMINT temporal overrides are now emitted as per-stage bounds in
         # hydro_bounds.parquet via convert_storage_bounds().  The static

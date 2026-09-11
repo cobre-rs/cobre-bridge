@@ -14,7 +14,7 @@ import json
 import sys
 import typing
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from rich.console import Console
@@ -134,6 +134,42 @@ class TestCheckNewaveJsonShape:
         # No Rich checklist leaked onto either stream under --json.
         assert "Ready with warnings" not in result.stdout
         assert result.stderr == ""
+
+
+class TestCheckNewaveSwitchAdvisoryJson:
+    def test_switch_off_advisory_reaches_the_json_envelope_as_info(
+        self, tmp_path: Path
+    ) -> None:
+        from cobre_bridge.newave.switches import DgerSwitches, switch_off_diagnostic
+
+        dger = MagicMock()
+        dger.considera_ghmin = 0
+        switch = DgerSwitches.from_dger(dger).ghmin
+        result_obj = PreflightResult(
+            verdict=PreflightVerdict.OK,
+            diagnostics=[switch_off_diagnostic(switch)],
+            checks=[
+                CheckItem(label="Required files present", passed=True),
+                CheckItem(
+                    label="dger.dat switches",
+                    passed=True,
+                    detail="1 present input(s) switched off",
+                ),
+            ],
+        )
+        with patch(
+            "cobre_bridge.newave.preflight.run_preflight", return_value=result_obj
+        ):
+            result = _invoke(["check", "newave", str(tmp_path / "case"), "--json"])
+
+        assert result.exit_code == 0
+        document = json.loads(result.stdout)
+        assert document["status"] == "ok"
+        assert document["summary"]["checks"][1]["label"] == "dger.dat switches"
+        diag = document["diagnostics"][0]
+        assert diag["code"] == "dger-switch-off"
+        assert diag["severity"] == "info"
+        assert "CONSIDERA GHMIN = 0" in diag["title"]
 
 
 class TestCheckNewaveNoColor:

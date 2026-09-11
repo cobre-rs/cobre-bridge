@@ -121,3 +121,81 @@ class TestOptionalInputAdvisory:
         files = make_nw_files(tmp_path, **_all_optionals_present(tmp_path))
 
         assert preflight.optional_input_advisory(files) == ([], [])
+
+
+class TestSwitchAdvisory:
+    def _switches(self, **values: int):
+        from unittest.mock import MagicMock
+
+        from cobre_bridge.newave.switches import DgerSwitches
+
+        dger = MagicMock()
+        for field, value in values.items():
+            setattr(dger, field, value)
+        return DgerSwitches.from_dger(dger)
+
+    def test_present_input_switched_off_yields_info_and_passing_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        files = make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat")
+        monkeypatch.setattr(
+            preflight,
+            "_read_switches",
+            lambda _files: self._switches(considera_ghmin=0),
+        )
+
+        checks, diagnostics = preflight._switch_advisory(files)
+
+        assert [c.label for c in checks] == ["dger.dat switches"]
+        assert (
+            checks[0].passed and checks[0].detail == "1 present input(s) switched off"
+        )
+        assert [d.code for d in diagnostics] == ["dger-switch-off"]
+        assert diagnostics[0].severity is Severity.INFO
+        assert "ghmin.dat" in diagnostics[0].title
+
+    def test_nothing_switched_off_yields_one_passing_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        files = make_nw_files(tmp_path, ghmin=tmp_path / "ghmin.dat")
+        monkeypatch.setattr(
+            preflight, "_read_switches", lambda _files: self._switches()
+        )
+
+        checks, diagnostics = preflight._switch_advisory(files)
+
+        assert diagnostics == []
+        assert checks[0].passed
+        assert checks[0].detail == "every present optional input is switched on"
+
+    def test_unreadable_dger_is_a_failed_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(_files):
+            raise ValueError("bad dger")
+
+        monkeypatch.setattr(preflight, "_read_switches", boom)
+
+        checks, diagnostics = preflight._switch_advisory(make_nw_files(tmp_path))
+
+        assert [c.label for c in checks] == ["dger.dat readable"]
+        assert not checks[0].passed
+        assert diagnostics and diagnostics[0].severity is Severity.ERROR
+
+    def test_run_preflight_stays_ok_with_a_switched_off_input(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An INFO advisory never turns the verdict."""
+        present = _all_optionals_present(tmp_path)
+        files = make_nw_files(tmp_path, **present)
+        monkeypatch.setattr(preflight.NewaveFiles, "from_directory", lambda _src: files)
+        monkeypatch.setattr(
+            preflight,
+            "_read_switches",
+            lambda _files: self._switches(agrupamento_livre=0),
+        )
+
+        result = run_preflight(tmp_path)
+
+        assert result.verdict is PreflightVerdict.OK
+        assert [d.code for d in result.diagnostics] == ["dger-switch-off"]

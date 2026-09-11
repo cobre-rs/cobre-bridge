@@ -19,10 +19,12 @@ import pyarrow as pa
 from inewave.newave import Cadic, Dger, Vazoes
 
 from cobre_bridge.cobre import schemas as cobre_schemas
+from cobre_bridge.core.diagnostics import emit
 from cobre_bridge.newave import plants
 from cobre_bridge.newave.case import NewaveCase
 from cobre_bridge.newave.horizon import POST_STUDY_YEAR, study_horizon
 from cobre_bridge.newave.id_map import NewaveIdMap
+from cobre_bridge.newave.switches import switch_off_diagnostic
 
 logger = logging.getLogger(__name__)
 
@@ -672,7 +674,9 @@ def convert_load_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
 
     # Load optional C_ADIC additions: {(sub_code, year_or_9999, cal_month) -> mw}.
     cadical_lookup: dict[tuple[int, int, int], float] = {}
-    if case.files.c_adic is not None:
+    if case.files.c_adic is not None and not case.switches.c_adic.on:
+        emit(switch_off_diagnostic(case.switches.c_adic), logger=logger)
+    elif case.files.c_adic is not None:
         try:
             cadical_lookup = parse_cadical(case.files.c_adic)
             logger.debug(

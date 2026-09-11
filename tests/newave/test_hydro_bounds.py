@@ -390,6 +390,8 @@ class TestConvertStorageBoundsPostStudy:
         vmint_flag=1,
         vol_min=0.0,
         vol_max=100.0,
+        ghmin_present=False,
+        **dger_flags,
     ):
         from cobre_bridge.newave.converters.hydro import convert_storage_bounds
 
@@ -402,6 +404,8 @@ class TestConvertStorageBoundsPostStudy:
         mock_dger.num_anos_pos_estudo = 1
         mock_dger.sazonaliza_vmaxt = vmaxt_flag
         mock_dger.sazonaliza_vmint = vmint_flag
+        for name, value in dger_flags.items():
+            setattr(mock_dger, name, value)
 
         confhd_df = pd.DataFrame(
             {
@@ -419,7 +423,11 @@ class TestConvertStorageBoundsPostStudy:
         id_map.hydro_id = lambda c: 0
 
         case = make_case(
-            make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
+            make_nw_files(
+                tmp_path,
+                modif=tmp_path / "modif.dat",
+                ghmin=(tmp_path / "ghmin.dat") if ghmin_present else None,
+            ),
             dger=mock_dger,
             confhd=mock_confhd,
         )
@@ -438,8 +446,7 @@ class TestConvertStorageBoundsPostStudy:
             ),
         ):
             tbl = convert_storage_bounds(case, id_map)
-        assert tbl is not None
-        return tbl.to_pandas().set_index("stage_id")
+        return None if tbl is None else tbl.to_pandas().set_index("stage_id")
 
     def test_outflow_freezes_post_study(self, tmp_path) -> None:
         """VAZMINT (no flag) freezes the post-study tail at last study Dec."""
@@ -490,6 +497,37 @@ class TestConvertStorageBoundsPostStudy:
         # Post-study frozen at Dec=80, NOT seasonal Jan=50.
         assert df.loc[12, "max_storage_hm3"] == pytest.approx(80.0)
         assert df.loc[23, "max_storage_hm3"] == pytest.approx(80.0)
+
+    def test_turbining_switch_drops_the_direction_it_excludes(self, tmp_path) -> None:
+        """``REST. TURBINAMENTO = 2`` keeps TURBMAXT and drops TURBMINT, with
+        one INFO diagnostic naming the dropped records."""
+        overrides = [
+            {"type": "TURBMAXT", "year": 2024, "month": 1, "value": 400.0},
+            {"type": "TURBMINT", "year": 2024, "month": 1, "value": 20.0},
+        ]
+        with dx.collect() as collected:
+            df = self._run(tmp_path, overrides, restricao_turbinamento=2)
+        assert df is not None
+        assert df.loc[0, "max_turbined_m3s"] == pytest.approx(400.0)
+        assert pd.isna(df.loc[0, "min_turbined_m3s"])
+        assert [d.code for d in collected] == ["dger-switch-off"]
+        assert "TURBMINT" in collected[0].title
+
+    def test_min_outflow_switch_drops_vazmint(self, tmp_path) -> None:
+        """``DESCONSIDERA VAZMIN = 1`` leaves no per-stage outflow floor."""
+        overrides = [{"type": "VAZMINT", "year": 2024, "month": 1, "value": 10.0}]
+        with dx.collect() as collected:
+            df = self._run(tmp_path, overrides, desconsidera_vazao_minima=1)
+        assert df is None
+        assert [d.code for d in collected] == ["dger-switch-off"]
+        assert "minimum outflow" in collected[0].title
+
+    def test_switched_off_ghmin_is_reported(self, tmp_path) -> None:
+        overrides = [{"type": "VAZMINT", "year": 2024, "month": 1, "value": 10.0}]
+        with dx.collect() as collected:
+            self._run(tmp_path, overrides, ghmin_present=True, considera_ghmin=0)
+        assert [d.code for d in collected] == ["dger-switch-off"]
+        assert "ghmin.dat" in collected[0].title
 
     def test_volume_unit_selects_hm3_or_percent_of_useful(self, tmp_path) -> None:
         """Unit ``h`` is absolute hm³; ``%`` (and no unit) is a share of the

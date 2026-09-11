@@ -30,6 +30,11 @@ from cobre_bridge.core.preflight import (
     optional_input_advisory,
 )
 from cobre_bridge.newave.files import NewaveFiles
+from cobre_bridge.newave.switches import (
+    DgerSwitches,
+    switch_off_diagnostic,
+    switched_off_inputs,
+)
 
 _DISCOVERY_LABEL = "File discovery (caso.dat → arquivos.dat)"
 _PREFLIGHT_CONTEXT = "Preflight"
@@ -101,12 +106,55 @@ def run_preflight(src: Path) -> PreflightResult:
     checks.extend(optional_checks)
     diagnostics.extend(optional_diags)
 
+    switch_checks, switch_diags = _switch_advisory(files)
+    checks.extend(switch_checks)
+    diagnostics.extend(switch_diags)
+
     checks.extend(_structural_checks(src, files))
 
     return PreflightResult(
         verdict=_verdict_from(checks, diagnostics),
         diagnostics=diagnostics,
         checks=checks,
+    )
+
+
+def _read_switches(files: NewaveFiles) -> DgerSwitches:
+    """Parse ``dger.dat`` for its switches; the one content read preflight does."""
+    from cobre_bridge.newave.case import NewaveCase
+
+    return NewaveCase(files=files).switches
+
+
+def _switch_advisory(
+    files: NewaveFiles,
+) -> tuple[list[CheckItem], list[Diagnostic]]:
+    """INFO advisory per optional input that is present but switched off in
+    ``dger.dat``; a ``dger.dat`` that does not parse is a failed check."""
+    from cobre_bridge.newave.converters.constraints import _find_restricao_eletrica
+
+    try:
+        switches = _read_switches(files)
+    except Exception as exc:  # noqa: BLE001
+        # Any parse failure means the conversion would fail on the same read.
+        return (
+            [CheckItem(label="dger.dat readable", passed=False, detail=str(exc))],
+            [diagnostic_from_exception(exc, context=_PREFLIGHT_CONTEXT)],
+        )
+    off = switched_off_inputs(
+        files,
+        switches,
+        restricao_eletrica_present=_find_restricao_eletrica(files.directory)
+        is not None,
+    )
+    detail = (
+        f"{len(off)} present input(s) switched off"
+        if off
+        else "every present optional input is switched on"
+    )
+    return (
+        [CheckItem(label="dger.dat switches", passed=True, detail=detail)],
+        [switch_off_diagnostic(switch) for switch in off],
     )
 
 

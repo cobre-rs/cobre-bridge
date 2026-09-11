@@ -1479,6 +1479,7 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (existentes
   [[output.field]]
   path = "hydros[].outflow.min_outflow_m3s"
   from = [
+    { file = "dger", item = "desconsidera_vazao_minima" },
     { file = "hidr", item = "vazao_minima_historica" },
     { file = "modif", item = "VAZMIN · vazao" },
   ]
@@ -2205,6 +2206,7 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
   [[output.field]]
   path = "min_turbined_m3s"
   from = [
+    { file = "dger", item = "restricao_turbinamento" },
     { file = "modif", item = "TURBMINT · turbinamento" },
     { file = "modif", item = "TURBMINT · data_inicio" },
   ]
@@ -2213,6 +2215,7 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
   [[output.field]]
   path = "max_turbined_m3s"
   from = [
+    { file = "dger", item = "restricao_turbinamento" },
     { file = "modif", item = "TURBMAXT · turbinamento" },
     { file = "modif", item = "TURBMAXT · data_inicio" },
     { file = "modif", item = "CFUGA · nivel" },
@@ -2237,6 +2240,7 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
   [[output.field]]
   path = "min_outflow_m3s"
   from = [
+    { file = "dger", item = "desconsidera_vazao_minima" },
     { file = "modif", item = "VAZMINT · vazao" },
     { file = "modif", item = "VAZMINT · data_inicio" },
   ]
@@ -2245,6 +2249,7 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
   [[output.field]]
   path = "min_generation_mw"
   from = [
+    { file = "dger", item = "considera_ghmin" },
     { file = "ghmin", item = "codigo_usina" },
     { file = "ghmin", item = "data" },
     { file = "ghmin", item = "patamar" },
@@ -2409,6 +2414,7 @@ summary = "Mercado de energia por submercado e estágio (MWmédio) de `sistema.d
   [[output.field]]
   path = "mean_mw"
   from = [
+    { file = "dger", item = "considera_carga_adicional" },
     { file = "sistema", item = "mercado_energia · valor" },
     { file = "sistema", item = "mercado_energia · data" },
     { file = "c_adic", item = "valor" },
@@ -2580,7 +2586,7 @@ summary = "Disponibilidade da geração não simulada por bloco e estágio, como
 [[output]]
 path = "constraints/generic_constraints.json"
 kind = "json"
-when = "somente quando alguma família gera restrições: curva de segurança (`curva.dat` presente, `curva_aversao` de `dger.dat` diferente de 0 e ao menos um REE com reservatório de regularização mensal com volume útil), restrições elétricas (`restricao-eletrica.csv` apontado por `indices.csv`, ou `re.dat`, com ao menos um limite válido) ou agrupamentos de intercâmbio (`agrint.dat` com grupos e limites)"
+when = "somente quando alguma família gera restrições: curva de segurança (`curva.dat` presente, `curva_aversao` de `dger.dat` diferente de 0 e ao menos um REE com reservatório de regularização mensal com volume útil), restrições elétricas (`restricao-eletrica.csv` apontado por `indices.csv`, ou `re.dat`, com ao menos um limite válido) ou agrupamentos de intercâmbio (`agrint.dat` com grupos e limites); cada família só é lida se o flag correspondente de `dger.dat` estiver ligado (`agrupamento_livre`, `restricoes_eletricas`, `restricoes_eletricas_especiais`)"
 module = "src/cobre_bridge/newave/converters/constraints.py"
 reads = [
   { file = "curva" },
@@ -2636,6 +2642,7 @@ summary = "Restrições genéricas de três famílias concatenadas nesta ordem: 
   [[output.field]]
   path = "constraints[].expression"
   from = [
+    { file = "dger", item = "agrupamento_livre · restricoes_eletricas · restricoes_eletricas_especiais" },
     { file = "confhd", item = "ree" },
     { file = "confhd", item = "codigo_usina" },
     { file = "hidr", item = "tipo_regulacao" },
@@ -2893,9 +2900,9 @@ note = "O bridge lê cerca de trinta campos (horizonte, aberturas, forwards, ite
   note = "O Cobre estima o PAR(p) a partir de `scenarios/inflow_history.parquet` com sua própria seleção de ordem (`estimation.order_selection`); só `ordem_maxima_parp`, `consideracao_media_anual_afluencias`, `num_series_sinteticas` e `considera_reamostragem_cenarios` são espelhados. A tendência hidrológica é sempre emitida (`recent_observations`) quando `vazpast.dat` existe, sem consultar os flags."
 
   [[source.item]]
-  item = "flags de ativação de arquivos e restrições (considera_ghmin, considera_carga_adicional, agrupamento_livre, restricoes_eletricas, restricoes_eletricas_especiais, desconsidera_vazao_minima, restricao_defluencia, restricao_turbinamento, restricao_itaipu, restricoes_rhq, restricoes_rhv, restricao_lpp_*, restricoes_emissao_gee, restricoes_fornecimento_gas, sar, bid, modif_automatica_adterm, sazonaliza_vminp, canal_desvio, correcao_desvio)"
+  item = "flags de recursos não convertidos (restricao_defluencia, restricao_itaipu, restricoes_rhq, restricoes_rhv, restricao_lpp_*, restricoes_emissao_gee, restricoes_fornecimento_gas, sar, bid, modif_automatica_adterm, sazonaliza_vminp, canal_desvio, correcao_desvio)"
   status = "unread"
-  note = "O bridge converte `ghmin.dat`, `c_adic.dat`, `agrint.dat`, `re.dat`/`restricao-eletrica.csv` e as vazões mínimas de `modif.dat` sempre que o arquivo existe, sem consultar o flag correspondente; um deck com o flag desligado e o arquivo presente diverge. Só `outros_usos_da_agua` (dsvagua), `curva_aversao` (curva), `cvar` e `despacho_antecipado_gnl` (adterm) são honrados."
+  note = "Ativam recursos que o conversor não converte (vazão máxima `VAZMAXT`, RHQ/RHV, LPP, SAR, GEE, gás, canal de desvio, ADTERM automático), logo não há o que ligar ou desligar. Os flags de `ghmin.dat`, `c_adic.dat`, `agrint.dat`, `re.dat`, `restricao-eletrica.csv`, vazão mínima e turbinamento são honrados: um arquivo presente com o flag desligado é ignorado e reportado (diagnóstico `dger-switch-off`); linha ausente conta como ligada."
 
   [[source.item]]
   item = "operação e penalidades internas (perdas_rede_transmissao, considera_geracao_eolica, penalidade_corte_geracao_eolica, estacoes_bombeamento, representacao_submotorizacao, calcula_volume_inicial, volume_inicial_subsistema, ordenacao_automatica, calcula_prodt_media_sin, racionamento_preventivo, primeira_profundidade_risco_deficit, segunda_profundidade_risco_deficit, equalizacao_penal_intercambio)"

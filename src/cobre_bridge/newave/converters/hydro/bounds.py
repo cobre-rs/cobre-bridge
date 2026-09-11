@@ -44,6 +44,7 @@ from cobre_bridge.newave.filling import stage_id as filling_stage_id
 from cobre_bridge.newave.horizon import seasonal_step_function
 from cobre_bridge.newave.id_map import NewaveIdMap
 from cobre_bridge.newave.plants import fictitious_codes, filling_hydro_codes
+from cobre_bridge.newave.switches import DgerSwitches, switch_off_diagnostic
 
 _LOG = logging.getLogger(__name__)
 
@@ -633,6 +634,35 @@ def convert_water_withdrawal(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table 
     return table.sort_by([("hydro_id", "ascending"), ("stage_id", "ascending")])
 
 
+_RECORD_SWITCH = {
+    "TURBMAXT": "turbined_max",
+    "TURBMINT": "turbined_min",
+    "VAZMINT": "min_outflow",
+}
+
+
+def _drop_switched_off_records(
+    overrides: dict[int, list[dict]], switches: DgerSwitches
+) -> dict[int, list[dict]]:
+    """MODIF.DAT dated records whose ``dger.dat`` switch is off, removed and
+    reported once per record type."""
+    dropped: set[str] = set()
+    kept: dict[int, list[dict]] = {}
+    for code, records in overrides.items():
+        survivors = []
+        for record in records:
+            name = _RECORD_SWITCH.get(record["type"])
+            if name is not None and not getattr(switches, name).on:
+                dropped.add(name)
+                continue
+            survivors.append(record)
+        if survivors:
+            kept[code] = survivors
+    for name in sorted(dropped):
+        emit(switch_off_diagnostic(getattr(switches, name)), logger=_LOG)
+    return kept
+
+
 def convert_storage_bounds(
     case: NewaveCase,
     id_map: NewaveIdMap,
@@ -688,10 +718,13 @@ def convert_storage_bounds(
     # Extract temporal overrides — empty dict when MODIF.DAT is absent,
     # which is fine because GHMIN.DAT alone can still produce per-stage
     # rows.
+    switches = case.switches
     if case.files.modif is None:
         temporal_overrides: dict[int, list[dict]] = {}
     else:
-        temporal_overrides = _extract_temporal_overrides(case, confhd_codes)
+        temporal_overrides = _drop_switched_off_records(
+            _extract_temporal_overrides(case, confhd_codes), switches
+        )
 
     def _build_step_function(
         recs: list[dict],
@@ -715,9 +748,13 @@ def convert_storage_bounds(
     # GHMIN.DAT per-stage minimums.  These are not MODIF.DAT overrides
     # but live alongside them at the per-(hydro, stage) granularity, so
     # they merge naturally into this parquet's row set.
-    ghmin_by_plant_stage = _read_ghmin_per_stage(
-        case, start_year, start_month, study_months, total_stages
-    )
+    ghmin_by_plant_stage: dict[int, dict[int, float]] = {}
+    if case.files.ghmin is not None and not switches.ghmin.on:
+        emit(switch_off_diagnostic(switches.ghmin), logger=_LOG)
+    else:
+        ghmin_by_plant_stage = _read_ghmin_per_stage(
+            case, start_year, start_month, study_months, total_stages
+        )
 
     hydro_ids: list[int] = []
     stage_ids: list[int] = []
