@@ -13,8 +13,7 @@ the ``_StubDadger``/``_ri`` fixtures in
 ``test_libs_electrical.py``). These exercise the functions
 ``pipeline.py`` orchestrates with exactly the arguments it computes for
 each of Itaipu's three deck shapes (with ``RI``, without ``RI``, no Itaipu
-at all); a full ``convert_decomp_case`` run is out of scope here
-(tier 3 integration).
+at all); a full ``convert_decomp_case`` run is out of scope here.
 """
 
 from __future__ import annotations

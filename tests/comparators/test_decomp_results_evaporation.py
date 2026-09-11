@@ -1,12 +1,9 @@
 """Evaporation comparison tests for ``comparators.decomp.results``.
 
-Third carve out of the legacy ``test_decomp_results_compare.py`` mega file:
-hm³ -> m³/s stage-hours conversion, Cobre stage-hours lookup, the
+Covers hm³ -> m³/s stage-hours conversion, Cobre stage-hours lookup, the
 source-model evaporated-volume side, the full evaporation result-comparison
 reconciliation, and the Hydro Plant Detail tab's ``evaporation_m3s`` rows in
-``build_decomp_dataset``. The remaining classes (report_builder/verdict/CLI
-cross-module tests and the tier-3 ``*E2E`` classes) stay in the mega file
-pending their own routing and removal.
+``build_decomp_dataset``.
 """
 
 from __future__ import annotations

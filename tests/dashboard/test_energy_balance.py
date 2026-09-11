@@ -7,16 +7,13 @@ render() path using MagicMock data following the pattern in test_v2_overview.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
-import pytest
 
 import cobre_bridge.dashboard.tabs.energy_balance as energy_balance_mod
-from cobre_bridge.dashboard.data import DashboardData
 from cobre_bridge.dashboard.tabs.energy_balance import (
     _block_weighted_avg_rate,
     _build_hero_data,
@@ -31,10 +28,6 @@ from cobre_bridge.dashboard.tabs.energy_balance import (
     can_render,
     render,
 )
-
-# Dev-only tier-3 fixture (skipif-guarded below); never imported at module
-# scope, never inlined in the decorator.
-_DECK = Path("example/cobre-mar-26-rv2-reduced")
 
 # ---------------------------------------------------------------------------
 # Helpers / data factories
@@ -1018,25 +1011,3 @@ def test_build_hero_section_html() -> None:
     assert 'value="p50"' in html
     assert 'value="p90"' in html
     assert 'value="all"' in html
-
-
-# ---------------------------------------------------------------------------
-# test__build_metrics_row — real-deck spillage pin (tier 3, dev-only)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skipif(not _DECK.exists(), reason=f"real deck not present: {_DECK}")
-def test_block_weighted_avg_rate_spillage_pinned_on_reduced_deck() -> None:
-    """Pins the block-hours-weighted system-total spillage rate on the real deck.
-
-    Guards the row-count-inflation regression: summing spillage_m3s over
-    every (hydro, stage, block) row without block-hours weighting inflates
-    the result by the per-scenario row count (2016x on this deck) instead of
-    producing the time-weighted system-total rate.
-    """
-    data = DashboardData.load(_DECK)
-    result = _block_weighted_avg_rate(data.hydros_lf, "spillage_m3s", data.bh_df)
-    assert result == pytest.approx(59_001.5, abs=0.1)
-
-    html = _build_metrics_row(data)
-    assert "59,001.5" in html

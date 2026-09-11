@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `convert decomp --help` no longer describes the exchange network,
   renewables, and GNL anticipation as deferred; all three are converted.
 
+### Removed
+
+- **The real-deck test tier.** Forty-six tests skipped unless real decks were
+  present under the gitignored `example/` tree (some also needed a locally
+  built cobre binary at a fixed home-directory path), so they ran on one
+  machine at best and never in CI. They are removed and catalogued, with what
+  each verified and what it needs, in `docs/real-deck-checks.md`;
+  `tests/test_local_data_policy.py` now fails the build on any test that
+  reaches outside the repository. Small real-format excerpts under
+  `tests/fixtures/` replace the checks that only needed one, and the contract
+  tests read cobre's schema and example case from vendored copies instead of a
+  sibling checkout.
+
 ## [0.15.0] - 2026-08-24
 
 Pairs the bridge with the **cobre 0.15.0** release: the `cobre-python` pin and

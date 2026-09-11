@@ -1,11 +1,7 @@
 """Productivity tab tests for ``comparators.decomp.results``.
 
-Third carve out of the legacy ``test_decomp_results_compare.py`` mega file:
-per-(plant, stage) realized productivity derivation and the
-Productivity tab's realized-per-stage half of ``build_decomp_dataset``. The
-remaining classes (report_builder/verdict/CLI cross-module tests and the
-tier-3 ``*E2E`` classes) stay in the mega file pending their own routing and
-removal.
+Covers per-(plant, stage) realized productivity derivation and the
+Productivity tab's realized-per-stage half of ``build_decomp_dataset``.
 """
 
 from __future__ import annotations

@@ -1,12 +1,8 @@
 """REE energy rollup tests for ``comparators.decomp.results``.
 
-Third carve out of the legacy ``test_decomp_results_compare.py`` mega file:
-the REE membership map, Cobre-side and DECOMP-side per-REE
+Covers the REE membership map, Cobre-side and DECOMP-side per-REE
 ENA/EARM sums, the full REE result-comparison rollup, the Balance tab's REE
-rows in ``build_decomp_dataset``, and the REE energy chart. The remaining
-classes (report_builder/verdict/CLI cross-module tests and the tier-3
-``*E2E`` classes) stay in the mega file pending their own routing and
-removal.
+rows in ``build_decomp_dataset``, and the REE energy chart.
 """
 
 from __future__ import annotations

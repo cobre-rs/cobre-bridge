@@ -10,7 +10,6 @@ import pyarrow as pa
 import pytest
 
 from cobre_bridge.newave.case import NewaveCase
-from cobre_bridge.newave.horizon import StudyHorizon
 from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case
 from tests.newave.conftest import _make_sistema_mock
@@ -345,38 +344,14 @@ class TestConvertLineBounds:
 
 
 # ---------------------------------------------------------------------------
-# line_bounds migration fidelity + zero-capability.
+# line_bounds zero-capability.
 #
 # The synthetic shape tests above (``TestConvertLineBounds``) pin the folding
-# mechanics on a small hand-built fixture. These tests pin the two claims
-# they exist to prove: (1) on a real deck, every per-block row equals
-# ``base_direct_mw x direct_factor`` recomputed independently from
-# ``sistema.dat``/``patamar.dat`` -- never by reading back
-# ``convert_line_bounds``'s own ``date_lookup``/``direct_factor_map`` state --
-# and (2) a synthetic zero block factor -- unrepresentable in the deleted
-# strictly-positive-factor encoding -- now converts to an ordinary
+# mechanics on a small hand-built fixture. This class pins one more claim: a
+# synthetic zero block factor -- unrepresentable in the deleted
+# strictly-positive-factor encoding -- converts to an ordinary
 # ``direct_mw == 0.0`` bound without raising.
 # ---------------------------------------------------------------------------
-
-_NEWAVE_LINE_BOUNDS_DECK = Path("example/newave_rodada")
-
-
-def _newave_canonical_line_pairs(
-    limites_df: pd.DataFrame,
-) -> dict[int, tuple[int, int]]:
-    """Independent line_id -> canonical (src, tgt) map: sorted pairs.
-
-    Mirrors the deterministic ID-assignment convention documented for
-    ``convert_lines``/``convert_line_bounds`` -- ID assignment is not the
-    base x factor arithmetic under test here, just how a line's identity is
-    derived from its pair, and is built fresh from the raw ``sistema.dat``
-    rows rather than by importing the converter's private helper.
-    """
-    pairs: set[tuple[int, int]] = set()
-    for _, row in limites_df.iterrows():
-        de, para = int(row["submercado_de"]), int(row["submercado_para"])
-        pairs.add((de, para) if de < para else (para, de))
-    return dict(enumerate(sorted(pairs)))
 
 
 def _newave_raw_factor_tables(
@@ -454,127 +429,6 @@ def _newave_expected_factor(
     if exact is not None:
         return exact
     return latest_by_month.get((src, tgt, month, block_id), 1.0)
-
-
-class TestConvertLineBoundsRealDeckFidelity:
-    """Every per-block row on a real
-    deck matches an independently recomputed ``base x factor`` to 1e-9
-    relative, and the per-block row count is asserted (not just the
-    values) against the count of genuinely differing combinations.
-
-    ``example/`` is local-only and gitignored (see ``example/README.md``),
-    so both tests skip cleanly when the deck is absent (CI).
-    """
-
-    def _load(
-        self,
-    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, StudyHorizon]:
-        if not _NEWAVE_LINE_BOUNDS_DECK.exists():
-            pytest.skip("real deck not present")
-        from cobre_bridge.newave.converters.network import convert_line_bounds
-
-        case = NewaveCase.from_directory(_NEWAVE_LINE_BOUNDS_DECK)
-        # convert_line_bounds never consults id_map (verified: no
-        # `id_map.` reference in its body) -- an empty placeholder satisfies
-        # the signature without parsing hidr/confhd/conft/ree for this case.
-        table = convert_line_bounds(
-            case, NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
-        )
-        return (
-            table.to_pandas(),
-            case.sistema.limites_intercambio,
-            case.patamar.intercambio_patamares,
-            case.horizon,
-        )
-
-    def _expected_factors(
-        self,
-        limites_df: pd.DataFrame,
-        factors_df: pd.DataFrame,
-        horizon: StudyHorizon,
-    ) -> dict[tuple[int, int, int], tuple[float, float]]:
-        from cobre_bridge.newave.horizon import build_stage_dates
-
-        pair_by_line_id = _newave_canonical_line_pairs(limites_df)
-        raw_direct, raw_reverse, latest_direct, latest_reverse = (
-            _newave_raw_factor_tables(factors_df)
-        )
-        num_blocks = int(factors_df["patamar"].max())
-        stage_dates = build_stage_dates(
-            horizon.start_year, horizon.start_month, horizon.total_stages
-        )
-
-        expected: dict[tuple[int, int, int], tuple[float, float]] = {}
-        for line_id, (src, tgt) in pair_by_line_id.items():
-            for stage_id in range(horizon.total_stages):
-                stage_date = stage_dates[stage_id]
-                is_post = horizon.is_post_study(stage_id)
-                for block_id in range(num_blocks):
-                    d_factor = _newave_expected_factor(
-                        raw_direct,
-                        latest_direct,
-                        src,
-                        tgt,
-                        stage_date.year,
-                        stage_date.month,
-                        block_id,
-                        is_post_study=is_post,
-                    )
-                    r_factor = _newave_expected_factor(
-                        raw_reverse,
-                        latest_reverse,
-                        src,
-                        tgt,
-                        stage_date.year,
-                        stage_date.month,
-                        block_id,
-                        is_post_study=is_post,
-                    )
-                    expected[(line_id, stage_id, block_id)] = (d_factor, r_factor)
-        return expected
-
-    def test_every_block_row_matches_independently_recomputed_factor(
-        self,
-    ) -> None:
-        df, limites_df, factors_df, horizon = self._load()
-        expected = self._expected_factors(limites_df, factors_df, horizon)
-
-        base_by_line_stage = {
-            (int(r.line_id), int(r.stage_id)): (r.direct_mw, r.reverse_mw)
-            for r in df[df["block_id"].isna()].itertuples()
-        }
-        block_rows = df[df["block_id"].notna()]
-        assert len(block_rows) > 0, (
-            "the real deck must exercise at least one differing block for "
-            "this fidelity check to be meaningful"
-        )
-        for r in block_rows.itertuples():
-            key = (int(r.line_id), int(r.stage_id), int(r.block_id))
-            d_factor, r_factor = expected[key]
-            base_direct, base_reverse = base_by_line_stage[key[:2]]
-            assert r.direct_mw == pytest.approx(base_direct * d_factor, rel=1e-9)
-            assert r.reverse_mw == pytest.approx(base_reverse * r_factor, rel=1e-9)
-
-    def test_block_row_count_matches_differing_combinations(self) -> None:
-        df, limites_df, factors_df, horizon = self._load()
-        expected = self._expected_factors(limites_df, factors_df, horizon)
-
-        expected_keys = {
-            key
-            for key, (d_factor, r_factor) in expected.items()
-            if d_factor != 1.0 or r_factor != 1.0
-        }
-        block_rows = df[df["block_id"].notna()]
-        emitted_keys = {
-            (int(r.line_id), int(r.stage_id), int(r.block_id))
-            for r in block_rows.itertuples()
-        }
-        assert expected_keys, (
-            "the real deck must exercise at least one differing block for "
-            "this row-count guard to be meaningful"
-        )
-        assert len(block_rows) == len(expected_keys)
-        assert emitted_keys == expected_keys
 
 
 class TestConvertLineBoundsZeroCapability:

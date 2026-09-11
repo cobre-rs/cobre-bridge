@@ -1,21 +1,15 @@
 """The LIBs-era electrical-constraint emitter spliced into
 ``convert_decomp_case`` -- discovery of the deck's ``lib_restricao-eletrica-
-especial.csv`` file, the narrowed ``detect_libs_electrical`` warn, the
-census INFO diagnostic, and the end-to-end ``cobre validate`` smoke.
+especial.csv`` file, the narrowed ``detect_libs_electrical`` warn, and the
+census INFO diagnostic.
 
-Tier 1 (the bulk of this module): synthetic stub decks only, mirroring the
-``test_pipeline`` module's own ``_run_cadastro_pipeline`` convention
--- no ``example/`` read, no ``import cobre`` at module scope.
-
-Tier 3 (the tail of this module, ``TestRealDeckValidation``): the real
-``example/decomp-abr-26-lpp`` deck converted and validated against the local
-``cobre`` binary, guarded exactly like the ``test_fcf_roundtrip`` module.
+Synthetic stub decks only, mirroring the ``test_pipeline`` module's own
+``_run_cadastro_pipeline`` convention -- no ``import cobre`` at module scope.
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
 from contextlib import ExitStack
 from datetime import date
 from pathlib import Path
@@ -24,7 +18,6 @@ from unittest.mock import patch
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 from cobre_bridge.core import diagnostics as dx
 from cobre_bridge.decomp.bounds_accumulator import BoundContribution
@@ -393,7 +386,7 @@ def _run_libs_pipeline(
     patching every converter not under test to a canned return
     value -- mirrors the ``test_pipeline`` module's
     ``_run_cadastro_pipeline`` (duplicated rather than imported, per this
-    codebase's own convention of copying a tier-1/tier-3 fixture verbatim
+    codebase's own convention of copying a fixture verbatim
     across test modules).
 
     *libs_restricao_eletrica*/*libs_electrical_model* control
@@ -643,66 +636,3 @@ class TestLibsElectricalPipelineWiring:
         assert counts["unresolved-bucket-bc"] == 0
 
         assert "decomp-libs-electrical-present" not in {d.code for d in diagnostics_out}
-
-
-# ---------------------------------------------------------------------------
-# Tier 3: the real deck + the local cobre binary, guarded exactly like
-# the fcf-roundtrip tests.
-# ---------------------------------------------------------------------------
-
-_DECK = Path("example/decomp-abr-26-lpp")
-_COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
-_HAS_E2E_DEPS = _COBRE_BIN.exists() and (_DECK / "caso.dat").exists()
-_skip_e2e = pytest.mark.skipif(
-    not _HAS_E2E_DEPS,
-    reason=f"requires the local cobre binary ({_COBRE_BIN}) and the {_DECK} deck",
-)
-
-
-class TestRealDeckValidation:
-    @_skip_e2e
-    def test_abr_26_lpp_converts_and_validates_with_libs_electrical_generics(
-        self, tmp_path: Path
-    ) -> None:
-        """Converting the real deck emits >= 1 ``LIBS_ELEC_*`` generic
-        constraint with matching rows in
-        ``generic_constraint_bounds.parquet``, and ``cobre validate`` on the
-        converted case exits 0.
-
-        ``cobre validate`` is a load/schema gate, not a solve -- it does NOT
-        prove LP feasibility. ``carga_ande`` nets onto Itaipu's own SE bus
-        (not the ``IV`` transshipment bus, which carries no load), so an
-        ANDE shortfall is absorbed by SE's own deficit curve rather than
-        risking an infeasibility on a bus with none."""
-        from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-        dst = tmp_path / "decomp-abr-26-lpp-converted"
-        convert_decomp_case(_DECK, dst, force=True)
-
-        generics_path = dst / "constraints" / "generic_constraints.json"
-        assert generics_path.is_file()
-        doc = json.loads(generics_path.read_text())
-        libs_constraints = [
-            c for c in doc["constraints"] if c["name"].startswith("LIBS_ELEC_")
-        ]
-        assert len(libs_constraints) >= 1, "expected >= 1 LIBS_ELEC_* constraint"
-
-        bounds_table = pq.read_table(
-            dst / "constraints" / "generic_constraint_bounds.parquet"
-        )
-        libs_ids = {c["id"] for c in libs_constraints}
-        libs_rows = [
-            row for row in bounds_table.to_pylist() if row["constraint_id"] in libs_ids
-        ]
-        assert libs_rows, "expected matching generic_constraint_bounds.parquet rows"
-
-        result = subprocess.run(
-            [str(_COBRE_BIN), "validate", str(dst)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        assert result.returncode == 0, (
-            f"cobre validate failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\nstderr: {result.stderr}"
-        )

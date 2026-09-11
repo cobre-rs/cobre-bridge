@@ -19,7 +19,7 @@ adds only what an agent working in this checkout needs beyond them.
 
 ```bash
 pip install -e ".[dev]"                      # or: uv sync --extra dev
-pytest                                       # suite; tier-3 tests skip without local decks
+pytest                                       # suite; tier-2 tests skip without cobre-python
 ruff check . && ruff format --check .        # whole tree, as CI and the pre-commit hook run it
 python3 scripts/ci/check_no_plan_leaks.py    # hard gates, also run by CI
 python3 scripts/ci/check_comment_refs.py
@@ -64,13 +64,13 @@ Hard rules that are fixed before any commit:
 ## Local decks
 
 `example/` is gitignored. It holds real NEWAVE and DECOMP decks and their
-converted-and-solved Cobre cases for manual checks and tier-3 tests; nothing
-in CI reads it, a tier-3 test whose deck is absent skips, and
-`tests/test_deck_inventory.py` audits that every `example/` reference is
-guarded and names no retired deck. `tests/decks/` holds the committed synthetic
-mini-decks CI-tier end-to-end tests use. When exercising a real deck, convert
-into a fresh directory and run cobre before comparing so an existing run's
-`output/` is not clobbered.
+converted-and-solved Cobre cases for manual runs only. No test reads it and no
+test reaches outside the repository (`tests/test_local_data_policy.py`
+enforces both); real-format inputs are committed as small excerpts under
+`tests/fixtures/` and synthetic mini-decks under `tests/decks/`. End-to-end
+checks that need a whole real deck are catalogued in `docs/real-deck-checks.md`.
+When exercising a real deck by hand, convert into a fresh directory and run
+cobre before comparing so an existing run's `output/` is not clobbered.
 
 A local cobre checkout, when present, is the reference for the input contract
 (serde structs and schemas); a bridge release `X.Y.Z` pairs with cobre

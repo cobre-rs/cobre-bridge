@@ -1,13 +1,12 @@
-"""Tier-1 tests for the bucket-A -> cobre token map and the
+"""Tests for the bucket-A -> cobre token map and the
 E1-E7 ``GenericConstraintBuilder`` emit pipeline.
 
-Synthetic-fixture only, mirroring the ``test_libs_electrical`` module's own
-convention: no ``example/`` read, no ``import cobre`` at module scope.
+Synthetic fixtures only, mirroring the ``test_libs_electrical`` module's own
+convention: no ``import cobre`` at module scope.
 """
 
 from __future__ import annotations
 
-import subprocess
 from collections.abc import Callable, Mapping
 from datetime import date
 from pathlib import Path
@@ -982,58 +981,3 @@ def test_emit_malformed_activation_rule_propagates_value_error() -> None:
         )
 
     assert not isinstance(exc_info.value, UnrecognizedElectricalToken)
-
-
-# ---------------------------------------------------------------------------
-# Tier 3: the real deck + the local cobre binary, guarded exactly like
-# the fcf-roundtrip tests.
-# ---------------------------------------------------------------------------
-
-_DECK = Path("example/decomp-abr-26-lpp")
-_COBRE_BIN = Path.home() / "git" / "cobre" / "target" / "release" / "cobre"
-_HAS_E2E_DEPS = _COBRE_BIN.exists() and (_DECK / "caso.dat").exists()
-_skip_e2e = pytest.mark.skipif(
-    not _HAS_E2E_DEPS,
-    reason=f"requires the local cobre binary ({_COBRE_BIN}) and the {_DECK} deck",
-)
-
-#: Baseline ``unresolved-bucket-a`` count on this deck, measured by reverting
-#: the ``_resolve_interc_bus`` fix and reconverting: 20 (of which 10 are the
-#: IV-transshipment ``ener_interc`` restrictions the fix now resolves). Pinned
-#: here so the test proves the fix's DIRECTION on the real deck without
-#: re-running the pre-fix code path inside the test itself.
-_PRE_TICKET_018_UNRESOLVED_BUCKET_A = 20
-
-
-@_skip_e2e
-def test_abr_26_lpp_ener_interc_transshipment_resolves_and_validates(
-    tmp_path: Path,
-) -> None:
-    """Converting the real deck now resolves the IV-transshipment
-    ``ener_interc`` operands via ``_resolve_interc_bus``, so
-    ``deferred["unresolved-bucket-a"]`` strictly decreases versus the
-    baseline, and ``cobre validate`` on the converted case still exits 0."""
-    from cobre_bridge.decomp.pipeline import convert_decomp_case
-
-    dst = tmp_path / "decomp-abr-26-lpp-converted"
-    report = convert_decomp_case(_DECK, dst, force=True)
-
-    census = [
-        d for d in report.diagnostics if d.code == "decomp-libs-electrical-converted"
-    ]
-    assert len(census) == 1
-    [diagnostic] = census
-    assert diagnostic.table is not None
-    counts = dict(diagnostic.table.rows)
-    assert counts["unresolved-bucket-a"] < _PRE_TICKET_018_UNRESOLVED_BUCKET_A
-
-    result = subprocess.run(
-        [str(_COBRE_BIN), "validate", str(dst)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == 0, (
-        f"cobre validate failed (exit {result.returncode}):\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
-    )

@@ -41,24 +41,24 @@ the test suite on every Python version the project supports, and a coverage
 floor on the comparator reader layer (`[tool.coverage]` in `pyproject.toml`).
 `scripts/README.md` describes each gate and the advisory reports next to them.
 
-### Test tiers
+### Test tiers and local data
 
-The suite must collect and run in three environments, so every test sits in
-one tier:
+Every test runs from the repository alone. Two tiers exist:
 
 - **Tier 1**: pure Python, imports no `cobre`. Runs everywhere. No test module
-  at any tier may `import cobre` at module scope.
-- **Tier 2**: needs `cobre-python` but no solver binary and no real deck.
-  Marked with `requires_cobre_python` from `tests/conftest.py`; the `import
-  cobre` lives inside the guarded test body.
-- **Tier 3**: needs the real solver binary or a real deck under the gitignored
-  `example/` directory. Guarded with `skipif` on the path's existence. Never
-  runs in CI.
+  may `import cobre` at module scope.
+- **Tier 2**: needs `cobre-python` but no solver binary. Marked with
+  `requires_cobre_python` from `tests/conftest.py`; the `import cobre` lives
+  inside the guarded test body.
 
-`tests/decks/` holds two committed synthetic mini-decks (one per track) for
-CI-tier end-to-end tests; no tier-1 or tier-2 test reads `example/`. A tier-3
-test whose deck is absent on your machine skips; `tests/test_deck_inventory.py`
-audits that every `example/` reference is guarded and names no retired deck.
+Real-format inputs live as small excerpts under `tests/fixtures/` (NEWAVE and
+DECOMP result files, cobre's contract schema and example case), and the two
+synthetic mini-decks under `tests/decks/` drive the end-to-end conversions.
+No test reads the gitignored `example/` tree or anything under your home
+directory; `tests/test_local_data_policy.py` fails the build if one does.
+Checks that need a whole real deck or a solved cobre case are catalogued in
+`docs/real-deck-checks.md`, with what each verified and what it needs, rather
+than kept as permanently skipped tests.
 
 The `tests/` tree mirrors `src/cobre_bridge/`: one `test_<module>.py` per
 source module in the matching directory. Shared case builders (`make_case`,

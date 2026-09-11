@@ -4,14 +4,11 @@ cut prices the raw inflow-lag state as the deviation from the seasonal mean.
 
 Tier 1 — pure Python; ``_incremental_context`` (the posto/parent topology, its
 own module's concern) is patched so these tests pin the natural→incremental
-subtraction and the lag-depth alignment. A single Tier-3 test validates the real
-incrementalization against the ``mar-26`` deck's observed inflows, guarded on the
-gitignored deck's presence.
+subtraction and the lag-depth alignment.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -116,44 +113,3 @@ class TestCouplingLagMeans:
         aligned = coupling_lag_means(incremental, coupling_month=1)
         assert aligned[0][0] == 12.0  # depth 1 -> December
         assert aligned[0][11] == 1.0  # depth 12 -> January (prev year)
-
-
-# --- Tier 3: real-deck validation (gitignored deck; dev-only) ----------------
-
-_DECK = Path("example/decomp-mar-26-rv2-reduced")
-
-
-@pytest.mark.skipif(
-    not _DECK.exists(), reason=f"reduced mar-26 deck ({_DECK}) not present"
-)
-def test_incremental_mlt_matches_observed_pattern_on_deck() -> None:
-    """The real incrementalization reproduces the deck's observed-inflow pattern.
-
-    Diversion-fed plants on the artificial zero-natural station read 0, and no
-    plant carries a large spurious negative increment (the only negatives are
-    small genuine net-evaporative reaches). Validated against the deck's own
-    ``observacoes`` in the exploration that motivated ``inflow_mlt.py``.
-    """
-    from idecomp.decomp import Dadger, Mlt
-
-    from cobre_bridge.decomp import temporal as temporal_conv
-    from cobre_bridge.decomp.converters import cadastro as cadastro_conv
-    from cobre_bridge.decomp.converters import hydro as hydro_conv
-
-    dadger = Dadger.read(str(_DECK / "dadger.rv2"))
-    hidr = hydro_conv.read_hidr(_DECK / "hidr.dat")
-    id_map = DecompIdMap.from_dadger(dadger)
-    calendar = temporal_conv.operative_calendar_from_dadger(dadger)
-    effective, _ = cadastro_conv.build_effective_cadastro(dadger, hidr, calendar)
-    mlt = Mlt.read(str(_DECK / "mlt.dat")).valores
-
-    means = build_incremental_mlt(mlt, effective, id_map)
-
-    # Every operated plant is covered.
-    assert len(means) == len(id_map.hydro_codes)
-    # BELO MONTE (code 288) is diversion-fed on the artificial zero station.
-    assert all(value == 0.0 for value in means[id_map.hydro_id(288)].values())
-    # No large spurious negative increments (over-subtraction bug); the genuine
-    # net-evaporative reaches (e.g. MOXOTO) stay small.
-    worst_negative = min(v for months in means.values() for v in months.values())
-    assert worst_negative > -30.0

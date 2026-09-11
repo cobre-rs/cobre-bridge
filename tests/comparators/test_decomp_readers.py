@@ -1,4 +1,8 @@
-"""Tests for the DECOMP output readers."""
+"""Tests for the DECOMP output readers.
+
+Synthetic tables for the parsing contracts, plus small real-format result
+file excerpts under ``tests/fixtures/decomp_results/`` for the file layout.
+"""
 
 from __future__ import annotations
 
@@ -44,24 +48,10 @@ from cobre_bridge.comparators.decomp.readers import (
 )
 from cobre_bridge.comparators.decomp.results import reconcile_kdollars_to_reais
 
-_REDUCED_DECK = Path("example/decomp-mar-26-rv2-reduced")
-
-_needs_reduced_deck = pytest.mark.skipif(
-    not (_REDUCED_DECK / "relato.rv2").is_file(),
-    reason="reduced deck outputs not present",
-)
-_needs_reduced_deck_tim = pytest.mark.skipif(
-    not (_REDUCED_DECK / "decomp.tim").is_file(),
-    reason="reduced deck decomp.tim not present",
-)
-_needs_reduced_deck_rhesoft = pytest.mark.skipif(
-    not (_REDUCED_DECK / "dec_oper_rhesoft.csv").is_file(),
-    reason="reduced deck dec_oper_rhesoft.csv not present",
-)
-_needs_reduced_deck_evap = pytest.mark.skipif(
-    not (_REDUCED_DECK / "dec_oper_evap.csv").is_file(),
-    reason="reduced deck dec_oper_evap.csv not present",
-)
+# Real-format DECOMP result files (a few KB each) vendored from the
+# sintetizador-decomp project's test mocks, so the readers are exercised
+# against the model's own file layout without any deck outside the repo.
+_RESULTS_EXCERPT = Path(__file__).resolve().parents[1] / "fixtures" / "decomp_results"
 
 
 class _StubFile:
@@ -244,20 +234,6 @@ class TestReadDecDesvfpha:
         with pytest.raises(ValueError, match="parsed empty"):
             read_dec_desvfpha(tmp_path)
 
-    @_needs_reduced_deck
-    def test_real_deck_is_non_empty(self) -> None:
-        df = read_dec_desvfpha(_REDUCED_DECK)
-        assert df.height > 0
-        for column in (
-            "codigo_usina",
-            "estagio",
-            "volume_total_hm3",
-            "vazao_turbinada_m3s",
-            "vazao_vertida_m3s",
-            "geracao_hidraulica_fpha",
-        ):
-            assert column in df.columns
-
 
 class TestReadEcoFpha:
     """`read_eco_fpha`: per-hydro/stage FPHA fitting-grid echo."""
@@ -317,15 +293,6 @@ class TestReadEcoFpha:
         with pytest.raises(ValueError, match="parsed empty"):
             read_eco_fpha(tmp_path)
 
-    @_needs_reduced_deck
-    def test_real_deck_has_no_eco_fpha(self) -> None:
-        """The reduced deck ships no
-        ``eco_fpha`` table at all -- `read_eco_fpha` must degrade this to
-        `FileNotFoundError`, never a crash, so callers can treat it exactly
-        like any other absent optional FPHA source."""
-        with pytest.raises(FileNotFoundError, match="eco_fpha"):
-            read_eco_fpha(_REDUCED_DECK)
-
 
 class TestReadDecEstatfpha:
     """`read_dec_estatfpha`: deck-wide FPHA deviation summary."""
@@ -373,13 +340,6 @@ class TestReadDecEstatfpha:
         )
         with pytest.raises(ValueError, match="parsed empty"):
             read_dec_estatfpha(tmp_path)
-
-    @_needs_reduced_deck
-    def test_real_deck_is_non_empty(self) -> None:
-        df = read_dec_estatfpha(_REDUCED_DECK)
-        assert df.height > 0
-        assert "variavel" in df.columns
-        assert "valor" in df.columns
 
 
 class TestReadDecOperCore:
@@ -580,11 +540,6 @@ class TestReadRelatoBalance:
         with pytest.raises(FileNotFoundError, match="relato"):
             read_relato_balance(tmp_path)
 
-    @_needs_reduced_deck
-    def test_real_deck_is_non_empty(self) -> None:
-        df = read_relato_balance(_REDUCED_DECK)
-        assert df.height > 0
-
 
 class TestReadRelatoCosts:
     """`read_relato_costs`: per-(stage, scenario) operating cost table."""
@@ -644,11 +599,6 @@ class TestReadRelatoCosts:
     def test_missing_relato_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="relato"):
             read_relato_costs(tmp_path)
-
-    @_needs_reduced_deck
-    def test_real_deck_is_non_empty(self) -> None:
-        df = read_relato_costs(_REDUCED_DECK)
-        assert df.height > 0
 
 
 class TestResolveRelato2:
@@ -762,11 +712,6 @@ class TestReadRelatoExpectedCost:
         with pytest.raises(FileNotFoundError, match="relato"):
             read_relato_expected_cost(tmp_path)
 
-    @_needs_reduced_deck
-    def test_real_deck_is_non_empty(self) -> None:
-        df = read_relato_expected_cost(_REDUCED_DECK)
-        assert df.height > 0
-
 
 class TestReadRelatoMembership:
     """`read_relato_membership`: hydro -> REE -> submarket membership table."""
@@ -823,12 +768,6 @@ class TestReadRelatoMembership:
         with pytest.raises(FileNotFoundError, match="relato"):
             read_relato_membership(tmp_path)
 
-    @_needs_reduced_deck
-    def test_real_deck_is_non_empty(self) -> None:
-        df = read_relato_membership(_REDUCED_DECK)
-        assert df.height > 0
-        assert {"codigo_usina", "codigo_ree"} <= set(df.columns)
-
 
 class TestReadDecOperGnl:
     """`read_dec_oper_gnl`: anticipated-thermal operation, root-only file."""
@@ -881,9 +820,8 @@ class TestReadDecOperGnl:
         with pytest.raises(ValueError, match="parsed empty"):
             read_dec_oper_gnl(tmp_path)
 
-    @_needs_reduced_deck
-    def test_real_deck_is_non_empty(self) -> None:
-        df = read_dec_oper_gnl(_REDUCED_DECK)
+    def test_result_excerpt_parses(self) -> None:
+        df = read_dec_oper_gnl(_RESULTS_EXCERPT)
         assert df.height > 0
 
 
@@ -946,9 +884,8 @@ class TestReadDecOperRee:
         with pytest.raises(ValueError, match="parsed empty"):
             read_dec_oper_ree(tmp_path)
 
-    @_needs_reduced_deck
-    def test_real_deck_is_non_empty(self) -> None:
-        df = read_dec_oper_ree(_REDUCED_DECK)
+    def test_result_excerpt_parses(self) -> None:
+        df = read_dec_oper_ree(_RESULTS_EXCERPT)
         assert df.height > 0
         assert "patamar" not in df.columns
 
@@ -1032,13 +969,6 @@ class TestReadDecOperEvap:
         with pytest.raises(ValueError, match="parsed empty"):
             read_dec_oper_evap(tmp_path)
 
-    @_needs_reduced_deck_evap
-    def test_real_deck_is_non_empty(self) -> None:
-        df = read_dec_oper_evap(_REDUCED_DECK)
-        assert df.height > 0
-        assert "patamar" not in df.columns
-        assert "evaporacao_calculada_hm3" in df.columns
-
 
 class TestReadDecOperRheSoft:
     """`read_dec_oper_rhesoft`: RHE soft-constraint achieved LHS vs limit."""
@@ -1105,18 +1035,6 @@ class TestReadDecOperRheSoft:
         )
         with pytest.raises(ValueError, match="parsed empty"):
             read_dec_oper_rhesoft(tmp_path)
-
-    @_needs_reduced_deck_rhesoft
-    def test_real_deck_is_non_empty(self) -> None:
-        df = read_dec_oper_rhesoft(_REDUCED_DECK)
-        assert df.height > 0
-        for column in (
-            "codigo_restricao",
-            "limite_MW",
-            "valor_MW",
-            "violacao_absoluta_MW",
-        ):
-            assert column in df.columns
 
 
 class TestReadDecompTim:
@@ -1185,9 +1103,8 @@ class TestReadDecompTim:
         with pytest.raises(ValueError, match="parsed empty"):
             read_decomp_tim(tmp_path)
 
-    @_needs_reduced_deck_tim
-    def test_real_deck_is_non_empty(self) -> None:
-        df = read_decomp_tim(_REDUCED_DECK)
+    def test_result_excerpt_parses(self) -> None:
+        df = read_decomp_tim(_RESULTS_EXCERPT)
         assert df.height > 0
         assert "total" in " ".join(df["Etapa"].to_list()).lower()
 

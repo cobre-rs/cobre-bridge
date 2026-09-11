@@ -1,13 +1,9 @@
 """FPHA fit-fidelity tests for ``comparators.decomp.results``.
 
-Third carve out of the legacy ``test_decomp_results_compare.py`` mega file:
-the "Fitted production functions (FPHA)" fallback-(b) metrics --
+Covers the "Fitted production functions (FPHA)" fallback-(b) metrics --
 Cobre's fitted envelope evaluated at the source model's realized operating
 points, compared to the source model's own realized generation -- and the
-Productivity tab's FPHA metadata in ``build_decomp_dataset``. The remaining
-classes (report_builder/verdict/CLI cross-module tests and the tier-3
-``*E2E`` classes) stay in the mega file pending their own routing and
-removal.
+Productivity tab's FPHA metadata in ``build_decomp_dataset``.
 """
 
 from __future__ import annotations

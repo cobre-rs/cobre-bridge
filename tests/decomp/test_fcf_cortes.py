@@ -4,10 +4,7 @@ Per H5 (deck-independent unit coverage), every *unit* test in this module
 reads no real deck: the header-parse (``read_cortesh``), record-assembly
 (``read_cortes``), and trailer-detection (``_read_trailer``) paths are
 exercised against synthetic ``_FakeCortesh``/``_FakeCortes`` stand-ins and
-tiny in-code ``struct.pack`` blobs. The ``@pytest.mark.skipif(...exists())``
-tests below (pinning byte-exact facts from the real, gitignored decks under
-``example/``) are **dev smoke only** — they exercise the full ~176 MB export
-and never run in CI; they skip cleanly in a CI environment.
+tiny in-code ``struct.pack`` blobs.
 """
 
 from __future__ import annotations
@@ -18,7 +15,6 @@ from unittest.mock import patch
 
 import pandas as pd  # type: ignore[import-untyped]  # pandas-stubs not installed
 import pytest
-from inewave.newave import Cortes, Cortesh
 
 from cobre_bridge.decomp.fcf.cortes import (
     BoundaryCuts,
@@ -32,70 +28,6 @@ from cobre_bridge.decomp.fcf.cortes import (
     required_inflow_lag_depth,
     summarize_cut_families,
 )
-
-# Real, gitignored decks (see example/README.md — local-only, not part of the
-# repo). CI does not have example/, so every test reading one is
-# skipif-guarded on its presence.
-_NEWAVE_RODADA = Path("example/newave_rodada/cortesh.dat")
-_NEWAVE_RODADA_CORTES = Path("example/newave_rodada/cortes.dat")
-_DECOMP_MAR26 = Path("example/decomp-mar-26-rv2/cortesh.dat")
-_DECOMP_MAR26_CORTES = Path("example/decomp-mar-26-rv2/cortes-004.dat")
-
-_NONZERO = 1e-9
-
-
-@pytest.mark.skipif(
-    not _NEWAVE_RODADA.exists(), reason="newave_rodada deck not present"
-)
-def test_read_cortesh_nongnl_deck_header() -> None:
-    header = read_cortesh(_NEWAVE_RODADA)
-
-    assert isinstance(header, CortesHeader)
-    assert header.n_plants == 154
-    assert header.lag_maximo_gnl == 0
-    assert header.individualized is True
-    assert len(header.plant_codes) == 154
-
-    uhes = Cortesh.read(str(_NEWAVE_RODADA)).dados_uhes.sort_values("indice_usina")
-    expected_plant_codes = tuple(int(code) for code in uhes["codigo_usina"])
-    assert header.plant_codes == expected_plant_codes
-
-
-@pytest.mark.skipif(
-    not _DECOMP_MAR26.exists(), reason="decomp-mar-26-rv2 deck not present"
-)
-def test_read_cortesh_hybrid_deck_header() -> None:
-    header = read_cortesh(_DECOMP_MAR26)
-
-    # No `tipo_agregacao_caso`/contiguity raise: `read_cortesh` accepted this
-    # hybrid deck (aggregated stages up to the individualized band, then
-    # plant-space cuts) and excluded its fictitious plants.
-    assert header.n_plants == 159
-    assert len(header.plant_codes) == 159
-
-    cortesh = Cortesh.read(str(_DECOMP_MAR26))
-    expected_gnl_width = (
-        cortesh.numero_submercados * header.n_patamares * header.lag_maximo_gnl
-    )
-    assert expected_gnl_width == 24
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        pytest.param(
-            _NEWAVE_RODADA,
-            marks=pytest.mark.skipif(
-                not _NEWAVE_RODADA.exists(), reason="newave_rodada deck not present"
-            ),
-        ),
-    ],
-)
-def test_read_cortesh_exposes_stage_chain_heads(path: Path) -> None:
-    header = read_cortesh(path)
-
-    assert len(header.last_cut_record_by_stage) > 0
-    assert all(isinstance(value, int) for value in header.last_cut_record_by_stage)
 
 
 def test_build_header_rejects_boundary_stage_outside_individualized_band() -> None:
@@ -225,103 +157,6 @@ def test_read_cortesh_synthetic_preserves_slot_order() -> None:
     assert header.n_plants == 3
     assert header.lag_maximo_gnl == 2
     assert header.individualized is True
-
-
-@pytest.mark.skipif(
-    not _NEWAVE_RODADA.exists() or not _NEWAVE_RODADA_CORTES.exists(),
-    reason="newave_rodada deck not present",
-)
-def test_read_cortes_nongnl_boundary_stage_and_shapes() -> None:
-    cortesh = Cortesh.read(str(_NEWAVE_RODADA))
-    boundary = read_cortes(_NEWAVE_RODADA_CORTES, cortesh, boundary_stage=11)
-
-    assert boundary.boundary_stage == 11
-    assert len(boundary.records) > 0
-    for record in boundary.records:
-        assert len(record.pi_varm) == 154
-        assert len(record.pi_qafl) == 154
-        assert all(len(lags) == 12 for lags in record.pi_qafl)
-        assert record.pi_gnl == ()
-
-
-@pytest.mark.skipif(
-    not _NEWAVE_RODADA.exists() or not _NEWAVE_RODADA_CORTES.exists(),
-    reason="newave_rodada deck not present",
-)
-def test_read_cortes_exposes_per_cut_provenance() -> None:
-    cortesh = Cortesh.read(str(_NEWAVE_RODADA))
-    boundary = read_cortes(_NEWAVE_RODADA_CORTES, cortesh, boundary_stage=11)
-
-    assert len(boundary.records) > 0
-    for record in boundary.records:
-        assert isinstance(record.cut_id, int) and record.cut_id > 0
-        assert isinstance(record.iteration, int) and record.iteration > 0
-        assert (
-            isinstance(record.forward_pass_index, int) and record.forward_pass_index > 0
-        )
-        assert isinstance(record.is_active, bool)
-
-    # Every record in this deck's boundary-stage export is active (byte-exact
-    # `from_cortesh` measurement, 2026-08-03) — a real cut chain with no
-    # deactivated entries at this boundary, not a read bug.
-    assert all(record.is_active for record in boundary.records)
-    cut_ids = [record.cut_id for record in boundary.records]
-    assert len(set(cut_ids)) == len(cut_ids)  # cut_id is unique per record
-
-
-@pytest.mark.skipif(
-    not _NEWAVE_RODADA.exists() or not _NEWAVE_RODADA_CORTES.exists(),
-    reason="newave_rodada deck not present",
-)
-def test_read_cortes_nongnl_nonzero_families() -> None:
-    cortesh = Cortesh.read(str(_NEWAVE_RODADA))
-    boundary = read_cortes(_NEWAVE_RODADA_CORTES, cortesh, boundary_stage=11)
-
-    n_plants = boundary.header.n_plants
-    varm_nonzero = [False] * n_plants
-    nonzero_at_lag = [[False] * 12 for _ in range(n_plants)]
-    for record in boundary.records:
-        for i, value in enumerate(record.pi_varm):
-            if abs(value) > _NONZERO:
-                varm_nonzero[i] = True
-        for i, lags in enumerate(record.pi_qafl):
-            for lag_index, value in enumerate(lags):
-                if abs(value) > _NONZERO:
-                    nonzero_at_lag[i][lag_index] = True
-
-    assert sum(varm_nonzero) == 154
-
-    # 147/154 plants are nonzero at every lag 1..12 (byte-exact `from_cortesh`
-    # measurement, 2026-08-03); 5 plants (codes 2, 133, 178, 305, 314) are
-    # exactly 0.0 at all 12 lags and 2 more are zero only at the tail lags —
-    # a real per-plant PAR-order-<12 fact, not a read bug. Supersedes the
-    # pre-1.15.0 informal "149" triage figure.
-    qafl_nonzero_all_lags = sum(1 for flags in nonzero_at_lag if all(flags))
-    assert qafl_nonzero_all_lags >= 147
-
-
-@pytest.mark.skipif(
-    not _DECOMP_MAR26.exists() or not _DECOMP_MAR26_CORTES.exists(),
-    reason="decomp-mar-26-rv2 deck not present",
-)
-def test_read_cortes_hybrid_boundary_stage_and_shapes() -> None:
-    cortesh = Cortesh.read(str(_DECOMP_MAR26))
-    # Trailer-derived boundary stage (the single-stage export path, matching
-    # the importer's own call), not a caller-supplied one.
-    boundary = read_cortes(_DECOMP_MAR26_CORTES, cortesh, boundary_stage=None)
-
-    assert boundary.boundary_stage == 4
-    assert len(boundary.records) == 10000
-
-    # `Cortes.from_cortesh` names the header's plant-space columns plus 4
-    # per-cut provenance columns: 1 (rhs) + 159 (pi_varm) + 159*12
-    # (pi_qafl) + 159 (pi_mx_sar) + 24 (pi_gnl) + 4 provenance == 2255.
-    raw = Cortes.from_cortesh(str(_DECOMP_MAR26_CORTES), cortesh, por_estagio=True)
-    assert raw.cortes is not None
-    assert raw.cortes.shape == (10000, 2255)
-
-    sar_cols = [f"pi_mx_sar_uhe{code}" for code in boundary.header.plant_codes]
-    assert raw.cortes[sar_cols].abs().to_numpy().max() < _NONZERO
 
 
 def test_read_cortes_rejects_nonzero_sar(tmp_path: Path) -> None:
@@ -461,54 +296,6 @@ def test_read_trailer_sentinel_vs_nonzero_rhs(tmp_path: Path) -> None:
 
     assert _read_trailer(sentinel_path, record_size) == (1, 2, 3, 4)
     assert _read_trailer(nonzero_path, record_size) is None
-
-
-@pytest.mark.skipif(
-    not _NEWAVE_RODADA.exists() or not _NEWAVE_RODADA_CORTES.exists(),
-    reason="newave_rodada deck not present",
-)
-def test_summarize_families_nongnl_matches_probed_facts() -> None:
-    cortesh = Cortesh.read(str(_NEWAVE_RODADA))
-    boundary = read_cortes(_NEWAVE_RODADA_CORTES, cortesh, boundary_stage=11)
-
-    summary = summarize_cut_families(boundary)
-
-    assert isinstance(summary, CutFamilySummary)
-    assert summary.n_active_cuts == len(boundary.records)
-    assert summary.storage_nonzero_plants == 154
-    assert summary.gnl_nonzero_slots == 0
-    assert len(summary.lag_nonzero_by_depth) == 12
-
-    # 147/154 plants nonzero at lag 12 (byte-exact `from_cortesh` measurement,
-    # 2026-08-03; supersedes the pre-1.15.0 informal "149" figure — see
-    # test_read_cortes_nongnl_nonzero_families).
-    assert summary.lag_nonzero_by_depth[11] >= 147
-
-    assert summary.rhs_max >= summary.rhs_min > 0
-    assert summary.rhs_min == pytest.approx(summary.rhs_min)  # finite, not NaN
-    assert summary.rhs_max == pytest.approx(summary.rhs_max)  # finite, not NaN
-
-
-@pytest.mark.skipif(
-    not _DECOMP_MAR26.exists() or not _DECOMP_MAR26_CORTES.exists(),
-    reason="decomp-mar-26-rv2 deck not present",
-)
-def test_summarize_families_hybrid_matches_probed_facts() -> None:
-    cortesh = Cortesh.read(str(_DECOMP_MAR26))
-    boundary = read_cortes(_DECOMP_MAR26_CORTES, cortesh, boundary_stage=None)
-
-    summary = summarize_cut_families(boundary)
-
-    assert summary.n_active_cuts == len(boundary.records) == 10000
-    assert summary.storage_nonzero_plants == 159
-    assert summary.gnl_nonzero_slots == 24
-    assert len(summary.lag_nonzero_by_depth) == 12
-
-    # RHS scale is on the order of 1e9-1e10 (byte-exact `from_cortesh`
-    # measurement, 2026-08-12: rhs_max ~= 3.73e9) — an order-of-magnitude
-    # tolerance so a benign scale nuance does not make the smoke brittle.
-    assert summary.rhs_max >= summary.rhs_min > 0
-    assert 1e9 <= summary.rhs_max <= 1e10
 
 
 def test_summarize_families_empty_records_raises() -> None:

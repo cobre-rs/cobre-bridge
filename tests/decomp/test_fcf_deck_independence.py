@@ -1,15 +1,10 @@
-"""Regression guard for the boundary-FCF suite's deck-independence convention.
+"""Regression guard: every boundary-FCF test module collects without cobre.
 
-Every ``tests/decomp/test_fcf_*.py`` module is required to collect without the
-``cobre-python`` wheel and without the local, gitignored ``example/`` decks
-(see ``CLAUDE.md``'s "boundary-FCF test tiers" subsection). Nothing in the test
-runner enforces that going forward, so this module is a lightweight source-scan
-guard against regression: it reads each FCF test module's own text (never the
-decks it may reference) and asserts those two deck-independence conditions.
-
-This module is itself tier 1: a plain ``pathlib`` + ``re`` scan over test
-source text, no ``import cobre`` anywhere and no ``example/`` path read, so
-it collects and runs in every CI job.
+Every ``tests/decomp/test_fcf_*.py`` module must collect in a cobre-free
+environment: a module-top ``import cobre`` breaks collection everywhere
+regardless of skip markers. Nothing in the test runner enforces that, so this
+module scans each FCF test module's own source text for one. It is itself a
+plain ``pathlib`` + ``re`` scan with no ``cobre`` import.
 """
 
 from __future__ import annotations
@@ -54,27 +49,4 @@ def test_fcf_test_modules_have_no_top_level_cobre_import() -> None:
         "module-top `import cobre`/`from cobre import ...` blocks cobre-free "
         f"collection in: {offenders}; move the import into a call site or "
         "test body"
-    )
-
-
-def test_fcf_example_reads_are_skipif_guarded() -> None:
-    """Every FCF test module reading ``example/`` also carries a skip guard.
-
-    A coarse, module-level check — it does not verify the guard sits next to
-    every individual ``Path("example/...")`` literal, only that a module
-    referencing one also contains a ``skipif`` marker somewhere, so a bare,
-    unconditional real-deck read cannot land uncaught.
-    """
-    modules = _fcf_test_modules()
-    assert modules, f"no test_fcf_*.py modules found under {_TESTS_DIR}"
-
-    offenders = [
-        module.name
-        for module in modules
-        if (text := module.read_text(encoding="utf-8"))
-        and 'Path("example/' in text
-        and "skipif" not in text
-    ]
-    assert not offenders, (
-        f"module(s) read a real `example/` deck with no `skipif` guard: {offenders}"
     )
