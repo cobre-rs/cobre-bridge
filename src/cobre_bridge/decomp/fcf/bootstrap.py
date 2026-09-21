@@ -73,6 +73,12 @@ def ensure_writer_binding() -> None:
         )
 
 
+#: cobre's ``STAGE_CUTS_PRICED_STATE_DATE_SENTINEL`` (``i32::MIN``) — a pool
+#: whose ``priced_state_date`` reads this was written before priced dates were
+#: recorded; the date-driven boundary loader rejects such a checkpoint.
+_PRICED_STATE_DATE_SENTINEL = -(2**31)
+
+
 @dataclass(frozen=True)
 class TerminalManifest:
     """The terminal stage's per-slot entity identity and state dimension.
@@ -85,13 +91,23 @@ class TerminalManifest:
     :func:`bootstrap_terminal_manifest`. ``node_id`` and ``graph_stage_id``
     are read back from that same terminal pool — the authoritative real
     single-node/graph-stage identity the self-describing checkpoint payload
-    carries.
+    carries. ``priced_state_date`` is that pool's own ``YYYYMMDD`` priced
+    instant (the terminal stage's exclusive ``end_date``); the boundary
+    loader selects the source pool by matching it against the loading study's
+    own boundary date, so the authored checkpoint must carry it verbatim.
+    ``season_manifest`` is the study-global season/PAR-order descriptor
+    (``cycle_code``/``n_seasons``/``hydro_orders``) read from the bootstrap
+    checkpoint's metadata; the boundary loader's season-compatibility gate
+    rejects a source whose descriptor is absent or disagrees with the loading
+    study's, so the authored checkpoint carries the study's own verbatim.
     """
 
     entity_manifest: tuple[dict[str, object], ...]
     state_dimension: int
     node_id: int
     graph_stage_id: int
+    priced_state_date: int
+    season_manifest: dict[str, object]
 
 
 def _flatten_terminal_fan(case_dir: Path, variant_dir: Path) -> None:
@@ -161,7 +177,12 @@ def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalMa
     It then reads the emitted checkpoint back via
     :func:`cobre.results.load_policy` and returns the terminal stage's (the
     entry whose ``stage_id`` is max) ``entity_manifest``, ``state_dimension``,
-    ``node_id``, and ``graph_stage_id``.
+    ``node_id``, ``graph_stage_id``, and ``priced_state_date``, plus the
+    study-global ``season_manifest`` from the checkpoint metadata. Because this
+    trains ``case_dir``'s own single-terminal-leaf variant, that pool is
+    priced at exactly the instant the real case's boundary loader selects a
+    source against — reading it back is the authoritative, drift-free source
+    for the authored checkpoint's own ``priced_state_date``.
 
     Depends only on ``cobre.run.run`` and ``cobre.results.load_policy`` —
     neither needs the ``write_policy_checkpoint`` binding, so this function
@@ -174,13 +195,14 @@ def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalMa
     ------
     RuntimeError
         If the loaded checkpoint has no stage cuts, an empty terminal
-        ``entity_manifest``, a terminal pool missing ``node_id`` or
-        ``graph_stage_id``, or a terminal pool ``node_id`` that is the ``-1``
-        shared-pool sentinel — on the flattened variant this last case means
-        the flattening itself did not take (a real error, since the whole
-        point of training the variant is to never see the sentinel here). A
-        failure inside the run itself propagates as ``cobre.run.run``'s own
-        exception.
+        ``entity_manifest``, a terminal pool missing ``node_id``,
+        ``graph_stage_id``, or ``priced_state_date`` (or one whose
+        ``priced_state_date`` is the undated sentinel), or a terminal pool
+        ``node_id`` that is the ``-1`` shared-pool sentinel — on the flattened
+        variant this last case means the flattening itself did not take (a
+        real error, since the whole point of training the variant is to never
+        see the sentinel here). A failure inside the run itself propagates as
+        ``cobre.run.run``'s own exception.
     """
     import cobre
 
@@ -188,13 +210,16 @@ def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalMa
     _flatten_terminal_fan(case_dir, variant_dir)
 
     output_dir = work_dir / "output"
+    # `simulation.enabled=False` skips the post-training simulation (the
+    # bootstrap needs only the policy checkpoint's terminal manifest); cobre's
+    # `run` gates simulation on the config, not a `skip_simulation` argument.
     config_overrides: dict[str, object] = {
-        "training.stopping_rules": [{"type": "iteration_limit", "limit": 1}]
+        "training.stopping_rules": [{"type": "iteration_limit", "limit": 1}],
+        "simulation.enabled": False,
     }
     cobre.run.run(
         str(variant_dir),
         output_dir=str(output_dir),
-        skip_simulation=True,
         config_overrides=config_overrides,
         on_iteration=lambda _info: True,
     )
@@ -232,9 +257,36 @@ def bootstrap_terminal_manifest(case_dir: Path, *, work_dir: Path) -> TerminalMa
         )
     graph_stage_id = int(terminal["graph_stage_id"])
 
+    if "priced_state_date" not in terminal:
+        raise RuntimeError(
+            f"checkpoint at {output_dir} terminal pool has no priced_state_date"
+        )
+    priced_state_date = int(terminal["priced_state_date"])
+    if priced_state_date == _PRICED_STATE_DATE_SENTINEL:
+        raise RuntimeError(
+            f"checkpoint at {output_dir} terminal pool priced_state_date is the "
+            "undated sentinel (no priced instant); the boundary loader selects a "
+            "source pool by date, so an undated pool cannot be authored"
+        )
+
+    # Study-global season/PAR-order descriptor, carried into the authored
+    # boundary so cobre's season-compatibility gate accepts it. A missing key
+    # (never an absent-but-present descriptor) means the installed cobre
+    # predates the season-manifest round-trip — the capability probe rejects
+    # that up front, so this is a defensive contract check.
+    metadata = policy["metadata"]
+    if "season_manifest" not in metadata:
+        raise RuntimeError(
+            f"checkpoint at {output_dir} metadata carries no season_manifest "
+            "(the installed cobre predates the season-manifest round-trip)"
+        )
+    season_manifest = dict(metadata["season_manifest"])
+
     return TerminalManifest(
         entity_manifest=entity_manifest,
         state_dimension=terminal_state_dimension,
         node_id=node_id,
         graph_stage_id=graph_stage_id,
+        priced_state_date=priced_state_date,
+        season_manifest=season_manifest,
     )

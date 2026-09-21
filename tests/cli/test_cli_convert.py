@@ -2073,7 +2073,7 @@ class TestCliInProcess:
         """With cut files present (the default), the CLI builds exactly one
         ``DecompCase`` for the FCF step and passes it positionally to the
         importer, which runs with ``cost_scale_factor=1.0``, exits 0,
-        surfaces the C8 run recipe on stderr, and whose ``--json`` verdict
+        confirms the boundary FCF on stderr, and whose ``--json`` verdict
         carries ``summary["boundary_fcf"]``."""
         from cobre_bridge.core.conversion import ConversionReport
         from cobre_bridge.decomp.case import DecompCase
@@ -2115,14 +2115,14 @@ class TestCliInProcess:
         assert "cobre_bin" not in mock_import.call_args.kwargs
         assert mock_import.call_args.args[0] == dst
         assert isinstance(mock_import.call_args.args[1], DecompCase)
-        # C8 recipe surfaced on stderr regardless of --json.
+        # The boundary-FCF confirmation surfaces on stderr regardless of --json;
+        # the boundary loads on a plain `cobre run <case>` (no --output recipe).
         assert f"cobre run {dst}" in stderr
-        assert f"--output={dst}" in stderr
+        assert "--output" not in stderr
         doc = json.loads(stdout)
         assert doc["summary"]["boundary_fcf"] == {
             "imported": True,
             "path": "boundary",
-            "run_constraint": f"--output={dst}",
         }
 
     def test_convert_decomp_missing_cortes_skips_fcf(
@@ -2349,7 +2349,7 @@ class TestCliInProcess:
     ) -> None:
         """The same emitting mock, without ``--json`` — the
         diagnostic's title renders on stderr (the Rich panel), and the
-        existing happy-path C8-recipe assertions still hold (no
+        existing happy-path boundary-FCF confirmation still holds (no
         double-render, no exit-code change)."""
         from cobre_bridge.core import diagnostics as dx
         from cobre_bridge.core.conversion import ConversionReport
@@ -2396,9 +2396,9 @@ class TestCliInProcess:
 
         assert code == 0
         assert "GNL anticipated ring carries a per-patamar sum" in stderr
-        # The C8 run-recipe note still surfaces (happy-path behaviour intact).
+        # The boundary-FCF confirmation still surfaces (happy-path intact).
         assert f"cobre run {dst}" in stderr
-        assert f"--output={dst}" in stderr
+        assert "--output" not in stderr
 
     def test_convert_decomp_boundary_fcf_importer_diagnostics_reach_sidecar(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

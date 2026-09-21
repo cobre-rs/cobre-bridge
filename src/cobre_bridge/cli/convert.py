@@ -317,9 +317,9 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
     probe, then ``import_boundary_fcf``. A deck with no cut files simply
     converts without a boundary FCF (an INFO note, not an error); a capability
     or importer failure exits 1 via the same ``diagnostic_from_exception``
-    mapping as a conversion failure. A
-    successful import surfaces the C8 ``cobre run ... --output <case_dir>``
-    recipe and a ``summary["boundary_fcf"]`` sub-object.
+    mapping as a conversion failure. A successful import confirms the boundary
+    FCF and records a ``summary["boundary_fcf"]`` sub-object; the boundary
+    loads automatically on a plain ``cobre run <case>``.
 
     ``--validate`` runs after a successful conversion (and boundary-FCF
     import) via the shared ``_run_cobre_validation`` helper (mirroring
@@ -514,22 +514,13 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
             raise typer.Exit(code=1)
         else:
             boundary_diagnostics = list(fcf_diags)
-            # C8 surfacing (D7, TRACKED COBRE-GAP WORKAROUND — see
-            # ``fcf/importer.py::_patch_policy_boundary`` and the cobre
-            # repository's conversion-found-improvements registry): until cobre
-            # resolves ``policy.boundary.path`` relative to case_dir rather than
-            # the run's --output directory, this case must be run with
-            # ``--output <case_dir>``.
-            run_constraint = f"--output={args.dst}"
             print_status(
-                f"Boundary FCF imported. Run this case with: "
-                f"cobre run {args.dst} {run_constraint}",
+                f"Boundary FCF imported. Run this case with: cobre run {args.dst}",
                 console=err_console,
             )
             summary["boundary_fcf"] = {
                 "imported": True,
                 "path": "boundary",
-                "run_constraint": run_constraint,
             }
             if not args.json_output:
                 # boundary_diagnostics only: ``report.diagnostics`` was

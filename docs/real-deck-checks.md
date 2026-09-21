@@ -59,7 +59,7 @@ anywhere any more; treat each as "a deck with these properties".
 | Removed check | Verified |
 | --- | --- |
 | Three real-deck tests in `test_fcf_cortes.py` | Cut-file readers on a hybrid deck (aggregated stages then plant-space cuts): plant count after excluding fictitious plants, GNL slot width, boundary stage taken from the trailer, record count and raw column count, zero SAR columns, right-hand-side magnitude. |
-| Three end-to-end tests in `test_fcf_importer.py` | Convert plus boundary import: every anticipated plant's covered ring lane is priced and its in-study lane is not; the post-study calendar has the expected shape; `cobre validate` reports zero case errors; a bounded `cobre run <case> --output <case>` loads the boundary with no panic, no empty-lag warning, and no dropped delivery; the operator command `cobre-bridge convert decomp` run as a subprocess authors a populated boundary and reports it in the `--json` verdict. |
+| Three end-to-end tests in `test_fcf_importer.py` | Convert plus boundary import: every anticipated plant's covered ring lane is priced and its in-study lane is not; the post-study calendar has the expected shape; `cobre validate` reports zero case errors; a bounded `cobre run <case>` loads the boundary with no panic, no empty-lag warning, and no dropped delivery; the operator command `cobre-bridge convert decomp` run as a subprocess authors a populated boundary and reports it in the `--json` verdict. |
 
 ### The reduced DECOMP deck (`decomp-mar-26-rv2-reduced`, a two-leaf terminal fan)
 

@@ -66,19 +66,15 @@ did.
 
 ### Running a case with an imported boundary
 
-Cobre currently resolves the boundary checkpoint path relative to its
-`--output` directory rather than to the case directory. A case with an
-imported boundary must therefore be run with the output directed at the case
-directory itself:
+The boundary checkpoint path resolves relative to the case directory, so a
+case with an imported boundary runs like any other:
 
 ```bash
-cobre run <case_dir> --output <case_dir>
+cobre run <case_dir>
 ```
 
-`convert decomp` prints this exact command after a successful import. A plain
-`cobre run <case_dir>` does not find the checkpoint. This is a tracked
-cobre-side gap; the rule goes away when cobre resolves the path relative to
-the case.
+`convert decomp` confirms the imported boundary and this command after a
+successful import.
 
 ## Comparing results
 

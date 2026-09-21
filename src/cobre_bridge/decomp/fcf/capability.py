@@ -1,17 +1,19 @@
-"""Capability probe gating boundary-FCF import on a real CBVF round trip.
+"""Capability probe gating boundary-FCF import on a real checkpoint round trip.
 
 ``convert decomp`` imports the deck's boundary FCF by default, which needs a
-``cobre-python`` that can write and reload the CBVF/``delivery_date``
-checkpoint format (introduced in cobre 0.14.x; ``cobre-python`` is a required
-bridge dependency). This module gates the ``--boundary-fcf`` path on a real
-write -> load round trip rather than a version-string check: a round trip also
-catches a broken, partial, or ABI-mismatched wheel that reports a satisfying
-version yet cannot actually read back what it wrote. It authors a minimal
-synthetic checkpoint via ``cobre.write_policy_checkpoint``, reloads it via
+``cobre-python`` that can write and reload the dated self-describing policy
+checkpoint format (``cobre-python`` is a required bridge dependency). This
+module gates the ``--boundary-fcf`` path on a real write -> load round trip
+rather than a version-string check: a round trip also catches a broken,
+partial, or ABI-mismatched wheel that reports a satisfying version yet cannot
+actually read back what it wrote. It authors a minimal synthetic checkpoint
+via ``cobre.write_policy_checkpoint``, reloads it via
 ``cobre.results.load_policy``, and asserts the reloaded terminal pool carries
-the self-describing ``cost_scale_factor``/``node_id``/``graph_stage_id``
-fields plus the CBVF-format ``delivery_date`` key on its ``entity_manifest``
-slot.
+the self-describing ``cost_scale_factor``/``node_id``/``graph_stage_id`` fields
+plus its ``priced_state_date`` (the date the boundary loader selects a source
+against), that its ``entity_manifest`` slot carries the per-slot
+``interval_start`` date field, and that the reloaded metadata carries the
+``season_manifest`` descriptor (the study-global season/PAR-order gate).
 
 Mirrors ``fcf/bootstrap.py``'s ``ensure_writer_binding`` convention of a
 lazy, function-body-only ``import cobre`` so this module stays importable
@@ -27,11 +29,11 @@ from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
 from cobre_bridge.decomp.fcf.mapper import MappedCut, MappingResult
 from cobre_bridge.decomp.fcf.writer import build_metadata, build_stage_cuts_payload
 
-#: The probe's single synthetic terminal-manifest slot. `delivery_date` is
-#: deliberately omitted — cobre's `write_policy_checkpoint` treats it as
-#: optional (defaulting to the "not applicable" sentinel) — this probe only
-#: cares whether the *reloaded* slot carries the key at all, never what it
-#: writes.
+#: The probe's single synthetic terminal-manifest slot. The per-slot date
+#: fields (`reference_date`/`interval_start`/`interval_end`) are deliberately
+#: omitted — cobre's `write_policy_checkpoint` treats them as optional
+#: (defaulting to the "not applicable" sentinel) — this probe only cares
+#: whether the *reloaded* slot carries the key at all, never what it writes.
 _PROBE_SLOT: dict[str, object] = {
     "entity_type": 0,
     "entity_id": 0,
@@ -39,11 +41,18 @@ _PROBE_SLOT: dict[str, object] = {
     "was_active": True,
 }
 _PROBE_STAGE_ID = 0
+#: An arbitrary real `YYYYMMDD` priced date for the synthetic pool; the probe
+#: only round-trips it, never date-matches against a study.
+_PROBE_PRICED_STATE_DATE = 20_260_101
 _PROBE_MANIFEST = TerminalManifest(
     entity_manifest=(_PROBE_SLOT,),
     state_dimension=1,
     node_id=0,
     graph_stage_id=_PROBE_STAGE_ID,
+    priced_state_date=_PROBE_PRICED_STATE_DATE,
+    # Unused by the writer (season data rides on the metadata, not the manifest);
+    # the absent descriptor only satisfies the required dataclass field.
+    season_manifest={"cycle_code": 255, "n_seasons": 0, "hydro_orders": []},
 )
 _PROBE_MAPPING = MappingResult(
     cuts=(
@@ -89,15 +98,16 @@ _PROBE_FAILURE_TYPES: tuple[type[Exception], ...] = (
 
 
 def ensure_boundary_fcf_capability() -> None:
-    """Raise unless the installed cobre wheel writes+loads the CBVF format.
+    """Raise unless the installed cobre wheel writes+loads the checkpoint format.
 
     Writes a minimal one-slot synthetic checkpoint into a
     :class:`tempfile.TemporaryDirectory`, reloads it via
     ``cobre.results.load_policy``, and requires the reloaded terminal pool to
-    carry a non-``None`` ``cost_scale_factor`` and the ``node_id`` and
-    ``graph_stage_id`` keys, and the reloaded terminal ``entity_manifest``
-    slot to carry a ``delivery_date`` key — the schema break the released
-    ``0.13.0`` wheel lacks. Leaves no artifacts on disk.
+    carry a non-``None`` ``cost_scale_factor`` and the ``node_id``,
+    ``graph_stage_id`` and ``priced_state_date`` keys, the reloaded terminal
+    ``entity_manifest`` slot to carry an ``interval_start`` key, and the
+    reloaded metadata to carry a ``season_manifest`` — the dated
+    self-describing schema an older wheel lacks. Leaves no artifacts on disk.
 
     Raises
     ------
@@ -106,8 +116,9 @@ def ensure_boundary_fcf_capability() -> None:
         message (the cobre-python install/upgrade fix plus the ``--no-fcf``
         escape hatch, with no repo-internal paths) — on any failure: cobre
         absent, no writer binding, the write/load call itself raising, or a
-        reloaded pool/slot lacking any of ``cost_scale_factor``, ``node_id``,
-        ``graph_stage_id``, or ``delivery_date``.
+        reloaded pool/slot/metadata lacking any of ``cost_scale_factor``,
+        ``node_id``, ``graph_stage_id``, ``priced_state_date``,
+        ``interval_start``, or ``season_manifest``.
     """
     try:
         _probe_cbvf_roundtrip()
@@ -122,9 +133,11 @@ def _probe_cbvf_roundtrip() -> None:
     ------
     RuntimeError
         If the reloaded terminal pool lacks a non-``None``
-        ``cost_scale_factor`` or the ``node_id``/``graph_stage_id`` keys, or
-        if its ``entity_manifest`` slot lacks ``delivery_date`` — caught and
-        re-wrapped by :func:`ensure_boundary_fcf_capability`.
+        ``cost_scale_factor`` or the ``node_id``/``graph_stage_id``/
+        ``priced_state_date`` keys, if its ``entity_manifest`` slot lacks
+        ``interval_start``, or if the reloaded metadata lacks
+        ``season_manifest`` — caught and re-wrapped by
+        :func:`ensure_boundary_fcf_capability`.
     """
     import cobre
 
@@ -135,6 +148,7 @@ def _probe_cbvf_roundtrip() -> None:
         cost_scale_factor=1.0,
         node_id=0,
         graph_stage_id=_PROBE_STAGE_ID,
+        priced_state_date=_PROBE_PRICED_STATE_DATE,
     )
     metadata = build_metadata(
         num_stages=1,
@@ -164,10 +178,17 @@ def _probe_cbvf_roundtrip() -> None:
             raise RuntimeError("reloaded terminal pool lacks node_id")
         if "graph_stage_id" not in terminal:
             raise RuntimeError("reloaded terminal pool lacks graph_stage_id")
+        if "priced_state_date" not in terminal:
+            raise RuntimeError("reloaded terminal pool lacks priced_state_date")
 
         entity_manifest = terminal["entity_manifest"]
-        if not entity_manifest or "delivery_date" not in entity_manifest[0]:
+        if not entity_manifest or "interval_start" not in entity_manifest[0]:
             raise RuntimeError(
-                "reloaded terminal entity_manifest slot lacks the CBVF "
-                "delivery_date key"
+                "reloaded terminal entity_manifest slot lacks the "
+                "interval_start date field"
+            )
+
+        if "season_manifest" not in policy.get("metadata", {}):
+            raise RuntimeError(
+                "reloaded checkpoint metadata lacks the season_manifest descriptor"
             )

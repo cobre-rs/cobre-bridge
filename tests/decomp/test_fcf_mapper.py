@@ -423,13 +423,13 @@ def _make_gnl_ring_fixture(
             make_slot(_HYDRO_STORAGE, 0, 0),  # position 0: unrelated dummy
             make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0),  # position 1: sentinel
             make_slot(
-                _ANTICIPATED_THERMAL_STATE, 94, 1, delivery_date=20260501
+                _ANTICIPATED_THERMAL_STATE, 94, 1, interval_start=20260501
             ),  # position 2: dated
             make_slot(
-                _ANTICIPATED_THERMAL_STATE, 95, 0, delivery_date=20260401
+                _ANTICIPATED_THERMAL_STATE, 95, 0, interval_start=20260401
             ),  # position 3: dated
             make_slot(
-                _ANTICIPATED_THERMAL_STATE, 96, 0, delivery_date=20260601
+                _ANTICIPATED_THERMAL_STATE, 96, 0, interval_start=20260601
             ),  # position 4: dated but untargeted by the plan
         ]
     )
@@ -516,14 +516,15 @@ def test_map_gnl_covered_lane_populated_uncovered_lane_dropped() -> None:
     )
 
 
-def test_resolve_gnl_targets_docstring_is_month_anchor_not_full_day() -> None:
-    """AC 4 — the docstring says month-anchor and no longer describes a
-    ``YYYYMMDD`` full-day value or the retired K=0-lead-lane framing
+def test_resolve_gnl_targets_docstring_keys_on_interval_start() -> None:
+    """AC 4 — the docstring keys the covered/non-covered split on the slot's
+    ``interval_start`` (cobre's day-accurate delivery-stage start), not the
+    retired single ``delivery_date`` or the K=0-lead-lane framing
     (source-text check)."""
     docstring = _resolve_gnl_targets.__doc__
     assert docstring is not None
-    assert "month-anchor" in docstring
-    assert "YYYYMMDD" not in docstring
+    assert "interval_start" in docstring
+    assert "delivery_date" not in docstring
     assert "K=0" not in docstring
 
 
@@ -659,7 +660,7 @@ def test_map_gnl_plan_none_is_noop() -> None:
     manifest = make_manifest(
         [
             make_slot(_HYDRO_STORAGE, 0, 0),
-            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, interval_start=20260501),
         ]
     )
     cuts = make_boundary_cuts((10,), (make_cut_record(pi_varm=(9.0,)),))
@@ -676,7 +677,7 @@ def test_map_gnl_rejects_bad_pi_gnl_width() -> None:
     manifest = make_manifest(
         [
             make_slot(_HYDRO_STORAGE, 0, 0),
-            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, interval_start=20260501),
         ]
     )
     header = make_cortes_header(

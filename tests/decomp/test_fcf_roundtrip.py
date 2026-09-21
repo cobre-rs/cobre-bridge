@@ -413,14 +413,17 @@ def test_synthetic_roundtrip_theta_sweep(tmp_path: Path) -> None:
 
 @requires_cobre_python
 @requires_writer_binding
-def test_synthetic_roundtrip_carries_delivery_date(tmp_path: Path) -> None:
-    """D5 — the CBVF write->load round trip carries `delivery_date`, no deck
-    and no cobre binary.
+def test_synthetic_roundtrip_carries_slot_dates_and_priced_date(
+    tmp_path: Path,
+) -> None:
+    """D5 — the write->load round trip carries the dated self-describing
+    schema, no deck and no cobre binary.
 
     Authors a one-plant, one-cut synthetic checkpoint via
     `synthetic_roundtrip` and asserts the reloaded terminal
-    `entity_manifest[0]` dict contains the `delivery_date` key (the CBVF
-    schema-break field `make_slot` now emits) and that
+    `entity_manifest[0]` dict carries the per-slot `interval_start` date
+    field, the reloaded pool carries the manifest's own `priced_state_date`
+    (the date the boundary loader selects a source against), and that
     `metadata["producer"]["cost_scale_factor"] == 1.0` survives the round
     trip (guards the legacy 10**6-scale marker from silently reappearing).
     """
@@ -433,5 +436,6 @@ def test_synthetic_roundtrip_carries_delivery_date(tmp_path: Path) -> None:
     reloaded = synthetic_roundtrip(tmp_path / "boundary", cuts, manifest, id_map)
 
     entry = reloaded["stage_cuts"][0]
-    assert "delivery_date" in entry["entity_manifest"][0]
+    assert "interval_start" in entry["entity_manifest"][0]
+    assert entry["priced_state_date"] == manifest.priced_state_date
     assert reloaded["metadata"]["producer"]["cost_scale_factor"] == 1.0

@@ -92,13 +92,15 @@ def test_ensure_boundary_fcf_capability_raises_when_cobre_absent(
     assert isinstance(exc_info.value.__cause__, ModuleNotFoundError)
 
 
-def test_ensure_boundary_fcf_capability_raises_when_delivery_date_missing(
+def test_ensure_boundary_fcf_capability_raises_when_slot_interval_start_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC 3 -- a wheel that writes and reloads fine but whose reloaded
-    terminal manifest slot lacks `delivery_date` (a cobre that predates the
-    CBVF format) still raises -- proving the probe checks the CBVF format, not
-    merely the `write_policy_checkpoint` attribute.
+    """AC 3 -- a wheel that writes and reloads fine, and whose reloaded pool
+    carries every self-describing field (`priced_state_date` included), but
+    whose reloaded terminal manifest slot lacks `interval_start` (a cobre that
+    predates the dated per-slot schema) still raises -- proving the probe
+    checks the slot-level date field, not merely the
+    `write_policy_checkpoint` attribute.
     """
     fake_policy = {
         "stage_cuts": [
@@ -107,6 +109,7 @@ def test_ensure_boundary_fcf_capability_raises_when_delivery_date_missing(
                 "cost_scale_factor": 1.0,
                 "node_id": 0,
                 "graph_stage_id": 0,
+                "priced_state_date": 20_261_101,
                 "entity_manifest": [
                     {
                         "entity_type": 0,
@@ -130,18 +133,102 @@ def test_ensure_boundary_fcf_capability_raises_when_delivery_date_missing(
     for marker in _REMEDIATION_MARKERS:
         assert marker in str(exc_info.value)
     assert isinstance(exc_info.value.__cause__, RuntimeError)
-    assert "delivery_date" in str(exc_info.value.__cause__)
+    assert "interval_start" in str(exc_info.value.__cause__)
+
+
+def test_ensure_boundary_fcf_capability_raises_when_priced_state_date_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC 3 (pool-date variant) -- a wheel whose reloaded terminal pool omits
+    `priced_state_date` (a cobre that predates the dated self-describing
+    checkpoint) still raises -- proving the probe checks the pool's date the
+    boundary loader selects a source against, not merely the slot-level fields.
+    """
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "cost_scale_factor": 1.0,
+                "node_id": 0,
+                "graph_stage_id": 0,
+                "entity_manifest": [
+                    {
+                        "entity_type": 0,
+                        "entity_id": 0,
+                        "subindex": 0,
+                        "was_active": True,
+                        "interval_start": 20_261_101,
+                    }
+                ],
+            }
+        ]
+    }
+    stub_cobre = SimpleNamespace(
+        write_policy_checkpoint=lambda *args, **kwargs: None,
+        results=SimpleNamespace(load_policy=lambda *args, **kwargs: fake_policy),
+    )
+    monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ensure_boundary_fcf_capability()
+
+    for marker in _REMEDIATION_MARKERS:
+        assert marker in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "priced_state_date" in str(exc_info.value.__cause__)
+
+
+def test_ensure_boundary_fcf_capability_raises_when_season_manifest_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC 3 (metadata variant) -- a wheel whose reloaded pool and slot are fully
+    formed but whose reloaded metadata omits `season_manifest` (a cobre
+    predating the season-manifest round-trip) still raises -- proving the probe
+    checks the study-global season descriptor the boundary loader's
+    season-compatibility gate requires."""
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "cost_scale_factor": 1.0,
+                "node_id": 0,
+                "graph_stage_id": 0,
+                "priced_state_date": 20_261_101,
+                "entity_manifest": [
+                    {
+                        "entity_type": 0,
+                        "entity_id": 0,
+                        "subindex": 0,
+                        "was_active": True,
+                        "interval_start": 20_261_101,
+                    }
+                ],
+            }
+        ],
+        "metadata": {},
+    }
+    stub_cobre = SimpleNamespace(
+        write_policy_checkpoint=lambda *args, **kwargs: None,
+        results=SimpleNamespace(load_policy=lambda *args, **kwargs: fake_policy),
+    )
+    monkeypatch.setitem(sys.modules, "cobre", stub_cobre)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ensure_boundary_fcf_capability()
+
+    for marker in _REMEDIATION_MARKERS:
+        assert marker in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "season_manifest" in str(exc_info.value.__cause__)
 
 
 def test_ensure_boundary_fcf_capability_raises_when_cost_scale_factor_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC 2 (failure variant) -- a wheel that writes and reloads fine, and
-    whose reloaded terminal pool carries `delivery_date` on its manifest
-    slot, but whose reloaded terminal pool itself omits `cost_scale_factor`
-    (a wheel that drops the self-describing fields on reload) still raises --
-    proving the probe checks the pool-level fields, not merely the slot-level
-    `delivery_date`.
+    """AC 2 (failure variant) -- a wheel that writes and reloads fine, but
+    whose reloaded terminal pool omits `cost_scale_factor` (a wheel that drops
+    the self-describing fields on reload) still raises -- proving the probe
+    checks the pool-level fields, not merely the slot-level date.
     """
     fake_policy = {
         "stage_cuts": [
@@ -194,8 +281,8 @@ def test_capability_module_imports_with_cobre_absent(
 def test_ensure_boundary_fcf_capability_passes_against_installed_wheel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC 2 -- against the installed (CBVF-capable) wheel, the guard passes
-    silently and writes only under a temporary directory: forcing
+    """AC 2 -- against the installed (checkpoint-capable) wheel, the guard
+    passes silently and writes only under a temporary directory: forcing
     `tempfile.gettempdir()` to resolve under `tmp_path` and asserting
     nothing is left behind afterward (the probe's own `TemporaryDirectory`
     cleans itself up on exit). With `cobre-python` a core dependency this

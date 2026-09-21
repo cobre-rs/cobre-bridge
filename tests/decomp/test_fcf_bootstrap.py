@@ -25,6 +25,14 @@ _MINIMAL_CONFIG = (
     '{"training": {"stopping_rules": [{"type": "iteration_limit", "limit": 500}]}}'
 )
 
+#: A synthetic study-global season descriptor, mirroring what
+#: ``cobre.results.load_policy`` returns under ``metadata["season_manifest"]``.
+_SEASON_MANIFEST: dict[str, object] = {
+    "cycle_code": 0,
+    "n_seasons": 12,
+    "hydro_orders": [{"hydro_id": 1, "orders": [1] * 12}],
+}
+
 #: A node-native ``stages.json`` with a 2-leaf terminal fan — the same shape
 #: ``decomp/temporal.py::build_node_graph`` emits for a 2-scenario deck.
 _FANNED_STAGES: dict[str, object] = {
@@ -123,8 +131,10 @@ def test_bootstrap_does_not_mutate_input_case(
                 "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
                 "node_id": 0,
                 "graph_stage_id": 0,
+                "priced_state_date": 20_261_101,
             },
         ],
+        "metadata": {"season_manifest": _SEASON_MANIFEST},
     }
     monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
     bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
@@ -138,8 +148,9 @@ def test_bootstrap_passes_single_iteration_run_contract(
 ) -> None:
     """The bootstrap drives cobre in-process for a single iteration: it calls
     ``cobre.run.run`` on the flattened variant (never ``case_dir`` itself)
-    with ``skip_simulation`` on, an ``iteration_limit`` 1 ``config_overrides``,
-    and an ``on_iteration`` stop callback — never a subprocess binary."""
+    with a ``config_overrides`` capping training at one iteration and disabling
+    simulation, and an ``on_iteration`` stop callback — never a subprocess
+    binary."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
     _write_case(case_dir)
@@ -159,8 +170,10 @@ def test_bootstrap_passes_single_iteration_run_contract(
                 "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
                 "node_id": 0,
                 "graph_stage_id": 0,
+                "priced_state_date": 20_261_101,
             },
         ],
+        "metadata": {"season_manifest": _SEASON_MANIFEST},
     }
     monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy, run=_record_run))
     bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
@@ -168,10 +181,11 @@ def test_bootstrap_passes_single_iteration_run_contract(
     assert len(calls) == 1
     assert args == [str(tmp_path / "work" / "bootstrap_variant")]
     kwargs = calls[0]
-    assert kwargs["skip_simulation"] is True
+    assert "skip_simulation" not in kwargs
     assert kwargs["config_overrides"]["training.stopping_rules"] == [
         {"type": "iteration_limit", "limit": 1}
     ]
+    assert kwargs["config_overrides"]["simulation.enabled"] is False
     assert callable(kwargs["on_iteration"])
     assert kwargs["on_iteration"](object()) is True  # stops at the first boundary
 
@@ -202,8 +216,10 @@ def test_bootstrap_flattens_terminal_fan_and_preserves_stage_content(
                 "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
                 "node_id": 0,
                 "graph_stage_id": 0,
+                "priced_state_date": 20_261_101,
             },
         ],
+        "metadata": {"season_manifest": _SEASON_MANIFEST},
     }
     monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy, run=_record_run))
 
@@ -296,8 +312,10 @@ def test_bootstrap_returns_real_single_node_id_after_flattening(
                 "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
                 "node_id": 7,
                 "graph_stage_id": 1,
+                "priced_state_date": 20_261_101,
             },
         ],
+        "metadata": {"season_manifest": _SEASON_MANIFEST},
     }
     monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
 
@@ -322,8 +340,10 @@ def test_bootstrap_returns_node_and_graph_stage_ids(
                 "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
                 "node_id": 0,
                 "graph_stage_id": 4,
+                "priced_state_date": 20_261_101,
             },
         ],
+        "metadata": {"season_manifest": _SEASON_MANIFEST},
     }
     monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
 
@@ -331,6 +351,8 @@ def test_bootstrap_returns_node_and_graph_stage_ids(
 
     assert manifest.node_id == 0
     assert manifest.graph_stage_id == 4
+    assert manifest.priced_state_date == 20_261_101
+    assert manifest.season_manifest == _SEASON_MANIFEST
 
 
 def test_bootstrap_raises_on_missing_node_id(
@@ -376,6 +398,87 @@ def test_bootstrap_raises_on_missing_graph_stage_id(
     monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
 
     with pytest.raises(RuntimeError, match="graph_stage_id"):
+        bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+
+def test_bootstrap_raises_on_missing_priced_state_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_case(case_dir)
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+                "graph_stage_id": 4,
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    with pytest.raises(RuntimeError, match="priced_state_date"):
+        bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+
+def test_bootstrap_raises_on_priced_state_date_sentinel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A terminal pool whose ``priced_state_date`` is the undated sentinel
+    (``i32::MIN``) is rejected: the date-driven boundary loader has nothing to
+    select a source against, so an undated pool cannot be authored."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_case(case_dir)
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+                "graph_stage_id": 4,
+                "priced_state_date": -(2**31),
+            },
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    with pytest.raises(RuntimeError, match="priced_state_date is the undated sentinel"):
+        bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
+
+
+def test_bootstrap_raises_on_missing_season_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checkpoint whose metadata carries no ``season_manifest`` (an installed
+    cobre predating the season-manifest round-trip) is rejected: the authored
+    boundary would have nothing to satisfy cobre's season-compatibility gate."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _write_case(case_dir)
+
+    fake_policy = {
+        "stage_cuts": [
+            {
+                "stage_id": 0,
+                "state_dimension": 1,
+                "entity_manifest": [{"entity_type": 0, "entity_id": 0, "subindex": 0}],
+                "node_id": 0,
+                "graph_stage_id": 4,
+                "priced_state_date": 20_261_101,
+            },
+        ],
+        "metadata": {},
+    }
+    monkeypatch.setitem(sys.modules, "cobre", _stub_cobre(fake_policy))
+
+    with pytest.raises(RuntimeError, match="season_manifest"):
         bootstrap_terminal_manifest(case_dir, work_dir=tmp_path / "work")
 
 

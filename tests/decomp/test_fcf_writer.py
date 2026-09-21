@@ -41,6 +41,7 @@ def test_build_stage_cuts_payload_shape() -> None:
         cost_scale_factor=1.0,
         node_id=0,
         graph_stage_id=4,
+        priced_state_date=manifest.priced_state_date,
     )
 
     assert payload["stage_id"] == 10
@@ -49,6 +50,7 @@ def test_build_stage_cuts_payload_shape() -> None:
     assert payload["cost_scale_factor"] == 1.0
     assert payload["node_id"] == 0
     assert payload["graph_stage_id"] == 4
+    assert payload["priced_state_date"] == manifest.priced_state_date
     assert len(payload["cuts"]) == 2
     for cut in payload["cuts"]:
         assert len(cut["coefficients"]) == 4
@@ -99,6 +101,7 @@ def test_write_boundary_checkpoint_creates_files(tmp_path: Path) -> None:
         cost_scale_factor=1.0,
         node_id=0,
         graph_stage_id=10,
+        priced_state_date=manifest.priced_state_date,
     )
     metadata = build_metadata(
         num_stages=1,
@@ -149,6 +152,7 @@ def test_build_payload_rejects_wrong_coefficient_length() -> None:
             cost_scale_factor=1.0,
             node_id=0,
             graph_stage_id=10,
+            priced_state_date=manifest.priced_state_date,
         )
 
 
@@ -164,6 +168,7 @@ def test_build_stage_cuts_payload_refuses_none_cost_scale_factor() -> None:
             cost_scale_factor=None,
             node_id=0,
             graph_stage_id=10,
+            priced_state_date=manifest.priced_state_date,
         )
 
 
@@ -179,6 +184,7 @@ def test_build_stage_cuts_payload_refuses_shared_pool_sentinel_node_id() -> None
             cost_scale_factor=1.0,
             node_id=-1,
             graph_stage_id=10,
+            priced_state_date=manifest.priced_state_date,
         )
 
 
@@ -195,6 +201,7 @@ def test_build_stage_cuts_payload_carries_keyed_inflow_lag_coefficients() -> Non
         cost_scale_factor=1.0,
         node_id=0,
         graph_stage_id=10,
+        priced_state_date=manifest.priced_state_date,
     )
     # The keyed lag coefficients ride alongside the storage-aligned vector, as
     # lists cobre's write_policy_checkpoint consumes to place its reserved slots.
@@ -211,5 +218,6 @@ def test_build_stage_cuts_payload_empty_lag_coefficients_by_default() -> None:
         cost_scale_factor=1.0,
         node_id=0,
         graph_stage_id=10,
+        priced_state_date=manifest.priced_state_date,
     )
     assert payload["cuts"][0]["inflow_lag_coefficients"] == {}

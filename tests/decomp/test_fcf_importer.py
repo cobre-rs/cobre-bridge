@@ -126,13 +126,14 @@ def test_import_boundary_fcf_no_cut_files_is_noop(
 
 
 # ---------------------------------------------------------------------------
-# Thread node_id/graph_stage_id from the bootstrap manifest into
-# `build_stage_cuts_payload`, and into `config.json`'s
-# `policy.boundary.source_stage` (never the cut file's own calendar
-# `boundary_stage`). Every cut-reader/cobre-import seam is monkeypatched
-# (mirrors `test_fcf_injection.py`'s seam-stubbing convention, kept
-# local per the one-home-per-source-module test convention) — no real deck,
-# cobre binary, or installed cobre wheel needed.
+# Thread node_id/graph_stage_id/priced_state_date from the bootstrap manifest
+# into `build_stage_cuts_payload`, while `config.json`'s `policy.boundary`
+# stays the date-driven `{"path": "boundary"}` block (the cut file's calendar
+# `boundary_stage` flows only into the payload's `stage_id`). Every
+# cut-reader/cobre-import seam is monkeypatched (mirrors
+# `test_fcf_injection.py`'s seam-stubbing convention, kept local per the
+# one-home-per-source-module test convention) — no real deck, cobre binary, or
+# installed cobre wheel needed.
 # ---------------------------------------------------------------------------
 
 
@@ -172,9 +173,10 @@ def _stub_import_seams(
 def test_import_boundary_fcf_threads_node_and_graph_stage_ids(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC 1 — given a bootstrap manifest with node_id=0/graph_stage_id=4 and
-    a cuts file whose boundary_stage=4, `build_stage_cuts_payload` is called
-    with `cost_scale_factor=1.0`, `node_id=0`, `graph_stage_id=4`."""
+    """AC 1 — given a bootstrap manifest with node_id=0/graph_stage_id=4/
+    priced_state_date=20261101 and a cuts file whose boundary_stage=4,
+    `build_stage_cuts_payload` is called with `cost_scale_factor=1.0`,
+    `node_id=0`, `graph_stage_id=4`, `priced_state_date=20261101`."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
 
@@ -191,7 +193,10 @@ def test_import_boundary_fcf_threads_node_and_graph_stage_ids(
     monkeypatch.setattr(
         "cobre_bridge.decomp.fcf.importer.bootstrap_terminal_manifest",
         lambda *_args, **_kwargs: make_manifest(
-            [make_slot(0, 0, 0)], node_id=0, graph_stage_id=4
+            [make_slot(0, 0, 0)],
+            node_id=0,
+            graph_stage_id=4,
+            priced_state_date=20_261_101,
         ),
     )
     monkeypatch.setattr(
@@ -232,19 +237,21 @@ def test_import_boundary_fcf_threads_node_and_graph_stage_ids(
         "cost_scale_factor": 1.0,
         "node_id": 0,
         "graph_stage_id": 4,
+        "priced_state_date": 20_261_101,
     }
 
 
-def test_import_boundary_fcf_source_stage_is_graph_stage_id_not_boundary_stage(
+def test_import_boundary_fcf_graph_stage_id_distinct_from_boundary_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A bootstrap manifest's `graph_stage_id` disagreeing with the cut
     file's own `boundary_stage` is not an error (they are different axes —
     cobre's own 0-based pool identity vs. the source model's 1-based
     calendar month count — that only coincidentally share a value):
-    `import_boundary_fcf` patches `config.json`'s `policy.boundary.
-    source_stage` with the manifest's `graph_stage_id` (3), never
-    `boundary_stage` (4), and does not raise."""
+    `build_stage_cuts_payload` receives `graph_stage_id=3` (the manifest's)
+    and `stage_id=4` (the cut file's `boundary_stage`), and `config.json`'s
+    `policy.boundary` carries no stage/pool index at all — the source is
+    selected by calendar date."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
 
@@ -270,6 +277,18 @@ def test_import_boundary_fcf_source_stage_is_graph_stage_id_not_boundary_stage(
             cuts=(make_mapped_cut(coefficients=(1.5,)),), dropped=()
         ),
     )
+    calls: list[dict[str, object]] = []
+
+    def _spy_build_stage_cuts_payload(
+        *_args: object, **kwargs: object
+    ) -> dict[str, object]:
+        calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(
+        "cobre_bridge.decomp.fcf.importer.build_stage_cuts_payload",
+        _spy_build_stage_cuts_payload,
+    )
     monkeypatch.setattr(
         "cobre_bridge.decomp.fcf.importer.write_boundary_checkpoint",
         lambda *_args, **_kwargs: None,
@@ -285,7 +304,10 @@ def test_import_boundary_fcf_source_stage_is_graph_stage_id_not_boundary_stage(
         initial_conditions={},
     )
 
-    assert config["policy"]["boundary"]["source_stage"] == 3
+    assert len(calls) == 1
+    assert calls[0]["stage_id"] == 4
+    assert calls[0]["graph_stage_id"] == 3
+    assert config["policy"]["boundary"] == {"path": "boundary"}
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +443,7 @@ def test_emit_import_diagnostics_gnl_deviation_fires() -> None:
     manifest = make_manifest(
         [
             make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
-            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, interval_start=20260501),
         ]
     )
     header = make_cortes_header(
@@ -638,7 +660,7 @@ def test_emit_import_diagnostics_gnl_deviation_dropped_count_includes_uncovered_
     manifest = make_manifest(
         [
             make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
-            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260401),
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, interval_start=20260401),
         ]
     )
     header = make_cortes_header(
@@ -722,7 +744,7 @@ def test_emit_import_diagnostics_c2_panel3_no_dropped_column() -> None:
     manifest = make_manifest(
         [
             make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
-            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, interval_start=20260501),
         ]
     )
     header = make_cortes_header(
@@ -835,7 +857,7 @@ def test_emit_import_diagnostics_c4_no_remediation_footer() -> None:
     manifest = make_manifest(
         [
             make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
-            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, interval_start=20260501),
         ]
     )
     header = make_cortes_header(
@@ -882,7 +904,7 @@ def test_emit_import_diagnostics_gnl_dropped_count_sums_source_and_instudy() -> 
     manifest = make_manifest(
         [
             make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
-            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260401),
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, interval_start=20260401),
         ]
     )
     header = make_cortes_header(
@@ -929,7 +951,7 @@ def test_emit_import_diagnostics_gnl_deviation_class4_absent_no_drop() -> None:
     manifest = make_manifest(
         [
             make_slot(_HYDRO_STORAGE, 0, 0),  # unrelated dummy, satisfies the guard
-            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, delivery_date=20260501),
+            make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0, interval_start=20260501),
         ]
     )
     header = make_cortes_header(
