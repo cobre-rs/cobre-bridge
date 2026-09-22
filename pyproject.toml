@@ -24,7 +24,7 @@ dependencies = [
     # boundary FCF by default and `convert --validate` / `compare` load cobre
     # output, so `import cobre` must work out of the box. Keep the floor in
     # lockstep with MIN_COBRE_VERSION in cobre/compat.py (which documents the contract).
-    "cobre-python>=0.15.0,<0.16",
+    "cobre-python>=0.16.0,<0.17",
 ]
 
 [project.optional-dependencies]

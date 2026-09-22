@@ -482,7 +482,7 @@ class TestCliInProcess:
         """The manifest's ``min_cobre_version`` tracks the CLI constant, pinned.
 
         A manifest written after the bump must record the real
-        floor (``"0.15.0"``), not a stale value — the manifest is provenance,
+        floor (``"0.16.0"``), not a stale value — the manifest is provenance,
         and a wrong floor there is false provenance. Pinning the literal (not
         just equality with the constant) catches an accidental revert of the
         constant itself.
@@ -491,7 +491,7 @@ class TestCliInProcess:
         from cobre_bridge.cli.conversion_manifest import ConversionManifest
         from cobre_bridge.core.conversion import ConversionReport
 
-        assert MIN_COBRE_VERSION == "0.15.0"
+        assert MIN_COBRE_VERSION == "0.16.0"
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "dst"
@@ -510,7 +510,7 @@ class TestCliInProcess:
 
         assert code == 0
         manifest = ConversionManifest.from_json(dst / "conversion_manifest.json")
-        assert manifest.min_cobre_version == "0.15.0"
+        assert manifest.min_cobre_version == "0.16.0"
         assert manifest.min_cobre_version == MIN_COBRE_VERSION
 
     def test_manifest_not_in_json_verdict(
@@ -1193,20 +1193,18 @@ class TestCliInProcess:
     def test_validate_skipped_for_installed_0_12_below_new_min(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A 0.12 install is now too old and gets an honest skip.
+        """An install below the floor gets an honest skip, not a false reject.
 
-        Before the ``MIN_COBRE_VERSION`` bump to ``"0.13.0"``, an installed
-        ``0.12.0`` satisfied the gate and ``validate`` ran — against output
-        that (post hydro unit-groups / windowed inflow_history) a 0.12 cobre
-        cannot actually read, producing a false rejection. At the new floor
-        the gate must skip instead: no ``validate`` call, exit 0, and a
-        warning naming *both* the installed and required versions so the
-        skip is diagnosable rather than a silent no-op.
+        A cobre-python older than ``MIN_COBRE_VERSION`` cannot read the emitted
+        output, so the gate must skip validation rather than run it and reject:
+        no ``validate`` call, exit 0, and a warning naming *both* the installed
+        and required versions so the skip is diagnosable rather than a silent
+        no-op.
         """
         from cobre_bridge.cli import MIN_COBRE_VERSION
         from cobre_bridge.core.conversion import ConversionReport
 
-        assert MIN_COBRE_VERSION == "0.15.0"
+        assert MIN_COBRE_VERSION == "0.16.0"
 
         src = _make_fake_newave_dir(tmp_path)
         dst = tmp_path / "dst"
@@ -1236,7 +1234,7 @@ class TestCliInProcess:
         # validation did not run (not that it ran and passed).
         assert "skipping cobre-python validation" in stderr
         assert "0.12.0" in stderr
-        assert "0.15.0" in stderr
+        assert "0.16.0" in stderr
         assert MIN_COBRE_VERSION in stderr
         doc = json.loads(stdout)
         assert doc["status"] == "ok"
