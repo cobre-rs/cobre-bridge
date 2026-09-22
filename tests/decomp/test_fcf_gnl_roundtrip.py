@@ -4,7 +4,7 @@
 hours-weighted patamar sum ``Σ_p pi_gnl[col(s, p, l)] · h_p`` (``math.fsum``)
 onto the terminal ring's *covered* dated ``AnticipatedThermalState`` slots,
 and the covered-lane filter drops that sum to ``0.0`` on any dated slot whose
-``delivery_date`` falls before the post-study horizon. Two existing
+``interval_start`` falls before the post-study horizon. Two existing
 tests in ``tests/decomp/test_fcf_roundtrip.py`` prove the mapper's
 storage/lag legs end to end via a synthetic ``map -> write -> load_policy``
 round trip cross-checked against a *non-circular* oracle; this module is the
@@ -169,10 +169,10 @@ def test_synthetic_gnl_roundtrip_coefficient_identity(tmp_path: Path) -> None:
             make_slot(_HYDRO_STORAGE, 0, 0),  # dummy; satisfies the storage guard
             make_slot(_ANTICIPATED_THERMAL_STATE, 94, 0),  # sentinel (undated)
             make_slot(
-                _ANTICIPATED_THERMAL_STATE, 94, 1, delivery_date=20260501
+                _ANTICIPATED_THERMAL_STATE, 94, 1, interval_start=20260501
             ),  # covered
             make_slot(
-                _ANTICIPATED_THERMAL_STATE, 95, 0, delivery_date=20260401
+                _ANTICIPATED_THERMAL_STATE, 95, 0, interval_start=20260401
             ),  # non-covered
         ]
     )

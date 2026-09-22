@@ -1,18 +1,9 @@
 """Tests for the boundary FCF importer's config-patch orchestration
 (``fcf/importer.py::import_boundary_fcf``/``_patch_policy_boundary``).
 
-**TRACKED COBRE-GAP C8** (see cobre's conversion-found-improvements registry
-and the code comment at ``fcf/importer.py::_patch_policy_boundary``): cobre
-resolves
-``policy.boundary.path`` against the run's ``--output`` directory, not
-``case_dir``, so every ``cobre run`` invocation that touches the boundary
-must pass ``--output`` equal to the case dir it runs against — never the
-default and never a distinct scratch output dir. cobre itself is not
-touched; this is a workaround, tracked until C8 is fixed upstream.
-
 Every test below exercises the importer's orchestration (config-patch,
-C8-warning, empty-storage-manifest guard) with every cobre/deck seam
-monkeypatched — no binary, no deck, and no installed cobre wheel needed.
+empty-storage-manifest guard) with every cobre/deck seam monkeypatched — no
+binary, no deck, and no installed cobre wheel needed.
 """
 
 from __future__ import annotations
@@ -88,8 +79,8 @@ def _mock_deck_and_cut_seams(
     # single 648 h block rather than author a full stages.json. `import_
     # boundary_fcf` derives its scalar `cost_unit_hours` as the sum of these,
     # so a one-element `[648.0]` preserves the prior 648 h; these
-    # storage/C8 cases place no live GNL ring, so the per-block length is never
-    # validated against `n_patamares`.
+    # storage-only cases place no live GNL ring, so the per-block length is
+    # never validated against `n_patamares`.
     monkeypatch.setattr(
         "cobre_bridge.decomp.fcf.importer._final_stage_block_hours",
         lambda _case_dir: [648.0],
@@ -138,22 +129,22 @@ def test_patch_policy_boundary_preserves_other_sections(tmp_path: Path) -> None:
     # writes *this* object, never re-reading the file.
     config = dict(other_sections)
 
-    _patch_policy_boundary(CaseWriter(tmp_path), config, source_stage=10)
+    _patch_policy_boundary(CaseWriter(tmp_path), config)
 
-    assert config["policy"]["boundary"] == {"path": "boundary", "source_stage": 10}
+    assert config["policy"]["boundary"] == {"path": "boundary"}
     for key, value in other_sections.items():
         assert config[key] == value
 
     patched_text = config_path.read_text(encoding="utf-8")
     patched = json.loads(patched_text)
 
-    assert patched["policy"]["boundary"] == {"path": "boundary", "source_stage": 10}
+    assert patched["policy"]["boundary"] == {"path": "boundary"}
     for key, value in other_sections.items():
         assert patched[key] == value
 
     expected_config = {
         **other_sections,
-        "policy": {"boundary": {"path": "boundary", "source_stage": 10}},
+        "policy": {"boundary": {"path": "boundary"}},
     }
     expected_text = json.dumps(expected_config, indent=2, ensure_ascii=False) + "\n"
     assert patched_text == expected_text, (
@@ -166,27 +157,27 @@ def test_patch_policy_boundary_preserves_other_sections(tmp_path: Path) -> None:
     )
 
 
-def test_import_boundary_fcf_logs_c8_workaround(
+def test_import_boundary_fcf_patches_config_and_emits_no_output_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Requirement 0 / AC 2, AC 3 — the C8 cobre-gap workaround is logged,
-    not silently absorbed, and the orchestration's own return value +
-    config patch are correct.
+    """The orchestration's return value and config patch are correct, and the
+    boundary loads on a plain `cobre run <case>` — no run-with-`--output`
+    warning, because cobre now resolves `policy.boundary.path` against the case
+    dir (the former C8 gap is closed).
 
     Needs no cobre binary, no real deck, and no installed cobre wheel: every
     seam that would touch any of the three (`bootstrap_terminal_manifest`,
     the cut readers, the checkpoint writer, and `import_boundary_fcf`'s own
     internal `import cobre`) is monkeypatched to a minimal stand-in — a
     "monkeypatched-shape unit path" — isolating the orchestration under
-    test: that `import_boundary_fcf` returns `case_dir / "boundary"`,
-    patches `config.json`'s `policy.boundary.source_stage` to the reader's
-    boundary stage, emits a `WARNING` with the actionable run-with-`--output`
-    guidance right after patching `policy.boundary`, and that the source
-    carries the matching `TRACKED COBRE-GAP WORKAROUND (C8)` code comment at
-    the patch site. The internal C8 marker lives in that comment, not in the
-    end-user-facing log message.
+    test: that `import_boundary_fcf` returns `case_dir / "boundary"` and
+    patches `config.json`'s `policy.boundary` to the date-driven
+    `{"path": "boundary"}` block (no stage/pool index — cobre selects the
+    source by calendar date). The regression guards below pin that neither the
+    retired `--output` WARNING nor the `TRACKED COBRE-GAP (C8)` code comment
+    comes back.
     """
     case_dir = tmp_path / "case"
     case_dir.mkdir()
@@ -236,29 +227,21 @@ def test_import_boundary_fcf_logs_c8_workaround(
     assert boundary_dir == case_dir / "boundary"
 
     patched_config = json.loads((case_dir / "config.json").read_text(encoding="utf-8"))
-    assert (
-        patched_config["policy"]["boundary"]["source_stage"] == fake_cuts.boundary_stage
-    )
+    assert patched_config["policy"]["boundary"] == {"path": "boundary"}
     # The passed dict is mutated in place, never re-read from disk.
-    assert config["policy"]["boundary"]["source_stage"] == fake_cuts.boundary_stage
+    assert config["policy"]["boundary"] == {"path": "boundary"}
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    # The workaround is surfaced as an actionable WARNING (the run-with-
-    # `--output` constraint) — not silently absorbed. The internal "(C8)"
-    # tracking marker lives in the code comment (asserted below), never in the
-    # end-user-facing message, so this checks the actionable content only.
-    assert any(
-        "--output" in r.message and "cobre run" in r.message for r in warnings
-    ), f"no actionable run-with-output WARNING found: {caplog.text}"
-    # The message must not leak the internal tracking code to end users.
-    assert not any("TRACKED COBRE-GAP" in r.message for r in warnings), (
-        f"C8 tracking marker leaked into a user-facing log message: {caplog.text}"
+    # The retired C8 workaround emitted a run-with-`--output` WARNING; the gap
+    # is closed, so no such warning may surface.
+    assert not any("--output" in r.message for r in warnings), (
+        f"a retired run-with-output WARNING resurfaced: {caplog.text}"
     )
 
     source_path = inspect.getsourcefile(import_boundary_fcf)
     assert source_path is not None
     source_text = Path(source_path).read_text(encoding="utf-8")
-    assert "# TRACKED COBRE-GAP WORKAROUND (C8" in source_text
+    assert "TRACKED COBRE-GAP WORKAROUND (C8" not in source_text
 
 
 def test_import_boundary_fcf_rejects_storageless_manifest(
@@ -268,8 +251,8 @@ def test_import_boundary_fcf_rejects_storageless_manifest(
     """AC 4 — a bootstrapped manifest with no `HydroStorage` slot at all is
     a terminal-manifest read bug, not a legitimate empty-storage case.
 
-    `map_boundary_cuts` is deliberately left un-mocked here (unlike the C8
-    test above) — its own read-bug guard must fire for real, and
+    `map_boundary_cuts` is deliberately left un-mocked here (unlike the
+    config-patch test above) — its own read-bug guard must fire for real, and
     `import_boundary_fcf` must let the resulting `ValueError` propagate
     verbatim rather than swallow it.
     """

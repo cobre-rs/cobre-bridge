@@ -3,7 +3,7 @@
 `convert decomp` imports the deck's boundary FCF by default and needs
 `import cobre` to succeed, so `cobre-python` must be a CORE runtime dependency —
 not an optional extra. This module locks that down: a fresh
-`pip install cobre-bridge` (no extras) must pull a CBVF-capable cobre. It was the
+`pip install cobre-bridge` (no extras) must pull a checkpoint-capable cobre. It was the
 absence of exactly this guard that let a release ship with `cobre-python` as an
 extra, so a plain install failed `convert decomp` on any real deck. Tier-1: reads
 `pyproject.toml`, never imports cobre.

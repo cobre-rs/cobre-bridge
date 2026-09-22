@@ -7,15 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **Data maps, in Portuguese.** `docs/newave-data-map.md` and
-  `docs/decomp-data-map.md` trace every file and field of the converted case
-  back to the deck file, record, and column it comes from, state the
-  transformation applied, and list what the converter does not convert yet.
-  Both pages are generated from `docs/lineage/` and gated by tests against a
-  real conversion of the mini decks, so they cannot drift from the code.
-
 ### Fixed
 
 - **Hydros under expansion (`EE`) are no longer dropped.** `confhd.dat` marks a
@@ -31,6 +22,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the first stage at the configuration `modif.dat` declares for the study
   start and reaches the `hidr.dat` configuration on the entry date, with the
   capacity before each entry written as a per-stage bound.
+
+## [0.16.0] - 2026-09-22
+
+Pairs the bridge with the **cobre 0.16.0** release: the `cobre-python` pin and
+`MIN_COBRE_VERSION` floor move to `0.16.0` (bridge `X.Y.Z` pairs cobre `X.Y.Z`,
+guarded by `tests/test_packaging.py`). `convert decomp` now authors the terminal
+boundary with cobre 0.16.0's date-driven contract — the change that requires the
+pairing — and the release also honours the `dger.dat` input-gating switches,
+fixes `modif.dat` volume units, ships generated Portuguese data maps, and
+reorganises the internal package layout.
+
+### Added
+
+- **Data maps, in Portuguese.** `docs/newave-data-map.md` and
+  `docs/decomp-data-map.md` trace every file and field of the converted case
+  back to the deck file, record, and column it comes from, state the
+  transformation applied, and list what the converter does not convert yet.
+  Both pages are generated from `docs/lineage/` and gated by tests against a
+  real conversion of the mini decks, so they cannot drift from the code.
+
+### Fixed
+
 - `modif.dat` volume records (`VOLMAX`, `VOLMIN`, `VMAXT`, `VMINT`) now honour
   their unit column: `h` is hm³ and `%` is a percentage of the plant's useful
   volume, resolved against the `hidr.dat` registry. Before, permanent records
@@ -43,6 +56,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **cobre pairing.** `cobre-python>=0.16.0,<0.17` and `MIN_COBRE_VERSION =
+  "0.16.0"`; the conversion manifest records the `0.16.0` floor.
+- **`convert decomp` authors the terminal boundary with cobre's date-driven
+  contract.** The boundary cost-to-go function is now priced by calendar date —
+  the boundary pool carries the study horizon's terminal date, and each
+  anticipated delivery carries an explicit `interval_start`/`interval_end` date
+  window instead of a single delivery stage — and the case's season descriptor
+  round-trips through the policy checkpoint so cobre's season-compatibility gate
+  accepts the reconciled boundary. cobre now resolves `policy.boundary.path`
+  against the case directory, so a plain `cobre run <case>` loads the boundary;
+  the earlier `--output <case_dir>` guidance and its warning are retired. This is
+  the change that pairs the release with the next cobre.
 - **`dger.dat` switches are honoured.** `agrint.dat`, `c_adic.dat`,
   `ghmin.dat`, `re.dat`, `restricao-eletrica.csv`, minimum outflow, and the
   dated `TURBMAXT`/`TURBMINT` records of `modif.dat` are now left out when the

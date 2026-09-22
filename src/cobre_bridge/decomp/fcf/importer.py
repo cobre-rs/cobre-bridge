@@ -621,15 +621,17 @@ def _emit_import_diagnostics(
         )
 
 
-def _patch_policy_boundary(
-    writer: CaseWriter, config: dict, *, source_stage: int
-) -> None:
+def _patch_policy_boundary(writer: CaseWriter, config: dict) -> None:
     """Set ``["policy"]["boundary"]`` in ``config.json``, preserving the rest.
 
-    ``source_stage`` is cobre's own 0-based policy-graph ``graph_stage_id``
-    (the pool cobre's boundary loader resolves ``source_stage`` against) —
-    never the source model's own 1-based calendar-anchored boundary-stage
-    number, a different axis that only coincidentally shares a value.
+    The block carries only ``path``: cobre's boundary loader selects the
+    source pool by calendar date (the pool whose ``priced_state_date`` equals
+    the loading study's own boundary date), so no stage/pool index is written.
+    ``policy.boundary.source_stage`` is removed from cobre's config contract
+    and rejected by its deny-unknown-fields validation; ``strict`` is left
+    unset (its ``false`` default), so a source pricing more state than the
+    study models loads and records the superset in the reconciliation report
+    rather than rejecting.
 
     Mutates the pipeline's own in-memory ``config`` dict (the one already
     written to ``config.json``, ``state_space``/``training``/``simulation``
@@ -639,13 +641,7 @@ def _patch_policy_boundary(
     byte-for-byte in style.
     """
     policy = config.setdefault("policy", {})
-    # TRACKED COBRE-GAP WORKAROUND (C8, cobre's conversion-found-improvements
-    # registry): cobre resolves this path against the run's --output directory,
-    # not case_dir, while every other case input resolves against case_dir. A
-    # default `cobre run <case>` will not find `case_dir/boundary` — callers
-    # must run with `--output <case_dir>` until cobre resolves
-    # policy.boundary.path relative to case_dir.
-    policy["boundary"] = {"path": "boundary", "source_stage": source_stage}
+    policy["boundary"] = {"path": "boundary"}
     writer.write_json("config.json", config)
 
 
@@ -710,12 +706,6 @@ def import_boundary_fcf(
        ``recent_observations`` seed (:func:`_seed_recent_observations`), the raw
        inflow-lag values the folded RHS is built to offset. Fold and seed ship
        together or not at all.
-    7. Logs the TRACKED COBRE-GAP WORKAROUND (C8) usage constraint this patch
-       implies: until cobre resolves ``policy.boundary.path`` relative to
-       ``case_dir`` rather than the run's ``--output`` directory, the case
-       must be run with ``--output <case_dir>`` (see
-       ``_patch_policy_boundary``'s code comment and
-       cobre's conversion-found-improvements registry).
 
     Returns the ``case_dir/boundary`` path, or ``None`` on the no-cut-files
     no-op.
@@ -822,6 +812,7 @@ def import_boundary_fcf(
         cost_scale_factor=cost_scale_factor,
         node_id=manifest.node_id,
         graph_stage_id=manifest.graph_stage_id,
+        priced_state_date=manifest.priced_state_date,
     )
     completed_iterations = max((cut.iteration for cut in mapping.cuts), default=0)
     metadata = build_metadata(
@@ -835,6 +826,7 @@ def import_boundary_fcf(
         rng_seed=0,
         created_at=datetime.now(tz=UTC).isoformat(),
         cobre_version=cobre.__version__,
+        season_manifest=manifest.season_manifest,
     )
 
     boundary_dir = case_dir / "boundary"
@@ -845,12 +837,7 @@ def import_boundary_fcf(
         inflow_lag_depth=inflow_lag_depth,
     )
 
-    # cobre resolves `source_stage` against a pool's own `graph_stage_id`
-    # (0-based), never `boundary_stage` (the source model's 1-based
-    # calendar-month count, kept above only for the inflow-lag coupling
-    # fold and the payload's own provenance `stage_id`) — the two axes only
-    # coincidentally share a value.
-    _patch_policy_boundary(writer, config, source_stage=manifest.graph_stage_id)
+    _patch_policy_boundary(writer, config)
 
     # Seed the pre-study inflow-lag state and record the mean fold — both gated
     # on the same mlt.dat presence as the fold above, so the raw seed never
@@ -869,22 +856,5 @@ def import_boundary_fcf(
             n_windows,
             coupling_month,
         )
-
-    # TRACKED COBRE-GAP WORKAROUND (C8): cobre resolves policy.boundary.path
-    # against the run's --output directory rather than the case directory the
-    # checkpoint was authored into, so this case must be run with
-    # --output=<case_dir>. Removal condition tracked in cobre's
-    # conversion-found-improvements registry. The message below is
-    # end-user-facing (no repo-internal references).
-    _LOG.warning(
-        "This case must be run with `cobre run %s --output %s`: the boundary "
-        "cost-to-go checkpoint at %s is resolved relative to the run's output "
-        "directory, so a plain `cobre run %s` (with output elsewhere) will not "
-        "find it and will stop before the first iteration.",
-        case_dir,
-        case_dir,
-        boundary_dir,
-        case_dir,
-    )
 
     return boundary_dir

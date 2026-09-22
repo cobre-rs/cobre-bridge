@@ -868,6 +868,8 @@ class TestLoadPolicyMetadataHappyPath:
             state_dimension=state_dimension,
             node_id=0,
             graph_stage_id=0,
+            priced_state_date=20_261_101,
+            season_manifest={"cycle_code": 255, "n_seasons": 0, "hydro_orders": []},
         )
         mapping = MappingResult(
             cuts=(
@@ -889,6 +891,7 @@ class TestLoadPolicyMetadataHappyPath:
             cost_scale_factor=1.0,
             node_id=0,
             graph_stage_id=0,
+            priced_state_date=manifest.priced_state_date,
         )
         metadata = build_metadata(
             num_stages=1,

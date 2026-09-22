@@ -8,12 +8,11 @@ from __future__ import annotations
 #: new enough to validate the output. Keep the ``cobre-python`` pin in
 #: ``pyproject.toml`` in lockstep with this constant on any future bump.
 #:
-#: The floor is 0.15.0 because the emitted inputs depend on it: the DECOMP track
-#: now emits the fixed post-horizon anticipated-thermal commitments 0.15.0 models
-#: (past-horizon já-comandada windows plus signaled post-study bounds) and writes
-#: the self-describing ``manifest.bin`` policy checkpoint 0.15.0 reads. An older
-#: cobre rejects those inputs or mis-loads the checkpoint.
-MIN_COBRE_VERSION = "0.15.0"
+#: The floor is 0.16.0 because the DECOMP terminal boundary depends on it: the
+#: boundary policy is priced by calendar date and its season descriptor rides the
+#: checkpoint's season manifest, which cobre 0.16.0's season-compatibility gate
+#: requires. An older cobre rejects the dated, season-tagged boundary on load.
+MIN_COBRE_VERSION = "0.16.0"
 
 
 def _installed_cobre_python_version() -> str | None:
