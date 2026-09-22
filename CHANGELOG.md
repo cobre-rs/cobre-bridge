@@ -30,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`convert decomp` authors the terminal boundary with cobre's date-driven
+  contract.** The boundary cost-to-go function is now priced by calendar date —
+  the boundary pool carries the study horizon's terminal date, and each
+  anticipated delivery carries an explicit `interval_start`/`interval_end` date
+  window instead of a single delivery stage — and the case's season descriptor
+  round-trips through the policy checkpoint so cobre's season-compatibility gate
+  accepts the reconciled boundary. cobre now resolves `policy.boundary.path`
+  against the case directory, so a plain `cobre run <case>` loads the boundary;
+  the earlier `--output <case_dir>` guidance and its warning are retired. This is
+  the change that pairs the release with the next cobre.
 - **`dger.dat` switches are honoured.** `agrint.dat`, `c_adic.dat`,
   `ghmin.dat`, `re.dat`, `restricao-eletrica.csv`, minimum outflow, and the
   dated `TURBMAXT`/`TURBMINT` records of `modif.dat` are now left out when the
