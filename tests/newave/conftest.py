@@ -244,6 +244,54 @@ def _make_intercambio_df() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _make_ee_confhd_df() -> pd.DataFrame:
+    """The two-plant confhd with plant 2 marked ``EE`` (in service, expanding)."""
+    df = _make_confhd_df()
+    df["usina_existente"] = ["EX", "EE"]
+    return df
+
+
+def _make_ee_exph_mock(*, entry: str = "2024-07-01") -> MagicMock:
+    """An ``exph`` reader whose ``expansoes`` carries plant 2's machine entries.
+
+    Mirrors the ``EE`` layout of a real ``exph.dat``: **no** filling row
+    (``data_inicio_enchimento`` is ``NaT`` throughout, which is what keeps
+    ``filling_hydro_codes`` from claiming the plant) and one row per entering
+    machine, all in the expansion's own machine group.
+    """
+    expansoes = pd.DataFrame(
+        {
+            "codigo_usina": [2, 2],
+            "nome_usina": ["USINA_B", "USINA_B"],
+            "data_inicio_enchimento": [pd.NaT, pd.NaT],
+            "duracao_enchimento": [0, 0],
+            "volume_morto": [0.0, 0.0],
+            "data_entrada_operacao": [pd.Timestamp(entry), pd.Timestamp(entry)],
+            "conjunto_maquina_entrada": [2, 2],
+            "maquina_entrada": [1, 2],
+        }
+    )
+    exph = MagicMock()
+    exph.expansoes = expansoes
+    return exph
+
+
+def _ee_expansion_case(tmp_path, *, entry: str = "2024-07-01"):
+    """A ``NewaveCase`` whose plant 2 is ``EE`` with two machines still to enter.
+
+    Under the default Jan-2024 one-year horizon (12 stages), the Jul-2024 entry
+    is stage 6: plant 2 runs on conjunto 1 alone (3 × 150 MW = 450) for stages
+    0-5 and reaches its registry configuration (450 + 2 × 120 = 690) from stage
+    6. The deck carries no ``modif.dat``, so the study-start configuration comes
+    from the ``registry − all entering`` fallback rather than ``NUMMAQ``.
+    """
+    return _hydro_case(
+        tmp_path,
+        confhd=_make_ee_confhd_df(),
+        exph=_make_ee_exph_mock(entry=entry),
+    )
+
+
 def _make_ne_confhd_df() -> pd.DataFrame:
     """Two EX plants (1, 2) plus one NE filling plant (309 JURUENA)."""
     return pd.DataFrame(

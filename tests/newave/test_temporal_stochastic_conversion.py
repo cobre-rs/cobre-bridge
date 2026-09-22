@@ -1726,6 +1726,27 @@ def _confhd_row(
     }
 
 
+class TestBuildUpstreamPostosExpansionPlant:
+    """An ``EE`` plant is in service, so its posto is a real inflow node.
+    Walking through it instead credits its whole natural inflow to the plant
+    below, inflating that plant's incremental series."""
+
+    def test_ee_plant_between_two_ex_plants_is_its_own_node(self) -> None:
+        from cobre_bridge.newave.converters.stochastic import _build_upstream_postos
+
+        # A (EX, posto 100) -> B (EE, posto 200) -> C (EX, posto 300)
+        confhd = pd.DataFrame(
+            [
+                _confhd_row(1, 100, 2, "EX"),
+                _confhd_row(2, 200, 3, "EE"),
+                _confhd_row(3, 300, 0, "EX"),
+            ]
+        )
+        upstream = _build_upstream_postos(confhd)
+        assert upstream.get(200) == [100]
+        assert upstream.get(300) == [200]
+
+
 class TestBuildUpstreamPostosNonExistingBypass:
     """``_build_upstream_postos`` must walk through NE/NC plants so the
     posto-level cascade stays connected.  Without this, the downstream

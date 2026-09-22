@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 import pandas as pd
 import pyarrow as pa
@@ -39,11 +40,19 @@ from cobre_bridge.newave.converters.hydro.productivity import (
     _per_stage_productivities,
     _total_study_stages,
 )
-from cobre_bridge.newave.filling import filling_schedule, online_machines
+from cobre_bridge.newave.filling import (
+    expansion_machine_counts,
+    filling_schedule,
+    online_machines,
+)
 from cobre_bridge.newave.filling import stage_id as filling_stage_id
 from cobre_bridge.newave.horizon import seasonal_step_function
 from cobre_bridge.newave.id_map import NewaveIdMap
-from cobre_bridge.newave.plants import fictitious_codes, filling_hydro_codes
+from cobre_bridge.newave.plants import (
+    expansion_hydro_codes,
+    fictitious_codes,
+    filling_hydro_codes,
+)
 from cobre_bridge.newave.switches import DgerSwitches, switch_off_diagnostic
 
 _LOG = logging.getLogger(__name__)
@@ -308,6 +317,107 @@ def _compute_max_turbined_head_corrected(
     return max_turbined, max_generation
 
 
+def _hreg_with_machines(hreg: pd.Series, counts: Mapping[int, int]) -> pd.Series:
+    """A copy of cadastro row *hreg* whose machine counts are *counts*.
+
+    Rewrites ``maquinas_conjunto_{c}`` for every conjunto in *counts* and sets
+    ``numero_conjuntos_maquinas`` to cover them, so the capacity helpers — which
+    loop ``1..numero_conjuntos_maquinas`` — read exactly this configuration.
+    Rewriting the row rather than threading an override count through those
+    load-bearing shared helpers is what keeps the all-machines-online result
+    equal to the plant's declared cap by construction.
+    """
+    hreg_copy = hreg.copy()
+    for conjunto, count in counts.items():
+        hreg_copy[f"maquinas_conjunto_{conjunto}"] = int(count)
+    if counts:
+        hreg_copy["numero_conjuntos_maquinas"] = max(counts)
+    return hreg_copy
+
+
+@dataclass(frozen=True)
+class _ExpansionConfig:
+    """An ``EE`` plant's machine configuration across the study horizon.
+
+    ``registry_counts`` is the final configuration from ``hidr.dat``,
+    ``start_counts`` the one in service at the study start (``hidr.dat`` with
+    the ``NUMCNJ``/``NUMMAQ`` records of ``modif.dat`` applied, and ``0`` for a
+    conjunto ``NUMCNJ`` drops), and ``unit_rows`` the
+    ``(conjunto, entry_stage_id)`` pair of every entering machine.
+    """
+
+    registry_counts: dict[int, int]
+    start_counts: dict[int, int]
+    unit_rows: tuple[tuple[int, int], ...]
+
+    @property
+    def full_online_stage(self) -> int:
+        """First stage at which every entering machine is in service."""
+        return max(stage for _conjunto, stage in self.unit_rows)
+
+    def counts_at(self, stage_id: int) -> dict[int, int]:
+        """The machine configuration in service at *stage_id*."""
+        return expansion_machine_counts(
+            self.registry_counts, self.start_counts, self.unit_rows, stage_id
+        )
+
+
+def _expansion_configs(
+    case: NewaveCase,
+    cadastro: pd.DataFrame,
+    *,
+    start_year: int,
+    start_month: int,
+) -> dict[int, _ExpansionConfig]:
+    """``{code: config}`` for every ``EE`` plant with machines still to enter.
+
+    *cadastro* is the permanent-override-corrected registry (the study-start
+    configuration); the uncorrected ``case.hidr.cadastro`` supplies the final
+    one. Empty when the deck has no ``exph.dat`` or no such plant, which is what
+    keeps every other plant on its existing code path.
+    """
+    exph_df = case.exph.expansoes if case.exph is not None else None
+    codes = expansion_hydro_codes(case.confhd.usinas, exph_df)
+    if not codes or exph_df is None:
+        return {}
+    raw = case.hidr.cadastro
+    configs: dict[int, _ExpansionConfig] = {}
+    for code in sorted(codes):
+        if code not in raw.index or code not in cadastro.index:
+            continue
+        raw_reg = raw.loc[code]
+        corrected = cadastro.loc[code]
+        n_registry = int(raw_reg["numero_conjuntos_maquinas"])
+        n_start = int(corrected["numero_conjuntos_maquinas"])
+        registry_counts = {
+            c: int(raw_reg[f"maquinas_conjunto_{c}"]) for c in range(1, n_registry + 1)
+        }
+        start_counts = {
+            c: int(corrected[f"maquinas_conjunto_{c}"]) if c <= n_start else 0
+            for c in range(1, n_registry + 1)
+        }
+        rows = exph_df.loc[exph_df["codigo_usina"] == code]
+        unit_df = rows.loc[rows["data_entrada_operacao"].notna()]
+        unit_rows: list[tuple[int, int]] = []
+        for _, ur in unit_df.iterrows():
+            conjunto = ur["conjunto_maquina_entrada"]
+            if pd.isna(conjunto):
+                continue
+            entry = ur["data_entrada_operacao"]
+            unit_rows.append(
+                (
+                    int(conjunto),
+                    filling_stage_id(entry.year, entry.month, start_year, start_month),
+                )
+            )
+        if not unit_rows:
+            continue
+        configs[code] = _ExpansionConfig(
+            registry_counts, start_counts, tuple(unit_rows)
+        )
+    return configs
+
+
 def _reduced_caps(
     hreg: pd.Series, online: dict[int, int], name: str
 ) -> tuple[float, float]:
@@ -325,9 +435,9 @@ def _reduced_caps(
     a skip).
     """
     n_sets = int(hreg["numero_conjuntos_maquinas"])
-    hreg_copy = hreg.copy()
-    for c in range(1, n_sets + 1):
-        hreg_copy[f"maquinas_conjunto_{c}"] = int(online.get(c, 0))
+    hreg_copy = _hreg_with_machines(
+        hreg, {c: online.get(c, 0) for c in range(1, n_sets + 1)}
+    )
     max_turbined = _compute_max_turbined_head_corrected(hreg_copy, name)[0]
     max_generation = _compute_max_turbined_rated(hreg_copy)[1]
     return max_turbined, max_generation
@@ -362,7 +472,14 @@ def convert_turbined_bounds_head_corrected(
         if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
     }
     seasonal_volref = _read_volref_saz(case)
-    if not drop_overrides and not seasonal_volref:
+    horizon = case.horizon
+    expansion = _expansion_configs(
+        case,
+        cadastro,
+        start_year=horizon.start_year,
+        start_month=horizon.start_month,
+    )
+    if not drop_overrides and not seasonal_volref and not expansion:
         return None
 
     total_stages = _total_study_stages(case)
@@ -376,7 +493,8 @@ def convert_turbined_bounds_head_corrected(
     for newave_code in sorted(confhd_codes):
         overrides = drop_overrides.get(newave_code, [])
         plant_seasonal = seasonal_volref.get(newave_code)
-        if not overrides and not plant_seasonal:
+        config = expansion.get(newave_code)
+        if not overrides and not plant_seasonal and config is None:
             continue
         if newave_code not in cadastro.index:
             continue
@@ -400,12 +518,24 @@ def convert_turbined_bounds_head_corrected(
             total_stages,
             seasonal_volref_by_month=plant_seasonal,
         )
+        # A plant here only because it is expanding has a flat head, so its cap
+        # only moves while machines are still entering; past that stage the
+        # declared value already carries the final configuration.
+        ramp_only = not overrides and not plant_seasonal
         for stage_id, prod in enumerate(per_stage_prod):
             if prod <= 0.0:
                 continue
+            if ramp_only and config is not None:
+                if stage_id >= config.full_online_stage:
+                    continue
             h_op = prod / rho_esp
+            hreg_stage = (
+                hreg
+                if config is None
+                else _hreg_with_machines(hreg, config.counts_at(stage_id))
+            )
             max_turbined = _compute_max_turbined_head_corrected(
-                hreg, name, h_op_override=h_op
+                hreg_stage, name, h_op_override=h_op
             )[0]
             hydro_ids.append(hydro_id)
             stage_ids.append(stage_id)
@@ -711,9 +841,12 @@ def convert_storage_bounds(
 
     # Determine whether the case has any NE-with-filling plant (admission
     # predicate). The max_generation_mw column is gated on this:
-    # EX-only cases keep the byte-identical 8-column schema.
+    # A case with no filling plant keeps the byte-identical 8-column schema.
     exph_df = case.exph.expansoes if case.exph is not None else None
     filling_codes = filling_hydro_codes(case.confhd.usinas, exph_df)
+    expansion = _expansion_configs(
+        case, cadastro, start_year=start_year, start_month=start_month
+    )
 
     # Extract temporal overrides — empty dict when MODIF.DAT is absent,
     # which is fine because GHMIN.DAT alone can still produce per-stage
@@ -772,8 +905,11 @@ def convert_storage_bounds(
     def _identity(val: float) -> float:
         return val
 
-    plant_codes_with_data = set(temporal_overrides) | set(ghmin_by_plant_stage)
+    plant_codes_with_data = (
+        set(temporal_overrides) | set(ghmin_by_plant_stage) | set(expansion)
+    )
     for newave_code in sorted(plant_codes_with_data):
+        config = expansion.get(newave_code)
         overrides = temporal_overrides.get(newave_code, [])
         vmaxt = [o for o in overrides if o["type"] == "VMAXT"]
         vmint = [o for o in overrides if o["type"] == "VMINT"]
@@ -782,7 +918,10 @@ def convert_storage_bounds(
         vazmint = [o for o in overrides if o["type"] == "VAZMINT"]
         ghmin_by_stage = ghmin_by_plant_stage.get(newave_code, {})
 
-        if not any((vmaxt, vmint, turbmaxt, turbmint, vazmint, ghmin_by_stage)):
+        if (
+            not any((vmaxt, vmint, turbmaxt, turbmint, vazmint, ghmin_by_stage))
+            and config is None
+        ):
             continue
 
         try:
@@ -797,6 +936,19 @@ def convert_storage_bounds(
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
         useful = vol_max - vol_min
+
+        # An ``EE`` plant generates with the machines in service at each stage.
+        # Only the window before every machine is online needs a row: from
+        # ``full_online_stage`` the plant's declared value already carries the
+        # final configuration. These land on the SAME ``(hydro, stage)`` row as
+        # any MODIF/GHMIN bound below rather than a competing one, so the
+        # de-dup pass never has to choose between a ramp cap and a VMINT floor.
+        ramp_generation: dict[int, float] = {}
+        if config is not None:
+            for ramp_stage in range(min(config.full_online_stage, total_stages)):
+                ramp_generation[ramp_stage] = _compute_max_turbined_rated(
+                    _hreg_with_machines(hreg, config.counts_at(ramp_stage))
+                )[1]
 
         def _storage_hm3(rec: dict) -> dict | None:
             """The record with its volume in hm³; ``None`` drops a percentage
@@ -833,6 +985,7 @@ def convert_storage_bounds(
             | set(turbmint_by_stage)
             | set(vazmint_by_stage)
             | set(ghmin_by_stage)
+            | set(ramp_generation)
         )
         for stage_id in all_stages:
             hydro_ids.append(hydro_id)
@@ -843,10 +996,10 @@ def convert_storage_bounds(
             min_turbined_vals.append(turbmint_by_stage.get(stage_id))
             min_outflow_vals.append(vazmint_by_stage.get(stage_id))
             min_generation_vals.append(ghmin_by_stage.get(stage_id))
-            # Column present but unpopulated here; the filling-plant unit-ramp
-            # branch below populates per-stage ramp caps. None mirrors
-            # min_generation null handling.
-            max_generation_vals.append(None)
+            # Populated for an expanding plant's ramp window; the filling-plant
+            # branch below appends its own rows. None mirrors min_generation
+            # null handling.
+            max_generation_vals.append(ramp_generation.get(stage_id))
             is_ramp_vals.append(False)
 
     # Filling-plant unit-ramp branch: a ``NE``-with-filling plant operates from
@@ -933,7 +1086,8 @@ def convert_storage_bounds(
 
     # Resolve duplicate ``(hydro_id, stage_id)`` pairs: a ramp row wins over a
     # MODIF/GHMIN row at the same key (the explicit 0-cap during filling must not
-    # be undercut by a MODIF/GHMIN minimum). EX-only cases produce no ramp rows
+    # be undercut by a MODIF/GHMIN minimum). A case with no filling plant
+    # produces no ramp rows
     # (``is_ramp_vals`` all False), so every key is unique and this is a no-op,
     # keeping the regression-guard output byte-identical.
     chosen: dict[tuple[int, int], int] = {}
@@ -964,10 +1118,10 @@ def convert_storage_bounds(
         "min_outflow_m3s": pa.array(min_outflow_vals, type=pa.float64()),
         "min_generation_mw": pa.array(min_generation_vals, type=pa.float64()),
     }
-    # Gate the column on filling-plant presence: EX-only cases keep the
+    # Gate the column on filling-plant presence: a case without one keeps the
     # existing 8-column schema byte-identical (the regression guard depends
     # on this); cobre's parse_hydro_bounds tolerates the absent column.
-    if filling_codes:
+    if filling_codes or expansion:
         columns["max_generation_mw"] = pa.array(max_generation_vals, type=pa.float64())
     return pa.table(columns).sort_by(
         [("hydro_id", "ascending"), ("stage_id", "ascending")]

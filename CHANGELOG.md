@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Hydros under expansion (`EE`) are no longer dropped.** `confhd.dat` marks a
+  plant already in operation but with machines still to enter as `EE`
+  ("existente em expansão"). The converter admitted only `EX`, so every `EE`
+  plant was treated as not yet built: it became a Cobre entity in neither the
+  id map nor `hydros.json`, its reservoir left the water balance, and the
+  cascade was rewired around it. Its inflow gauge was also skipped in posto
+  space, so the plant below it absorbed the whole natural inflow of the bypassed
+  reach as its own incremental series. `EE` plants now enter the case at their
+  declared capacity, carry their own inflow, and keep their cascade links; the
+  plant's capacity grows as its `exph.dat` machines enter service: it operates
+  from the first stage at the configuration `modif.dat` declares for the study
+  start and reaches the `hidr.dat` configuration on the entry date, with the
+  capacity before each entry written as a per-stage bound.
 - `modif.dat` volume records (`VOLMAX`, `VOLMIN`, `VMAXT`, `VMINT`) now honour
   their unit column: `h` is hm³ and `%` is a percentage of the plant's useful
   volume, resolved against the `hidr.dat` registry. Before, permanent records

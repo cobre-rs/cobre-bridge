@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from cobre_bridge.newave.filling import (
+    expansion_machine_counts,
     filling_completion_date,
     filling_min_rate_m3s,
     filling_schedule,
@@ -114,3 +115,48 @@ def test_online_machines_clamps_to_entry_stage() -> None:
 def test_online_machines_partial_groups() -> None:
     # Two conjuntos entering different stages; query stage 5 -> only group 1.
     assert online_machines([(1, 5), (2, 7)], 2, 5) == {1: 1}
+
+
+class TestExpansionMachineCounts:
+    """``expansion_machine_counts`` resolves the three machine sources of an
+    expanding plant: the final registry, the study-start configuration, and the
+    dated entries."""
+
+    _REGISTRY = {1: 4, 2: 3}
+    _UNITS = ((2, 48), (2, 48), (2, 48))
+
+    def test_declared_start_configuration_holds_before_entry(self) -> None:
+        # modif.dat states conjunto 2 is empty at the study start.
+        start = {1: 4, 2: 0}
+        assert expansion_machine_counts(self._REGISTRY, start, self._UNITS, 47) == {
+            1: 4,
+            2: 0,
+        }
+
+    def test_registry_is_reached_at_the_entry_stage(self) -> None:
+        start = {1: 4, 2: 0}
+        assert expansion_machine_counts(self._REGISTRY, start, self._UNITS, 48) == {
+            1: 4,
+            2: 3,
+        }
+
+    def test_undeclared_start_falls_back_to_registry_minus_entering(self) -> None:
+        # No NUMMAQ, so the start configuration equals the final registry; the
+        # floor keeps the entering machines from being counted twice.
+        assert expansion_machine_counts(
+            self._REGISTRY, dict(self._REGISTRY), self._UNITS, 47
+        ) == {1: 4, 2: 0}
+        assert expansion_machine_counts(
+            self._REGISTRY, dict(self._REGISTRY), self._UNITS, 48
+        ) == {1: 4, 2: 3}
+
+    def test_never_exceeds_the_registry(self) -> None:
+        # A deck whose entries would overshoot the registry is capped, not trusted.
+        overshoot = ((2, 0), (2, 0), (2, 0), (2, 0), (2, 0))
+        counts = expansion_machine_counts(self._REGISTRY, {1: 4, 2: 0}, overshoot, 0)
+        assert counts[2] == 3
+
+    def test_partial_entry_counts_only_what_has_entered(self) -> None:
+        units = ((2, 10), (2, 20), (2, 30))
+        start = {1: 4, 2: 0}
+        assert expansion_machine_counts(self._REGISTRY, start, units, 20)[2] == 2

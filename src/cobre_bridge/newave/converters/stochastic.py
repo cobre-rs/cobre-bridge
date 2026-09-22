@@ -42,14 +42,14 @@ def _build_upstream_postos(
 
     The algorithm:
 
-    1. Map every EX plant code → posto.  NE/NC plants are not in the LP
-       and contribute no inflow series, but their ``codigo_usina_jusante``
+    1. Map every in-service plant code → posto.  NE/NC plants are not in the
+       LP and contribute no inflow series, but their ``codigo_usina_jusante``
        links are still authoritative topology — see step 2.
-    2. For every EX plant ``P``, follow ``P.codigo_usina_jusante`` and
+    2. For every in-service plant ``P``, follow ``P.codigo_usina_jusante`` and
        walk through any NE/NC plants in the chain until reaching the next
-       EX plant ``D`` (or the cascade terminates).  Add a posto edge
+       in-service plant ``D`` (or the cascade terminates).  Add a posto edge
        ``P.posto → D.posto``.  Without this walk-through, an NE/NC plant
-       sitting between two EX plants silently disconnects the upstream
+       sitting between two in-service plants silently disconnects the upstream
        contribution from the downstream's incremental inflow.
     3. Invert the edge direction: for each ``src_posto → dst_posto`` edge,
        record ``dst_posto ← src_posto`` (upstream).
@@ -68,30 +68,31 @@ def _build_upstream_postos(
         the map as a real node rather than being walked through: an upstream
         plant forms a posto edge **to** the filling plant instead of stepping
         past it.  ``None`` (the default) is normalised to the empty set, in
-        which case behaviour is byte-identical to the ``EX``-only map.
+        which case behaviour is byte-identical to the in-service-only map.
     """
     filling: set[int] = filling_codes if filling_codes is not None else set()
 
     # Index every row so the cascade walker can step through NE/NC plants
-    # without losing the link to the next EX plant downstream.
+    # without losing the link to the next in-service plant downstream.
     row_by_code: dict[int, pd.Series] = {}
     code_to_posto: dict[int, int] = {}
     for _, row in confhd_df.iterrows():
         code = int(row["codigo_usina"])
         row_by_code[code] = row
-        # An EX plant — or an admitted NE-with-filling plant — is a real
-        # inflow node.  A filling plant whose posto is NaN is skipped (same
-        # guard the EX path relies on, since posto is always present there).
-        if str(row["usina_existente"]).strip() == "EX" or code in filling:
+        # An in-service plant — or an admitted NE-with-filling plant — is a
+        # real inflow node.  A filling plant whose posto is NaN is skipped
+        # (the in-service path relies on posto always being present).
+        status = str(row["usina_existente"]).strip()
+        if status in plants.IN_SERVICE_STATUSES or code in filling:
             posto_raw = row["posto"]
             if pd.isna(posto_raw):
                 continue
             code_to_posto[code] = int(posto_raw)
 
-    def _walk_to_next_ex(start_code: int) -> int | None:
-        """Follow the cascade through NE/NC plants until an EX plant is found.
+    def _walk_to_next_in_service(start_code: int) -> int | None:
+        """Follow the cascade through NE/NC plants to the next in-service plant.
 
-        Returns the EX plant code, or ``None`` when the chain terminates
+        Returns that plant's code, or ``None`` when the chain terminates
         (downstream 0, unknown code, or a cycle is detected).
         """
         cur: int = start_code
@@ -116,8 +117,8 @@ def _build_upstream_postos(
         ds_code: int | None = int(ds_raw)
         if ds_code not in code_to_posto:
             # Downstream is NE/NC (or otherwise absent) — walk through to
-            # the next EX plant so the posto graph stays connected.
-            ds_code = _walk_to_next_ex(ds_code)
+            # the next in-service plant so the posto graph stays connected.
+            ds_code = _walk_to_next_in_service(ds_code)
             if ds_code is None:
                 continue
         dst_posto = code_to_posto[ds_code]

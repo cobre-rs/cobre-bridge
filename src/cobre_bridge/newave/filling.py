@@ -1,9 +1,12 @@
-"""Stage-math and ζ (zeta) pure helpers for the dead-volume filling mapping.
+"""Stage-math, ζ (zeta), and machine-count pure helpers for the ``exph`` mapping.
 
 This foundation module holds the calendar/horizon arithmetic shared by the
 filling converters and the fill-rate helpers: mapping a
 NEWAVE filling date to a Cobre 0-based stage index (:func:`stage_id`) and the
-per-month hm³-per-m³/s weight (:func:`zeta`).
+per-month hm³-per-m³/s weight (:func:`zeta`). It is also the one home for "how
+many machines are in service at stage *t*", for both kinds of ``exph`` plant:
+a not-yet-built one filling its dead volume (:func:`online_machines`) and one
+already in operation gaining machines (:func:`expansion_machine_counts`).
 
 All functions are pure (no logging, no I/O) so they can be reused and tested in
 isolation. The module deliberately depends on nothing under
@@ -16,7 +19,7 @@ from __future__ import annotations
 
 import calendar
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 
 
@@ -158,6 +161,48 @@ def filling_min_rate_m3s(
     if denom > 0.0:
         return remaining / denom
     return 0.0
+
+
+def expansion_machine_counts(
+    registry_counts: Mapping[int, int],
+    start_counts: Mapping[int, int],
+    unit_rows: Sequence[tuple[int, int]],
+    query_stage_id: int,
+) -> dict[int, int]:
+    """Machines in service per ``conjunto`` at *query_stage_id* for an expanding plant.
+
+    For a plant already in operation, three sources describe its machines and
+    they are not interchangeable:
+
+    * *registry_counts* — the **final** configuration (``hidr.dat``), which
+      already includes the machines still to enter.
+    * *start_counts* — the configuration in service at the **study start** (the
+      registry with the ``NUMMAQ`` records of ``modif.dat`` applied).
+    * *unit_rows* — ``(conjunto, entry_stage_id)`` per entering machine, from
+      the ``exph.dat`` ``data_entrada_operacao`` rows.
+
+    The count is ``min(registry, base + entered)`` per conjunto, where
+    ``base = min(start, registry − all entering)``. That floor is what keeps a
+    deck that declares no current configuration (no ``NUMMAQ``, so ``start``
+    equals the final registry) from crediting the entering machines twice; it
+    resolves to ``start`` on a deck that does declare one, and it is inert on a
+    conjunto no machine enters. The result covers every conjunto in
+    *registry_counts*, so a caller can write it over a cadastro row wholesale.
+    """
+    entering_total: Counter[int] = Counter(conjunto for conjunto, _ in unit_rows)
+    entered = Counter(
+        conjunto
+        for conjunto, entry_stage_id in unit_rows
+        if entry_stage_id <= query_stage_id
+    )
+    counts: dict[int, int] = {}
+    for conjunto, registry in registry_counts.items():
+        base = min(
+            start_counts.get(conjunto, registry),
+            registry - entering_total.get(conjunto, 0),
+        )
+        counts[conjunto] = min(registry, base + entered.get(conjunto, 0))
+    return counts
 
 
 def online_machines(

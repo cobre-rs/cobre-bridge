@@ -204,7 +204,7 @@ Armazenamento inicial por usina ativa; opcionalmente o volume morto já enchido 
 
 | Campo | Origem | Transformação |
 | --- | --- | --- |
-| `storage[].hydro_id` | `confhd.dat` › `usinas · codigo_usina` *(derivado)* | Id Cobre 0-based da usina ativa (`usina_existente` = EX, não fictícia), atribuído em ordem crescente de `codigo_usina`. Ordenado pelo id. |
+| `storage[].hydro_id` | `confhd.dat` › `usinas · codigo_usina` *(derivado)* | Id Cobre 0-based da usina ativa (`usina_existente` = EX ou EE, não fictícia), atribuído em ordem crescente de `codigo_usina`. Ordenado pelo id. |
 | `storage[].value_hm3` | `confhd.dat` › `usinas · volume_inicial_percentual`, `hidr.dat` › `cadastro · volume_minimo`, `hidr.dat` › `cadastro · volume_maximo`, `hidr.dat` › `cadastro · tipo_regulacao`, `hidr.dat` › `cadastro · volume_referencia`, `modif.dat` › `VOLMIN · volume`, `modif.dat` › `VOLMAX · volume` | Percentual (limitado a [0, 100]) do volume útil `volume_maximo` − `volume_minimo`, somado ao mínimo, após VOLMIN/VOLMAX permanentes de `modif.dat`. Usinas `tipo_regulacao` D ancoram em `volume_referencia` e S em `volume_minimo`, como o colapso de fio d'água dos limites. |
 | `filling_storage` | `confhd.dat` › `usinas · usina_existente`, `exph.dat` › `expansoes · data_inicio_enchimento` | Lista vazia quando nenhuma usina NE de `confhd.dat` tem linha de enchimento de volume morto em `exph.dat`; caso contrário, ver os campos `filling_storage[].*`. |
 | `filling_storage[].hydro_id` | `confhd.dat` › `usinas · codigo_usina`, `confhd.dat` › `usinas · usina_existente`, `exph.dat` › `expansoes · data_inicio_enchimento` *(derivado; condicional: somente para usinas NE com linha de enchimento (`data_inicio_enchimento` não nula) em `exph.dat`)* | Id Cobre da usina em enchimento; ela nunca aparece também em `storage`. |
@@ -281,11 +281,11 @@ Uma entrada por usina térmica de `conft.dat`, ordenada pelo id Cobre, com limit
 **Quando:** sempre.  
 **Esquema:** [hydros.schema.json](https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/hydros.schema.json) · **Código:** `src/cobre_bridge/newave/converters/hydro/entity.py`
 
-Uma entrada por usina hidrelétrica ativa de `confhd.dat` (existentes não fictícias, mais usinas NE com enchimento de volume morto em `exph.dat`), com o cadastro de `hidr.dat` já corrigido pelos registros permanentes de `modif.dat`, ordenada pelo id Cobre.
+Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operação — `EX` ou `EE` — e não fictícias, mais usinas NE com enchimento de volume morto em `exph.dat`), com o cadastro de `hidr.dat` já corrigido pelos registros permanentes de `modif.dat`, ordenada pelo id Cobre.
 
 | Campo | Origem | Transformação |
 | --- | --- | --- |
-| `hydros[].id` | `confhd.dat` › `codigo_usina`, `confhd.dat` › `usina_existente`, `confhd.dat` › `posto`, `hidr.dat` › `produtibilidade_especifica`, `exph.dat` › `data_inicio_enchimento` *(derivado)* | Id 0-based denso atribuído em ordem crescente de `codigo_usina` entre as usinas ativas: `usina_existente = EX` menos as fictícias (produtibilidade específica zero compartilhando o `posto` de uma usina geradora), mais as usinas NE com registro de enchimento em `exph.dat`. |
+| `hydros[].id` | `confhd.dat` › `codigo_usina`, `confhd.dat` › `usina_existente`, `confhd.dat` › `posto`, `hidr.dat` › `produtibilidade_especifica`, `exph.dat` › `data_inicio_enchimento` *(derivado)* | Id 0-based denso atribuído em ordem crescente de `codigo_usina` entre as usinas ativas: `usina_existente` em `EX`/`EE` menos as fictícias (produtibilidade específica zero compartilhando o `posto` de uma usina geradora), mais as usinas NE com registro de enchimento em `exph.dat`. |
 | `hydros[].name` | `confhd.dat` › `nome_usina` | Nome da usina em `confhd.dat`, sem espaços nas extremidades. |
 | `hydros[].operational_start_date` | `dger.dat` › `ano_inicial_historico`, `exph.dat` › `data_inicio_enchimento`, `exph.dat` › `duracao_enchimento` *(derivado)* | Usinas existentes: 1º de janeiro de `ano_inicial_historico` (1931 se ausente). Usina NE em enchimento: primeiro dia do mês em que o enchimento termina (`data_inicio_enchimento` mais `duracao_enchimento` meses). No Cobre é chave de ordenação, não porta de entrada em operação. |
 | `hydros[].downstream_id` | `confhd.dat` › `codigo_usina_jusante`, `confhd.dat` › `usina_existente`, `confhd.dat` › `posto`, `hidr.dat` › `produtibilidade_especifica`, `exph.dat` › `data_inicio_enchimento` *(derivado)* | Id Cobre da próxima usina real a jusante. A cadeia `codigo_usina_jusante` é percorrida de forma transparente através de usinas fictícias e NE/NC; quando o jusante é 0 mas uma usina fictícia compartilha o `posto` da usina, ela é tomada como elo implícito da cascata. Nulo quando a cascata termina no mar. |
@@ -826,7 +826,7 @@ O bridge lê cerca de trinta campos (horizonte, aberturas, forwards, iterações
 
 **Estado:** convertido em parte. **Lido por:** 14 arquivos gerados; ver a visão geral.
 
-Só usinas `EX` não fictícias entram no caso, mais usinas `NE` com registro de enchimento de volume morto em `exph.dat`.
+Entram no caso as usinas em operação e não fictícias — `usina_existente` igual a `EX` ou a `EE` (existente em expansão) —, mais as usinas `NE` com registro de enchimento de volume morto em `exph.dat`. A usina `EE` opera desde o primeiro estágio e sua capacidade cresce conforme as máquinas de `exph.dat` entram.
 
 - `usinas · codigo_usina_jusante` → `penalties.json` › `hydro.water_withdrawal_violation_cost`
 - `usinas · codigo_usina_jusante` → `penalties.json` › `hydro.evaporation_violation_cost`
@@ -1388,7 +1388,7 @@ Os cinco tipos (`POTEF`, `FCMAX`, `TEIFT`, `GTMIN`, `IPTER`) são aplicados em `
 
 **Estado:** convertido em parte. **Lido por:** 14 arquivos gerados; ver a visão geral.
 
-Só o registro de enchimento (`data_inicio_enchimento`, `duracao_enchimento`, `volume_morto`) e as datas de entrada de máquinas (`data_entrada_operacao`, `conjunto_maquina_entrada`) são lidos.
+Só o registro de enchimento (`data_inicio_enchimento`, `duracao_enchimento`, `volume_morto`) e as datas de entrada de máquinas (`data_entrada_operacao`, `conjunto_maquina_entrada`) são lidos. A usina EE não traz registro de enchimento: apenas linhas de entrada de máquina.
 
 - `expansoes · data_inicio_enchimento` → `initial_conditions.json` › `filling_storage`
 - `expansoes · data_inicio_enchimento` → `initial_conditions.json` › `filling_storage[].hydro_id`
@@ -1415,7 +1415,7 @@ Só o registro de enchimento (`data_inicio_enchimento`, `duracao_enchimento`, `v
 - `conjunto_maquina_entrada` → `constraints/hydro_bounds.parquet` › `max_generation_mw`
 - `data_inicio_enchimento` → `constraints/hydro_bounds.parquet` › `max_generation_mw`
 - `duracao_enchimento` → `constraints/hydro_bounds.parquet` › `max_generation_mw`
-- `potencia_instalada · maquina_entrada` — *não lido.* Potência e número da máquina que entra. A rampa de capacidade é recalculada a partir dos conjuntos do `hidr.dat` (máquinas por conjunto, vazão e potência nominais), contando as máquinas por `conjunto_maquina_entrada`.
+- `potencia_instalada · maquina_entrada` — *não lido.* Potência e número da máquina que entra. A rampa de capacidade é recalculada a partir dos conjuntos do `hidr.dat` (máquinas por conjunto, vazão e potência nominais), contando as máquinas por `conjunto_maquina_entrada`. Vale para a usina NE em enchimento e para a usina EE em expansão; nesta a contagem nunca passa do cadastro de `hidr.dat`.
 
 ### `manutt.dat`
 
@@ -1749,7 +1749,7 @@ Tudo o que o conversor deixa de fora, reunido em um só lugar. Cada item aparece
 - `curva.dat` › `configuracoes_penalizacao · TIPO DE PENALIZACAO ≠ 0` — *adiado.* Penalização iterativa/variável da curva (etapa 2). O bridge modela apenas a penalização FIXA e emite `vminop-penalization-not-fixa` quando o deck seleciona outro tipo; a diferença na penalidade de violação é esperada.
 - `curva.dat` › `configuracoes_penalizacao · MES PENALIZACAO` — *não lido.* Mês a partir do qual a penalização passa a valer. A restrição é emitida em todos os estágios cobertos pela curva; só o primeiro campo (tipo) e o terceiro (sazonalização no pós-estudo) são lidos.
 - `curva.dat` › `iteracao_a_partir_etapa2 · maximo_iteracoes_etapa2 · tolerancia_processo_etapa2 · impressao_relatorio_etapa2` — *não lido.* Parâmetros do processo iterativo da etapa 2 da curva; sem contraparte na penalização fixa.
-- `exph.dat` › `potencia_instalada · maquina_entrada` — *não lido.* Potência e número da máquina que entra. A rampa de capacidade é recalculada a partir dos conjuntos do `hidr.dat` (máquinas por conjunto, vazão e potência nominais), contando as máquinas por `conjunto_maquina_entrada`.
+- `exph.dat` › `potencia_instalada · maquina_entrada` — *não lido.* Potência e número da máquina que entra. A rampa de capacidade é recalculada a partir dos conjuntos do `hidr.dat` (máquinas por conjunto, vazão e potência nominais), contando as máquinas por `conjunto_maquina_entrada`. Vale para a usina NE em enchimento e para a usina EE em expansão; nesta a contagem nunca passa do cadastro de `hidr.dat`.
 - `manutt.dat` › `codigo_empresa · nome_empresa · codigo_unidade · nome_usina` — *não lido.* Identificação da empresa e da unidade geradora; as reduções são somadas por usina sem distinguir a unidade.
 - `c_adic.dat` › `razao · nome_submercado` — *não lido.* Motivo da carga adicional. Todas as razões do mesmo submercado e mês são somadas à carga em `scenarios/load_seasonal_stats.parquet`; a razão não é preservada.
 - `agrint.dat` › `limites_agrupamentos · comentario` — *não lido.* Descrição livre do limite; sem contraparte.

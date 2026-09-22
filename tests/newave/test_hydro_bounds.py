@@ -14,6 +14,7 @@ from cobre_bridge.core.diagnostics import Severity
 from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 from tests.newave.conftest import (
+    _ee_expansion_case,
     _hydro_case,
     _make_cfuga_rec,
     _make_confhd_df,
@@ -1327,3 +1328,37 @@ class TestClampOutagePctDiagnostics:
         assert result == 100.0
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 1
+
+
+class TestExpansionRampBounds:
+    """An ``EE`` plant's reduced capacity is written over its ramp window only,
+    onto the same ``(hydro, stage)`` row as any MODIF/GHMIN bound — never as a
+    competing row that the de-dup pass would have to choose against."""
+
+    def _id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
+
+    def _run(self, tmp_path) -> pa.Table:
+        from cobre_bridge.newave.converters.hydro import convert_storage_bounds
+
+        tbl = convert_storage_bounds(_ee_expansion_case(tmp_path), self._id_map())
+        assert tbl is not None
+        return tbl
+
+    def test_reduced_capacity_covers_only_the_pre_entry_stages(self, tmp_path) -> None:
+        # Jul-2024 entry under a Jan-2024 horizon is stage 6, so stages 0-5 carry
+        # conjunto 1 alone (3 x 150 = 450 MW) and stage 6 onward carries no row:
+        # the plant's declared 690 MW applies there.
+        df = self._run(tmp_path).to_pandas()
+        ramp = df[(df.hydro_id == 1) & df.max_generation_mw.notna()]
+        assert sorted(ramp.stage_id) == [0, 1, 2, 3, 4, 5]
+        assert list(ramp.max_generation_mw) == [pytest.approx(450.0)] * 6
+
+    def test_non_expanding_plant_gets_no_generation_cap(self, tmp_path) -> None:
+        df = self._run(tmp_path).to_pandas()
+        other = df[df.hydro_id == 0]
+        assert other.max_generation_mw.isna().all()
+
+    def test_ramp_emits_no_extra_rows_per_stage(self, tmp_path) -> None:
+        df = self._run(tmp_path).to_pandas()
+        assert not df.duplicated(subset=["hydro_id", "stage_id"]).any()

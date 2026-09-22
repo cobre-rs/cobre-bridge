@@ -607,7 +607,7 @@ summary = "Armazenamento inicial por usina ativa; opcionalmente o volume morto j
   path = "storage[].hydro_id"
   from = [ { file = "confhd", item = "usinas · codigo_usina" } ]
   status = "derived"
-  how = "Id Cobre 0-based da usina ativa (`usina_existente` = EX, não fictícia), atribuído em ordem crescente de `codigo_usina`. Ordenado pelo id."
+  how = "Id Cobre 0-based da usina ativa (`usina_existente` = EX ou EE, não fictícia), atribuído em ordem crescente de `codigo_usina`. Ordenado pelo id."
 
   [[output.field]]
   path = "storage[].value_hm3"
@@ -1413,7 +1413,7 @@ reads = [
   { file = "dger" },
   { file = "volref_saz" },
 ]
-summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (existentes não fictícias, mais usinas NE com enchimento de volume morto em `exph.dat`), com o cadastro de `hidr.dat` já corrigido pelos registros permanentes de `modif.dat`, ordenada pelo id Cobre."
+summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operação — `EX` ou `EE` — e não fictícias, mais usinas NE com enchimento de volume morto em `exph.dat`), com o cadastro de `hidr.dat` já corrigido pelos registros permanentes de `modif.dat`, ordenada pelo id Cobre."
 
   [[output.field]]
   path = "hydros[].id"
@@ -1425,7 +1425,7 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (existentes
     { file = "exph", item = "data_inicio_enchimento" },
   ]
   status = "derived"
-  how = "Id 0-based denso atribuído em ordem crescente de `codigo_usina` entre as usinas ativas: `usina_existente = EX` menos as fictícias (produtibilidade específica zero compartilhando o `posto` de uma usina geradora), mais as usinas NE com registro de enchimento em `exph.dat`."
+  how = "Id 0-based denso atribuído em ordem crescente de `codigo_usina` entre as usinas ativas: `usina_existente` em `EX`/`EE` menos as fictícias (produtibilidade específica zero compartilhando o `posto` de uma usina geradora), mais as usinas NE com registro de enchimento em `exph.dat`."
 
   [[output.field]]
   path = "hydros[].name"
@@ -2911,7 +2911,7 @@ note = "O bridge lê cerca de trinta campos (horizonte, aberturas, forwards, ite
 
 [[source]]
 file = "confhd"
-note = "Só usinas `EX` não fictícias entram no caso, mais usinas `NE` com registro de enchimento de volume morto em `exph.dat`."
+note = "Entram no caso as usinas em operação e não fictícias — `usina_existente` igual a `EX` ou a `EE` (existente em expansão) —, mais as usinas `NE` com registro de enchimento de volume morto em `exph.dat`. A usina `EE` opera desde o primeiro estágio e sua capacidade cresce conforme as máquinas de `exph.dat` entram."
 
   [[source.item]]
   item = "usinas fictícias (produtibilidade_especifica = 0 no mesmo posto de uma usina geradora)"
@@ -3102,12 +3102,12 @@ note = "Os cinco tipos (`POTEF`, `FCMAX`, `TEIFT`, `GTMIN`, `IPTER`) são aplica
 
 [[source]]
 file = "exph"
-note = "Só o registro de enchimento (`data_inicio_enchimento`, `duracao_enchimento`, `volume_morto`) e as datas de entrada de máquinas (`data_entrada_operacao`, `conjunto_maquina_entrada`) são lidos."
+note = "Só o registro de enchimento (`data_inicio_enchimento`, `duracao_enchimento`, `volume_morto`) e as datas de entrada de máquinas (`data_entrada_operacao`, `conjunto_maquina_entrada`) são lidos. A usina EE não traz registro de enchimento: apenas linhas de entrada de máquina."
 
   [[source.item]]
   item = "potencia_instalada · maquina_entrada"
   status = "unread"
-  note = "Potência e número da máquina que entra. A rampa de capacidade é recalculada a partir dos conjuntos do `hidr.dat` (máquinas por conjunto, vazão e potência nominais), contando as máquinas por `conjunto_maquina_entrada`."
+  note = "Potência e número da máquina que entra. A rampa de capacidade é recalculada a partir dos conjuntos do `hidr.dat` (máquinas por conjunto, vazão e potência nominais), contando as máquinas por `conjunto_maquina_entrada`. Vale para a usina NE em enchimento e para a usina EE em expansão; nesta a contagem nunca passa do cadastro de `hidr.dat`."
 
 [[source]]
 file = "manutt"
