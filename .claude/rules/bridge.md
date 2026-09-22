@@ -8,8 +8,8 @@ paths:
 Repo-specific architectural contracts. Each is a contract, not a style
 preference — a plausible deviation ships wrong numbers, silent divergence
 between the two conversion tracks, or messages a pip-installed user cannot act
-on. The architecture-debt audit registry (`plans/architecture-debt-audit.md`,
-local-only) records the known standing violations; do not add new ones.
+on. The known standing architectural violations have been catalogued and
+remediated; do not introduce new ones.
 
 ## 1. Twin-track symmetry (the central contract)
 
