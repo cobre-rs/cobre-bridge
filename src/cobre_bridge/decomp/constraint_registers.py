@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from cobre_bridge.diagnostics import Diagnostic, Severity
+from cobre_bridge.core.diagnostics import Diagnostic, Severity
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -703,12 +703,12 @@ def detect_libs_electrical(deck_dir: Path) -> Diagnostic | None:
     richer format is unconverted only for its short-form ``RE``/``RE-*`` and
     date-indexed ``-HORIZONTE-DATA``/``-FORMULA-DATA-PATAMAR`` variants (the
     period-keyed long-form cards ARE converted — see
-    :mod:`cobre_bridge.decomp.libs_electrical`). This reads
+    :mod:`cobre_bridge.decomp.converters.libs_electrical`). This reads
     ``indices.csv`` (when present) and reports the entry's presence; it does
     not parse or convert the LIBs file itself, and does not know whether the
     long-form subset converted — the caller (:func:`~cobre_bridge.decomp.
     pipeline.convert_decomp_case`) is the one that reads
-    :func:`~cobre_bridge.decomp.libs_electrical.read_libs_electrical` and
+    :func:`~cobre_bridge.decomp.converters.libs_electrical.read_libs_electrical` and
     decides whether this diagnostic's return value is still worth emitting:
     it suppresses it once the long-form subset converts (the census INFO
     diagnostic, ``decomp-libs-electrical-converted``, is authoritative
@@ -763,7 +763,7 @@ def resolve_libs_electrical_path(deck_dir: Path) -> Path | None:
     ``lib_restricao-eletrica-especial*.csv`` glob in *deck_dir* when
     ``indices.csv`` is absent, carries no such entry, or the entry's own path
     does not resolve to an existing file — mirroring
-    :func:`~cobre_bridge.decomp.pipeline.discover_decomp_files`'s own
+    :func:`~cobre_bridge.decomp.files.discover_decomp_files`'s own
     ``find`` fallback idiom for the deck's other optional files.
 
     Parameters

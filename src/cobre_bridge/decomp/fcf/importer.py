@@ -28,10 +28,10 @@ from typing import TYPE_CHECKING
 from idecomp.decomp import Dadgnl, Mlt, Vazoes
 from inewave.newave import Cortesh
 
-from cobre_bridge import diagnostics as dx
-from cobre_bridge.case_writer import CaseWriter
-from cobre_bridge.decomp.anticipated import read_gnl_model
-from cobre_bridge.decomp.cadastro import build_effective_cadastro
+from cobre_bridge.cobre.case_writer import CaseWriter
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.decomp.converters.anticipated import read_gnl_model
+from cobre_bridge.decomp.converters.cadastro import build_effective_cadastro
 from cobre_bridge.decomp.fcf.bootstrap import (
     bootstrap_terminal_manifest,
     ensure_writer_binding,
@@ -51,17 +51,17 @@ from cobre_bridge.decomp.fcf.writer import (
     build_stage_cuts_payload,
     write_boundary_checkpoint,
 )
+from cobre_bridge.decomp.files import DecompFiles
 from cobre_bridge.decomp.inflow_mlt import build_incremental_mlt, coupling_lag_means
-from cobre_bridge.decomp.pipeline import DecompFiles
 from cobre_bridge.decomp.scenarios import convert_recent_observation_windows
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-    from cobre_bridge.decomp.anticipated import GnlCommitmentModel
-    from cobre_bridge.decomp.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.converters.anticipated import GnlCommitmentModel
+    from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.fcf.cortes import BoundaryCuts
     from cobre_bridge.decomp.fcf.mapper import MappingResult
     from cobre_bridge.decomp.temporal import OperativeStage
@@ -86,8 +86,9 @@ def _gnl_targets_from(
     """Build the submercado -> GNL-thermal ring plan from the deck + case.
 
     Joins ``model.thermals`` (ascending by ``code``, read from ``dadgnl``'s
-    ``tg`` registry by :func:`~cobre_bridge.decomp.anticipated.read_gnl_model`
-    — reconciled with, never re-derived) onto the converted case's GNL
+    ``tg`` registry by
+    :func:`~cobre_bridge.decomp.converters.anticipated.read_gnl_model` —
+    reconciled with, never re-derived) onto the converted case's GNL
     thermal ids: ``thermals_doc["thermals"]`` entries carrying
     ``anticipated_config``, sorted ascending, are exactly
     ``convert_decomp_case``'s ``first_thermal_id + i`` assignment (ascending
@@ -292,7 +293,7 @@ def _read_complexo_map(dadger_path: Path) -> dict[int, list[int]]:
 def _find_mlt(deck_dir: Path) -> Path | None:
     """Locate the deck's ``mlt.dat`` (média de longo termo), case-insensitively.
 
-    ``mlt.dat`` is not one of :class:`~cobre_bridge.decomp.pipeline.DecompFiles`'
+    ``mlt.dat`` is not one of :class:`~cobre_bridge.decomp.files.DecompFiles`'
     resolved inputs (it feeds only the boundary FCF's inflow-lag mean fold, not
     the conversion), so it is discovered here directly. Returns ``None`` when the
     deck carries none.
@@ -376,7 +377,7 @@ def _build_gnl_ring_plan(case_dir: Path, deck_files: DecompFiles) -> GnlRingPlan
 
     Deck-reading wrapper around :func:`_gnl_targets_from`: returns ``None``
     when the deck carries no ``dadgnl`` file at all, or when
-    :func:`~cobre_bridge.decomp.anticipated.read_gnl_model` reports the deck
+    :func:`~cobre_bridge.decomp.converters.anticipated.read_gnl_model` reports the deck
     is GNL-off (no committed dispatch, the G6 gate) — reconciled with that
     reader's own gate, never re-derived here. Otherwise threads
     :func:`_post_horizon_start` into the resolved plan so
@@ -490,7 +491,7 @@ def _emit_import_diagnostics(
     dated-slot drops); ``gnl_plan=None`` (the default) gates it off
     entirely, so 2-arg callers are unchanged.
 
-    Pure side effect via :func:`cobre_bridge.diagnostics.emit`: reads
+    Pure side effect via :func:`cobre_bridge.core.diagnostics.emit`: reads
     ``cuts``/``mapping``/``gnl_plan`` but does not alter any of them, so it
     can run before the checkpoint is written without changing the checkpoint
     bytes or the importer's return value. Mirrors ``decomp/pipeline.py``'s
@@ -620,15 +621,17 @@ def _emit_import_diagnostics(
         )
 
 
-def _patch_policy_boundary(
-    writer: CaseWriter, config: dict, *, source_stage: int
-) -> None:
+def _patch_policy_boundary(writer: CaseWriter, config: dict) -> None:
     """Set ``["policy"]["boundary"]`` in ``config.json``, preserving the rest.
 
-    ``source_stage`` is cobre's own 0-based policy-graph ``graph_stage_id``
-    (the pool cobre's boundary loader resolves ``source_stage`` against) —
-    never the source model's own 1-based calendar-anchored boundary-stage
-    number, a different axis that only coincidentally shares a value.
+    The block carries only ``path``: cobre's boundary loader selects the
+    source pool by calendar date (the pool whose ``priced_state_date`` equals
+    the loading study's own boundary date), so no stage/pool index is written.
+    ``policy.boundary.source_stage`` is removed from cobre's config contract
+    and rejected by its deny-unknown-fields validation; ``strict`` is left
+    unset (its ``false`` default), so a source pricing more state than the
+    study models loads and records the superset in the reconciliation report
+    rather than rejecting.
 
     Mutates the pipeline's own in-memory ``config`` dict (the one already
     written to ``config.json``, ``state_space``/``training``/``simulation``
@@ -638,13 +641,7 @@ def _patch_policy_boundary(
     byte-for-byte in style.
     """
     policy = config.setdefault("policy", {})
-    # TRACKED COBRE-GAP WORKAROUND (C8, cobre's conversion-found-improvements
-    # registry): cobre resolves this path against the run's --output directory,
-    # not case_dir, while every other case input resolves against case_dir. A
-    # default `cobre run <case>` will not find `case_dir/boundary` — callers
-    # must run with `--output <case_dir>` until cobre resolves
-    # policy.boundary.path relative to case_dir.
-    policy["boundary"] = {"path": "boundary", "source_stage": source_stage}
+    policy["boundary"] = {"path": "boundary"}
     writer.write_json("config.json", config)
 
 
@@ -709,12 +706,6 @@ def import_boundary_fcf(
        ``recent_observations`` seed (:func:`_seed_recent_observations`), the raw
        inflow-lag values the folded RHS is built to offset. Fold and seed ship
        together or not at all.
-    7. Logs the TRACKED COBRE-GAP WORKAROUND (C8) usage constraint this patch
-       implies: until cobre resolves ``policy.boundary.path`` relative to
-       ``case_dir`` rather than the run's ``--output`` directory, the case
-       must be run with ``--output <case_dir>`` (see
-       ``_patch_policy_boundary``'s code comment and
-       cobre's conversion-found-improvements registry).
 
     Returns the ``case_dir/boundary`` path, or ``None`` on the no-cut-files
     no-op.
@@ -821,6 +812,7 @@ def import_boundary_fcf(
         cost_scale_factor=cost_scale_factor,
         node_id=manifest.node_id,
         graph_stage_id=manifest.graph_stage_id,
+        priced_state_date=manifest.priced_state_date,
     )
     completed_iterations = max((cut.iteration for cut in mapping.cuts), default=0)
     metadata = build_metadata(
@@ -834,6 +826,7 @@ def import_boundary_fcf(
         rng_seed=0,
         created_at=datetime.now(tz=UTC).isoformat(),
         cobre_version=cobre.__version__,
+        season_manifest=manifest.season_manifest,
     )
 
     boundary_dir = case_dir / "boundary"
@@ -844,12 +837,7 @@ def import_boundary_fcf(
         inflow_lag_depth=inflow_lag_depth,
     )
 
-    # cobre resolves `source_stage` against a pool's own `graph_stage_id`
-    # (0-based), never `boundary_stage` (the source model's 1-based
-    # calendar-month count, kept above only for the inflow-lag coupling
-    # fold and the payload's own provenance `stage_id`) — the two axes only
-    # coincidentally share a value.
-    _patch_policy_boundary(writer, config, source_stage=manifest.graph_stage_id)
+    _patch_policy_boundary(writer, config)
 
     # Seed the pre-study inflow-lag state and record the mean fold — both gated
     # on the same mlt.dat presence as the fold above, so the raw seed never
@@ -868,22 +856,5 @@ def import_boundary_fcf(
             n_windows,
             coupling_month,
         )
-
-    # TRACKED COBRE-GAP WORKAROUND (C8): cobre resolves policy.boundary.path
-    # against the run's --output directory rather than the case directory the
-    # checkpoint was authored into, so this case must be run with
-    # --output=<case_dir>. Removal condition tracked in cobre's
-    # conversion-found-improvements registry. The message below is
-    # end-user-facing (no repo-internal references).
-    _LOG.warning(
-        "This case must be run with `cobre run %s --output %s`: the boundary "
-        "cost-to-go checkpoint at %s is resolved relative to the run's output "
-        "directory, so a plain `cobre run %s` (with output elsewhere) will not "
-        "find it and will stop before the first iteration.",
-        case_dir,
-        case_dir,
-        boundary_dir,
-        case_dir,
-    )
 
     return boundary_dir

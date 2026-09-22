@@ -33,7 +33,7 @@ from cobre_bridge.dashboard.chart_helpers import (
     group_costs,
     make_chart_card,
 )
-from cobre_bridge.ui.html import (
+from cobre_bridge.ui.html.document import (
     chart_grid,
     collapsible_section,
     json_for_script,
@@ -42,13 +42,13 @@ from cobre_bridge.ui.html import (
     section_title,
     wrap_chart,
 )
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.plotly import (
     LEGEND_DEFAULTS as _LEGEND,
 )
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.plotly import (
     MARGIN_DEFAULTS as _MARGIN,
 )
-from cobre_bridge.ui.plotly_helpers import (
+from cobre_bridge.ui.html.plotly import (
     apply_stage_date_axis,
     apply_standard_layout,
     stage_x_dates,

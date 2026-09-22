@@ -24,24 +24,28 @@ from typing import TYPE_CHECKING, cast
 import pandas as pd
 from idecomp.decomp.modelos import dadger as _dadger_models
 
-from cobre_bridge.decomp import constraint_registers
-from cobre_bridge.decomp.cadastro import APPLIED_AC_CLASSES, UNINGESTABLE_AC_CLASSES
-from cobre_bridge.diagnostics import Diagnostic, DiagnosticTable, Severity
-from cobre_bridge.errors import FieldParseError, diagnostic_from_exception
-from cobre_bridge.preflight import (
+from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity
+from cobre_bridge.core.errors import FieldParseError, diagnostic_from_exception
+from cobre_bridge.core.preflight import (
     CheckItem,
     PreflightResult,
     PreflightVerdict,
     optional_input_advisory,
 )
+from cobre_bridge.decomp import constraint_registers
+from cobre_bridge.decomp.converters.cadastro import (
+    APPLIED_AC_CLASSES,
+    UNINGESTABLE_AC_CLASSES,
+)
+from cobre_bridge.decomp.files import discover_decomp_files
 
 if TYPE_CHECKING:
     from idecomp.decomp import Dadger, Vazoes
 
-    from cobre_bridge.decomp.cadastro import CadastroResolutionReport
     from cobre_bridge.decomp.case import DecompCase
+    from cobre_bridge.decomp.converters.cadastro import CadastroResolutionReport
+    from cobre_bridge.decomp.files import DecompFiles
     from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import DecompFiles
     from cobre_bridge.decomp.temporal import OperativeStage
 
 _CONTEXT = "Preflight"
@@ -196,56 +200,24 @@ def _load_factor_check(case: DecompCase, id_map: DecompIdMap) -> CheckItem:
     )
 
 
-def _deferred_inventory(dadger: Dadger, files: DecompFiles) -> list[Diagnostic]:
+def _deferred_inventory(dadger: Dadger) -> list[Diagnostic]:
     """Name what the conversion will not carry, so it is never a surprise."""
-    found: list[Diagnostic] = []
-
-    if getattr(files, "dadgnl", None) is not None:
-        found.append(
-            _deferred(
-                "decomp-anticipation-deferred",
-                "Anticipated thermal generation not converted",
-                "The deck declares anticipated (lead-time) thermal generation; "
-                "those plants are absent from the converted case, so their "
-                "generation and commitment are not modelled.",
-                "Compare against the reference run will report them as entities "
-                "with no converted counterpart.",
-            )
-        )
-
-    for register, code, title, summary in (
-        (
-            "ez",
+    try:
+        frame = dadger.ez(df=True)
+    except (AttributeError, TypeError, ValueError):
+        return []
+    if frame is None or frame.empty:
+        return []
+    return [
+        _deferred(
             "decomp-ez-ignored",
             "Coupling volume limit ignored",
             "The deck carries maximum-useful-volume records for the boundary "
-            "coupling; they are read and ignored by decision.",
-        ),
-        (
-            "mp",
-            "decomp-availability-deferred",
-            "Per-stage availability not applied",
-            "The deck declares per-stage maintenance and availability factors; "
-            "the converted capacity is static, so a stage under maintenance "
-            "carries more capacity than the reference allows.",
-        ),
-    ):
-        try:
-            frame = getattr(dadger, register)(df=True)
-        except (AttributeError, TypeError, ValueError):
-            continue
-        if frame is None or frame.empty:
-            continue
-        found.append(
-            _deferred(
-                code,
-                title,
-                f"{summary} ({len(frame)} record(s)).",
-                "Tracked in the conversion roadmap; no action needed to convert.",
-            )
+            f"coupling; they are read and ignored by decision ({len(frame)} "
+            "record(s)).",
+            "Tracked in the conversion roadmap; no action needed to convert.",
         )
-
-    return found
+    ]
 
 
 def _ac_present(dadger: Dadger, classes: frozenset[type]) -> list[type]:
@@ -253,9 +225,9 @@ def _ac_present(dadger: Dadger, classes: frozenset[type]) -> list[type]:
 
     A class is present iff its ``AC`` frame is a non-empty
     ``pd.DataFrame`` — mirrors the resolver's own guard
-    (:func:`cobre_bridge.decomp.cadastro._read_scalar_overrides` and its
-    siblings), so a ``None``/empty frame (an unregistered mnemonic, or an
-    absent one) contributes nothing.
+    (:func:`cobre_bridge.decomp.converters.cadastro.overrides.
+    _read_scalar_overrides` and its siblings), so a ``None``/empty frame
+    (an unregistered mnemonic, or an absent one) contributes nothing.
     """
     present = [
         cls
@@ -284,8 +256,9 @@ def _ac_coverage(
     *report* (for ``out_of_horizon``) — no file I/O, no calendar, no
     ``hidr``. The three buckets are computed once by set arithmetic against
     the module-level :data:`_ALL_AC_CLASSES` reflection and the resolver's
-    own :data:`~cobre_bridge.decomp.cadastro.APPLIED_AC_CLASSES` /
-    :data:`~cobre_bridge.decomp.cadastro.UNINGESTABLE_AC_CLASSES` registries
+    own :data:`~cobre_bridge.decomp.converters.cadastro.overrides.
+    APPLIED_AC_CLASSES` / :data:`~cobre_bridge.decomp.converters.cadastro.
+    overrides.UNINGESTABLE_AC_CLASSES` registries
     — enumerate-and-diff, never a hand-maintained list, so a newly-applied
     family automatically drops off the deferred bucket and a new idecomp
     class automatically lands in it.
@@ -490,7 +463,6 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
 
     from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.id_map import DecompIdMap
-    from cobre_bridge.decomp.pipeline import discover_decomp_files
 
     try:
         files = discover_decomp_files(src)
@@ -575,8 +547,8 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
         else:
             checks.extend(_tree_checks(vazoes, calendar))
 
-        from cobre_bridge.decomp.cadastro import build_effective_cadastro
-        from cobre_bridge.decomp.hydro import read_hidr
+        from cobre_bridge.decomp.converters.cadastro import build_effective_cadastro
+        from cobre_bridge.decomp.converters.hydro import read_hidr
 
         try:
             hidr = read_hidr(files.hidr)
@@ -600,7 +572,7 @@ def run_decomp_preflight(src: Path) -> PreflightResult:
         checks.extend(sc_checks)
         diagnostics.extend(sc_diags)
 
-    diagnostics.extend(_deferred_inventory(dadger, files))
+    diagnostics.extend(_deferred_inventory(dadger))
 
     return PreflightResult(
         verdict=_verdict(checks, diagnostics),

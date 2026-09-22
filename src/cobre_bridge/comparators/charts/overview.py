@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cobre_bridge.comparators.results import ResultsSummary
+from cobre_bridge.comparators.model import ResultsSummary
 
 
 def overview_metrics(

@@ -8,28 +8,31 @@ paths:
 Repo-specific architectural contracts. Each is a contract, not a style
 preference — a plausible deviation ships wrong numbers, silent divergence
 between the two conversion tracks, or messages a pip-installed user cannot act
-on. The architecture-debt audit registry (`plans/architecture-debt-audit.md`,
-local-only) records the known standing violations; do not add new ones.
+on. The known standing architectural violations have been catalogued and
+remediated; do not introduce new ones.
 
 ## 1. Twin-track symmetry (the central contract)
 
-The NEWAVE track (`converters/` + `pipeline.py`) and the DECOMP track
-(`decomp/`) must honour the **same contracts** for the same operations:
+The NEWAVE track (`newave/`, spine + `newave/converters/` +
+`newave/pipeline.py`) and the DECOMP track (`decomp/`, spine +
+`decomp/converters/` + `decomp/pipeline.py`) must honour the **same
+contracts** for the same operations:
 
 - A behaviour added to one track — a CLI flag, an exit-code rule, an emission
   self-check, a `--force`/rollback rule, a verdict field, a preflight policy —
   lands on **both tracks in the same change**, or the asymmetry is recorded as
   a finding in the audit registry. Silent one-track divergence is the repo's
   #1 recorded debt source; never extend it.
-- **Never import an underscore-private name across the `converters/` ↔
-  `decomp/` boundary.** When both tracks need it, promote it to a public home
-  (`diagnostics.py`, `productivity.py`, `horizon.py`,
-  `generic_constraint_format.py`, a shared writer/schema module) — the way
-  `decomp/preflight.py` reuses the public `CheckItem`/`PreflightResult`.
+- **Never import an underscore-private name across the `newave/` ↔ `decomp/`
+  track boundary.** When both tracks need it, promote it to `core/` (the
+  shared foundation both tracks may import) — enforced by
+  `tests/test_package_boundaries.py` (Rule B,
+  `test_no_private_cross_package_imports`) — the way `decomp/preflight.py`
+  reuses the public `CheckItem`/`PreflightResult`.
 - Physics and calendar math (cota polynomials, productivity, stage/block
-  weighting) live in **one** shared implementation. Two implementations that
-  "agree except at the edges" is exactly the bug class `compare` exists to
-  detect — in our own tool.
+  weighting) live in **one** shared implementation (in `core/`). Two
+  implementations that "agree except at the edges" is exactly the bug class
+  `compare` exists to detect — in our own tool.
 
 ## 2. TRACKED COBRE-GAP workarounds
 

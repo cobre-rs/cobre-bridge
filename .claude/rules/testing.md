@@ -8,33 +8,31 @@ paths:
 The standing contract for how this repo is tested. Generic Python testing
 style lives in the global Python rules; these are the bridge-specific rules.
 
-## The 3-tier convention (load-bearing — CI depends on it)
+## The 2-tier convention (load-bearing — CI depends on it)
 
-- **Tier 1 — pure Python.** Imports no `cobre`. Runs on every CI job
-  (3.12/3.13/3.14). No module at any tier may `import cobre` at module scope —
-  the suite must *collect* cleanly in a cobre-free environment.
+- **Tier 1 — pure Python.** Imports no `cobre`. Runs on every CI job. No
+  module at any tier may `import cobre` at module scope — the suite must
+  *collect* cleanly in a cobre-free environment.
 - **Tier 2 — needs `cobre-python`** (a required runtime dep) but no solver
-  binary and no deck. Guarded by `tests.conftest.requires_cobre_python`
+  binary. Guarded by `tests.conftest.requires_cobre_python`
   (`find_spec`-based) and, where relevant, `requires_writer_binding`; any
   `import cobre` lives inside the guarded test/helper body.
-- **Tier 3 — needs the real solver binary and/or a real gitignored deck under
-  `example/`.** Always `skipif`-guarded on the path's existence. Dev-only
-  smoke; never runs in CI.
 
-**No tier-1 or tier-2 test reads `example/`.** Any test that does is tier 3
-and carries the path guard.
+## Local-data policy (enforced by `tests/test_local_data_policy.py`)
 
-### Deck-guard discipline (the 69-dead-tests lesson)
+Every test runs from the repository alone:
 
-A `skipif`-guarded test whose deck no longer exists anywhere runs **nowhere
-and reports nothing**. Rules:
-
-- Every deck path a test guards on is declared as a module-level `_DECK`-style
-  constant, never inline in the decorator.
-- When retiring or renaming a deck under `example/`, retarget or delete every
-  test that guards on it **in the same change** — a skip is not a pass.
-- Prefer guarding on the *surviving* fast fixture
-  (`example/decomp-mar-26-rv2-reduced`, the 2-fan case) over per-revision decks.
+- **No test builds a path into the gitignored `example/` tree, and none
+  resolves a path through `Path.home()`.** A test that runs on one developer's
+  machine only is a snapshot, not a guard, and its permanent skip elsewhere
+  reads as coverage. There is no tier 3.
+- **Real-format inputs are committed as small excerpts** under
+  `tests/fixtures/` (result-file heads, a schema, one example case — a few KB
+  each); synthetic decks live under `tests/decks/`. Name the excerpt's origin
+  in the module docstring.
+- **A check that genuinely needs a whole deck, a solved cobre case, or the
+  solver binary** is written up in `docs/real-deck-checks.md` (what it
+  verified, what it needs) instead of being kept as a skipped test.
 
 ## Test architecture
 
@@ -49,8 +47,8 @@ and reports nothing**. Rules:
   are legacy exceptions scheduled for splitting, not a pattern to extend).
 - **Shared case builders live in `tests/conftest.py`** (or a shared fixtures
   module) — never re-defined per file.
-- **Test output goes to `tmp_path`.** No test writes into `example/*/` or the
-  repo tree; generated artifacts self-delete.
+- **Test output goes to `tmp_path`.** No test writes into the repo tree;
+  generated artifacts self-delete.
 - **Golden files** (`tests/golden/`) pin rendered HTML/dataset shapes. A
   deliberate rendering change regenerates them via the documented regeneration
   path — never hand-edit a golden file, and never loosen an assertion to avoid

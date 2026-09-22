@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.15.0"
-description = "Anything-to-Cobre converter"
+version = "0.16.0"
+description = "Convert NEWAVE and DECOMP cases to Cobre input format and compare the results"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
@@ -23,8 +23,8 @@ dependencies = [
     # REQUIRED runtime dep, not an optional extra: `convert decomp` imports the
     # boundary FCF by default and `convert --validate` / `compare` load cobre
     # output, so `import cobre` must work out of the box. Keep the floor in
-    # lockstep with MIN_COBRE_VERSION in cli.py (which documents the contract).
-    "cobre-python>=0.15.0,<0.16",
+    # lockstep with MIN_COBRE_VERSION in cobre/compat.py (which documents the contract).
+    "cobre-python>=0.16.0,<0.17",
 ]
 
 [project.optional-dependencies]
@@ -44,18 +44,21 @@ packages = ["src/cobre_bridge"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--tb=short"
+addopts = "--tb=short --import-mode=importlib"
+pythonpath = ["."]
 
 [tool.coverage.run]
 source = [
-    "cobre_bridge.comparators.newave_readers",
-    "cobre_bridge.comparators.alignment",
-    "cobre_bridge.comparators.constraints_compare",
+    "cobre_bridge.comparators.model",
+    "cobre_bridge.comparators.constraints",
+    "cobre_bridge.comparators.newave.readers",
+    "cobre_bridge.comparators.newave.alignment",
+    "cobre_bridge.comparators.newave.constraints",
 ]
 
 [tool.coverage.report]
 fail_under = 83
-# Ratchet: raise as coverage improves, never lower to dodge a regression — this is the combined aggregate over the 3 `source` modules above, not a per-module threshold.
+# Ratchet: raise as coverage improves, never lower to dodge a regression — this is the combined aggregate over the 5 `source` modules above, not a per-module threshold.
 
 [tool.pyright]
 # Editor aid only — CI gates ruff (ruff.toml, whole tree) and the drift

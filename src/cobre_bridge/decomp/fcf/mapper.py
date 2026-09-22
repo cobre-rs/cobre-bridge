@@ -27,7 +27,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from cobre_bridge.converters.network import C_M3S2HM3
+from cobre_bridge.core.units import C_M3S2HM3
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -72,7 +72,7 @@ if TYPE_CHECKING:
 # Hm³, but cobre's *inflow-lag* state variable is a raw flow rate in **m³/s**
 # (the same physical quantity as the ``z_inflow`` column, stored unscaled in the
 # state vector). Converting ``R$/Hm³ → R$/(m³/s)`` multiplies by the fixed
-# Hm³-per-(m³/s) month factor :data:`~cobre_bridge.converters.network.C_M3S2HM3`
+# Hm³-per-(m³/s) month factor :data:`~cobre_bridge.core.units.C_M3S2HM3`
 # (``= 2.628``, the source's monthly inflow-volume convention, per the SDDP
 # review): a 1 m³/s recent inflow represents 2.628 Hm³ of monthly volume, so it
 # carries 2.628× the R$/Hm³ water value. Storage must NOT take this factor and
@@ -112,10 +112,11 @@ _HYDRO_TRANSIT_BUCKET = 3
 #: `HydroStorage`'s `subindex` is always 0 (policy.fbs: one slot per plant).
 _STORAGE_SUBINDEX = 0
 
-#: cobre's `i32::MIN` sentinel for "no delivery date" — the undated
-#: `AnticipatedThermalState` slot (the in-study anticipation, already priced
+#: cobre's `ENTITY_SLOT_DATE_SENTINEL` (`i32::MIN`), the "no date" value for
+#: every per-slot date field — here an `AnticipatedThermalState` slot whose
+#: `interval_start` is unset (the undated in-study anticipation, already priced
 #: by the converter's `past_anticipated_commitments`), never a GNL target.
-_DELIVERY_DATE_SENTINEL = -2147483648
+_SLOT_DATE_SENTINEL = -2147483648
 
 
 @dataclass(frozen=True)
@@ -202,7 +203,7 @@ class GnlRingPlan:
     anticipated ring, a dated ring slot is *covered* (receives the `pi_gnl`
     coefficient) when ``post_horizon_start is None`` (no filter — the
     default, so every existing construction keeps placing on all dated
-    slots) or its ``delivery_date >= post_horizon_start`` — i.e. it is one
+    slots) or its ``interval_start >= post_horizon_start`` — i.e. it is one
     of the class-3 signaled lanes; otherwise it is a non-covered in-study
     delivery and is dropped (see :func:`_resolve_gnl_targets`).
     """
@@ -219,7 +220,7 @@ class GnlDroppedTerm:
     :class:`GnlThermalTarget` claims that submercado at all) and the
     resolved thermal id for a target-side drop — out-of-range
     lag/submercado, a thermal with no dated ring slot at all, or
-    a dated slot whose ``delivery_date`` falls before the
+    a dated slot whose ``interval_start`` falls before the
     post-study horizon (a non-covered lane). ``coefficient`` is a
     representative value for the diagnostics layer to report:
     the summed source coefficient for a source-submercado drop; for most
@@ -293,11 +294,13 @@ def _index_gnl_ring(
 ) -> dict[int, tuple[tuple[int, int, int], ...]]:
     """Index the target manifest's `AnticipatedThermalState` ring by thermal id.
 
-    Unlike `_index_manifest` (which discards `delivery_date` and would
+    Unlike `_index_manifest` (which discards the slot's dates and would
     silently collapse a thermal's sentinel and dated slots onto the same
-    key), this keeps every `(subindex, delivery_date, position)` triple per
+    key), this keeps every `(subindex, interval_start, position)` triple per
     `entity_id` so the GNL placement can tell a dated slot from the undated
-    sentinel. A separate index from `_index_manifest`'s
+    sentinel. `interval_start` is the slot's day-accurate delivery-stage start
+    (`YYYYMMDD`), the anchor the covered/non-covered split below compares
+    against the post-study horizon. A separate index from `_index_manifest`'s
     `(entity_type, entity_id, subindex) -> position` contract, which the
     storage/lag path still depends on unchanged.
     """
@@ -307,9 +310,9 @@ def _index_gnl_ring(
             continue
         thermal_id = _slot_int(slot, "entity_id")
         subindex = _slot_int(slot, "subindex")
-        delivery_date = _slot_int(slot, "delivery_date")
+        interval_start = _slot_int(slot, "interval_start")
         by_thermal.setdefault(thermal_id, []).append(
-            (subindex, delivery_date, position)
+            (subindex, interval_start, position)
         )
     return {thermal_id: tuple(slots) for thermal_id, slots in by_thermal.items()}
 
@@ -455,10 +458,11 @@ def _resolve_gnl_targets(
     `ring_index` (built from the reloaded terminal manifest) never carries
     the já-comandada (class-4) window at all — cobre excises it from the
     ring entirely — so a target's dated slot(s) are exactly the in-study and
-    class-3 signaled deliveries, both month-anchored. They split into
-    *covered* (`delivery_date >= gnl_plan.post_horizon_start`, or
+    class-3 signaled deliveries, keyed by each slot's `interval_start` (its
+    delivery-stage start day). They split into *covered*
+    (`interval_start >= gnl_plan.post_horizon_start`, or
     `post_horizon_start is None` — no filter) — the class-3 signaled lanes —
-    and *non-covered* (`delivery_date < post_horizon_start`) — an in-study
+    and *non-covered* (`interval_start < post_horizon_start`) — an in-study
     delivery, priced by the in-study committed window rather than the ring:
     only covered slots land in `resolved`; each non-covered slot is dropped
     into the returned `GnlDroppedTerm`s (reason names the in-study committed
@@ -523,11 +527,11 @@ def _resolve_gnl_targets(
             continue
         targeted_submercados.add(target.submercado)
         dated = tuple(
-            (delivery_date, position)
-            for _subindex, delivery_date, position in ring_index.get(
+            (interval_start, position)
+            for _subindex, interval_start, position in ring_index.get(
                 target.thermal_id, ()
             )
-            if delivery_date != _DELIVERY_DATE_SENTINEL
+            if interval_start != _SLOT_DATE_SENTINEL
         )
         if not dated:
             dropped.append(
@@ -544,12 +548,12 @@ def _resolve_gnl_targets(
         post_horizon_start = gnl_plan.post_horizon_start
         covered = tuple(
             position
-            for delivery_date, position in dated
-            if post_horizon_start is None or delivery_date >= post_horizon_start
+            for interval_start, position in dated
+            if post_horizon_start is None or interval_start >= post_horizon_start
         )
         has_uncovered = any(
-            post_horizon_start is not None and delivery_date < post_horizon_start
-            for delivery_date, _position in dated
+            post_horizon_start is not None and interval_start < post_horizon_start
+            for interval_start, _position in dated
         )
 
         cols = tuple(
@@ -639,7 +643,7 @@ def map_boundary_cuts(
     source-only plant); inflow-lag terms join 1:1 by `lag_slot_of` onto
     `HydroInflowLag`. When `gnl_plan` is given, each `AnticipatedThermalState`
     ring slot named by one of its targets' *covered* dated slot(s) — i.e.
-    `delivery_date >= gnl_plan.post_horizon_start`, or every dated slot when
+    `interval_start >= gnl_plan.post_horizon_start`, or every dated slot when
     `post_horizon_start is None` — carries the hours-weighted patamar sum
     `Σ_p pi_gnl[col(s,p,nl_lag)] · coupling_block_hours[p]` (`math.fsum`,
     order-independent); a target with no dated ring slot, a dated slot whose

@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """check_doc_paths.py — resolvable-path gate for shipped docs.
 
-Every repo-relative path cited in README.md and docs/**/*.md must resolve
-against the live tree (`.claude/rules/doc-integrity.md` §3.4). Citing a
-gitignored dir (``plans/``) or a machine-local path (``~/git/...``) in a
-shipped doc is a violation outright — no reader can resolve it.
+Every repo-relative path cited in README.md, CONTRIBUTING.md, docs/**/*.md,
+and CLAUDE.md must resolve against the live tree
+(`.claude/rules/doc-integrity.md` §3.4). Citing a gitignored dir (``plans/``)
+or a machine-local path (``~/git/...``) in a shipped doc is a violation
+outright — no reader can resolve it.
 
-CLAUDE.md is scanned in ADVISORY mode: it documents this checkout (so
-``example/`` deck paths are legitimate there), and known drift is tracked in
-the audit registry. Promote it to hard once its documented paths are clean.
+CLAUDE.md is hard-gated like README.md and docs/**/*.md, with one narrow
+allowance: it documents this checkout, so its own ``example/`` deck-path
+mentions are legitimate (and already outside every recognized prefix, so the
+scanner never flags them — no allowance needed), and the ``plans/``/
+``~/git/...`` mentions where it *documents* the banned-prefix convention
+itself (rather than citing a real path) do not count as violations. Every
+other CLAUDE.md citation — and every README.md/docs/ citation, unconditionally
+— must still resolve.
 
 Recognized citation shapes: backtick-quoted tokens that start with a known
 top-level dir (``src/``, ``docs/``, ``scripts/``, ``tests/``, ``.github/``,
@@ -30,6 +36,7 @@ TOKEN = re.compile(r"`([^`\s]+)`")
 PATH_PREFIXES = ("src/", "docs/", "scripts/", "tests/", ".github/", ".claude/")
 ROOT_FILES = {
     "README.md",
+    "CONTRIBUTING.md",
     "CHANGELOG.md",
     "CLAUDE.md",
     "pyproject.toml",
@@ -39,12 +46,17 @@ ROOT_FILES = {
 # `cobre-bridge.toml` and `~/.config/...` are user-created locations the docs
 # legitimately name (external contracts, not repo paths) — not checked.
 # `plans/` is gitignored and `~/git/` is a developer machine — always dead
-# for a reader.
+# for a reader, except where CLAUDE.md documents the convention by naming
+# them (see `scan`'s `allow_dead_prefixes`). `example/` needs no matching
+# exemption: it is in neither PATH_PREFIXES nor ROOT_FILES, so
+# looks_like_repo_path() already ignores it everywhere, CLAUDE.md included.
 ALWAYS_DEAD_PREFIXES = ("plans/", "~/git/")
 
-HARD_FILES = ["README.md"]
+HARD_FILES = ["README.md", "CONTRIBUTING.md", "CLAUDE.md"]
 HARD_GLOBS = ["docs/**/*.md"]
-ADVISORY_FILES = ["CLAUDE.md"]
+# No file is advisory-only today; CLAUDE.md was promoted to HARD_FILES above.
+# Kept as a hook for a future doc that needs the same non-failing treatment.
+ADVISORY_FILES: list[str] = []
 
 
 def looks_like_repo_path(token: str) -> bool:
@@ -57,13 +69,23 @@ def strip_anchor(token: str) -> str:
     return token.split("#", 1)[0].rstrip("/")
 
 
-def scan(path: Path) -> list[str]:
+def scan(path: Path, *, allow_dead_prefixes: bool = False) -> list[str]:
+    """Return unresolved-citation messages for one doc.
+
+    Args:
+        allow_dead_prefixes: CLAUDE.md-only — suppresses the
+            ALWAYS_DEAD_PREFIXES violation, since CLAUDE.md is the file that
+            documents the plans/~/git/ convention by naming those prefixes,
+            not a reader trying to resolve them as real paths.
+    """
     problems: list[str] = []
     for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         for token in TOKEN.findall(line):
             if not looks_like_repo_path(token):
                 continue
             if token.startswith(ALWAYS_DEAD_PREFIXES):
+                if allow_dead_prefixes:
+                    continue
                 problems.append(
                     f"{rel(path)}:{lineno}: `{token}` — gitignored/machine-local; "
                     "no reader can resolve it"
@@ -91,7 +113,7 @@ def collect(names: list[str], globs: list[str] | None = None) -> list[Path]:
 def main() -> int:
     hard: list[str] = []
     for path in collect(HARD_FILES, HARD_GLOBS):
-        hard.extend(scan(path))
+        hard.extend(scan(path, allow_dead_prefixes=rel(path) == "CLAUDE.md"))
 
     advisory: list[str] = []
     for path in collect(ADVISORY_FILES):

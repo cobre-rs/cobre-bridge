@@ -38,6 +38,7 @@ def build_stage_cuts_payload(
     cost_scale_factor: float | None,
     node_id: int,
     graph_stage_id: int,
+    priced_state_date: int,
 ) -> dict[str, Any]:
     """Assemble one ``stage_cuts`` entry from `mapping` over `manifest`.
 
@@ -47,12 +48,15 @@ def build_stage_cuts_payload(
     cut's dense 0-based position in the pool (its `enumerate` index here, not
     the source ``cut_id``). ``entity_manifest`` is `manifest.entity_manifest`
     copied verbatim (never re-derived) so a future cobre layout change breaks
-    loudly at load, not silently. ``active_cut_indices`` lists the pool
-    positions whose `MappedCut.is_active` is `True`; ``populated_count`` is
-    `len(cuts)`. ``cost_scale_factor``, ``node_id``, and ``graph_stage_id``
-    are copied verbatim into the payload — the boundary loader reads them
-    per pool to resolve `source_stage -> pool` and to reject a legacy
-    (pre-self-describing) checkpoint.
+    loudly at load, not silently, and so each slot's own date fields
+    (``reference_date``/``interval_start``/``interval_end``) round-trip.
+    ``active_cut_indices`` lists the pool positions whose `MappedCut.is_active`
+    is `True`; ``populated_count`` is `len(cuts)`. ``cost_scale_factor``,
+    ``node_id``, ``graph_stage_id``, and ``priced_state_date`` are copied
+    verbatim into the payload — the boundary loader reads them per pool to
+    select the source pool by calendar date (matching ``priced_state_date``
+    against the loading study's own boundary date), to require a single-node
+    terminal source, and to reject a legacy (pre-self-describing) checkpoint.
 
     Raises
     ------
@@ -120,6 +124,7 @@ def build_stage_cuts_payload(
         "cost_scale_factor": cost_scale_factor,
         "node_id": node_id,
         "graph_stage_id": graph_stage_id,
+        "priced_state_date": priced_state_date,
     }
 
 
@@ -135,6 +140,7 @@ def build_metadata(
     rng_seed: int,
     created_at: str,
     cobre_version: str,
+    season_manifest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the checkpoint `metadata` dict, refusing an unset `cost_scale_factor`.
 
@@ -145,6 +151,12 @@ def build_metadata(
     (:func:`build_stage_cuts_payload`). `created_at` is accepted as a parameter
     rather than derived internally (this module never calls `datetime.now()`) —
     the caller supplies an ISO 8601 timestamp.
+
+    `season_manifest` (the study-global `cycle_code`/`n_seasons`/`hydro_orders`
+    descriptor) is copied in when given, so cobre's season-compatibility gate
+    accepts the boundary. Omitted (`None`), the key is left off entirely and
+    cobre defaults it to the absent descriptor — correct only for a seasonless
+    loading study; the boundary-FCF importer always supplies the study's own.
 
     Raises
     ------
@@ -158,7 +170,7 @@ def build_metadata(
             "cobre treat this checkpoint as legacy and silently scale "
             "every value by 10⁶"
         )
-    return {
+    metadata: dict[str, Any] = {
         "cobre_version": cobre_version,
         "created_at": created_at,
         "num_stages": num_stages,
@@ -172,6 +184,9 @@ def build_metadata(
             "cost_scale_factor": cost_scale_factor,
         },
     }
+    if season_manifest is not None:
+        metadata["season_manifest"] = dict(season_manifest)
+    return metadata
 
 
 def write_boundary_checkpoint(
@@ -194,7 +209,7 @@ def write_boundary_checkpoint(
     boundary then self-describes its lag depth. ``0`` (the default, and the
     storage-only case) reserves no slots, leaving the checkpoint byte-identical to
     a no-lag boundary. The reservation is a cobre-side feature the pin and
-    :data:`~cobre_bridge.cobre_compat.MIN_COBRE_VERSION` floor guarantee is present.
+    :data:`~cobre_bridge.cobre.compat.MIN_COBRE_VERSION` floor guarantee is present.
 
     Raises
     ------

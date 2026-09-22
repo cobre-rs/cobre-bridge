@@ -2,12 +2,10 @@
 
 ``convert_decomp_case(src, dst)`` discovers the deck (``caso.dat`` names
 the revision extension; the ``rvN`` index file names the data files),
-parses it, and writes a Cobre case directory. Scope is the ratified
-loop-closing milestone: the deferred families (exchange network pending
-the upstream accessor fix, renewables pending their reader, boundary FCF,
-and the per-block/fidelity items) are logged loudly by their emitters or
-here. GNL anticipation is now emitted (the anticipated ring + both temporal
-boundaries), no longer deferred.
+parses it once, and writes a Cobre case directory. A deck feature the
+conversion leaves out (water travel time behind a tracked cobre gap, the
+register term types their emitters name) is reported as a diagnostic by the
+emitter that detects it, never dropped silently.
 """
 
 from __future__ import annotations
@@ -22,46 +20,48 @@ import polars as pl
 import pyarrow as pa
 from idecomp.decomp import Dadger, Vazoes
 
-from cobre_bridge import cobre_schemas, emission_checks
-from cobre_bridge import diagnostics as dx
-from cobre_bridge.bound_merge import merge_bound_tables
-from cobre_bridge.case_writer import CaseWriter
-from cobre_bridge.decomp import anticipated as anticipated_conv
-from cobre_bridge.decomp import bounds as bounds_conv
-from cobre_bridge.decomp import (
-    bounds_accumulator,
-    constraint_registers,
-    libs_electrical_emit,
-    single_term_bounds,
-)
-from cobre_bridge.decomp import cadastro as cadastro_conv
-from cobre_bridge.decomp import config as config_conv
-from cobre_bridge.decomp import constraints as constraints_conv
-from cobre_bridge.decomp import contracts as contracts_conv
-from cobre_bridge.decomp import fpha as fpha_conv
-from cobre_bridge.decomp import group_bounds as group_bounds_conv
-from cobre_bridge.decomp import hydro as hydro_conv
-from cobre_bridge.decomp import libs_electrical as libs_electrical_conv
-from cobre_bridge.decomp import load as load_conv
-from cobre_bridge.decomp import ncs as ncs_conv
-from cobre_bridge.decomp import network as network_conv
-from cobre_bridge.decomp import scenarios as scenarios_conv
-from cobre_bridge.decomp import temporal as temporal_conv
-from cobre_bridge.decomp import thermal as thermal_conv
-from cobre_bridge.decomp import travel_time as travel_time_conv
-from cobre_bridge.decomp.case import DecompCase
-from cobre_bridge.decomp.id_map import DecompIdMap
-from cobre_bridge.decomp.scalar_parameters import (
-    build_decomp_scalar_parameters,
-    write_scalar_parameters,
-)
-from cobre_bridge.errors import SourceFileError
-from cobre_bridge.generic_constraint_builder import ConstraintIdAllocator
-from cobre_bridge.pipeline import (
+from cobre_bridge.cobre import schemas as cobre_schemas
+from cobre_bridge.cobre.case_writer import CaseWriter
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core import emission_checks
+from cobre_bridge.core.bound_merge import merge_bound_tables
+from cobre_bridge.core.conversion import (
     ClearedArtifacts,
     ConversionReport,
     clear_dst_contents,
 )
+from cobre_bridge.core.generic_constraint_builder import ConstraintIdAllocator
+from cobre_bridge.decomp import (
+    bounds_accumulator,
+    constraint_registers,
+)
+from cobre_bridge.decomp import group_bounds as group_bounds_conv
+from cobre_bridge.decomp import load as load_conv
+from cobre_bridge.decomp import scenarios as scenarios_conv
+from cobre_bridge.decomp import temporal as temporal_conv
+from cobre_bridge.decomp.case import DecompCase
+from cobre_bridge.decomp.converters import anticipated as anticipated_conv
+from cobre_bridge.decomp.converters import bounds as bounds_conv
+from cobre_bridge.decomp.converters import cadastro as cadastro_conv
+from cobre_bridge.decomp.converters import config as config_conv
+from cobre_bridge.decomp.converters import constraints as constraints_conv
+from cobre_bridge.decomp.converters import contracts as contracts_conv
+from cobre_bridge.decomp.converters import fpha as fpha_conv
+from cobre_bridge.decomp.converters import hydro as hydro_conv
+from cobre_bridge.decomp.converters import libs_electrical as libs_electrical_conv
+from cobre_bridge.decomp.converters import (
+    libs_electrical_emit,
+    single_term_bounds,
+)
+from cobre_bridge.decomp.converters import ncs as ncs_conv
+from cobre_bridge.decomp.converters import network as network_conv
+from cobre_bridge.decomp.converters import thermal as thermal_conv
+from cobre_bridge.decomp.converters import travel_time as travel_time_conv
+from cobre_bridge.decomp.converters.scalar_parameters import (
+    build_decomp_scalar_parameters,
+    write_scalar_parameters,
+)
+from cobre_bridge.decomp.id_map import DecompIdMap
 
 _LOG = logging.getLogger(__name__)
 
@@ -162,170 +162,11 @@ class FcfInputs:
     initial_conditions: dict | None = None
 
 
-@dataclass(frozen=True)
-class DecompFiles:
-    """Resolved input files of one deck revision."""
-
-    revision: str
-    dadger: Path
-    vazoes: Path
-    hidr: Path
-    dadgnl: Path | None
-    renovaveis: Path | None
-    polinjus: Path | None
-    #: The deck's LIBs-era electrical-constraint file, resolved
-    #: via :func:`constraint_registers.resolve_libs_electrical_path`; ``None``
-    #: when the deck carries none. Defaults to ``None`` so every pre-existing
-    #: ``DecompFiles(...)`` call site keeps constructing without it.
-    libs_restricao_eletrica: Path | None = None
-    #: The deck's boundary-FCF header file (``cortesh.dat``), resolved via
-    #: :func:`_resolve_fc_record_path` (the deck's ``FC NEWV21`` record) or,
-    #: failing that, the ``cortesh*`` glob idiom; ``None`` when the deck
-    #: carries no boundary FCF. Defaults to ``None`` for the
-    #: same back-compat reason as ``libs_restricao_eletrica`` above.
-    cortesh: Path | None = None
-    #: The deck's boundary-FCF cut-record file: a single-stage partition
-    #: export (``cortes-<estagio>.dat``, preferred) or the consolidated
-    #: archive (``cortes.dat``), resolved via :func:`_resolve_fc_record_path`
-    #: (the deck's ``FC NEWCUT`` record) or the glob idiom; ``None`` when
-    #: absent.
-    cortes: Path | None = None
-
-
-#: ``FC`` register ``tipo`` mnemonics (``idecomp.decomp.Dadger.fc()``) naming
-#: the boundary-FCF header and cut-record files respectively.
-_FC_TIPO_CORTESH = "NEWV21"
-_FC_TIPO_CORTES = "NEWCUT"
-
-
-def _resolve_fc_record_path(dadger: Path, deck_dir: Path, *, tipo: str) -> Path | None:
-    """Resolve one boundary-FCF file named by the deck's ``FC`` register.
-
-    A lightweight fixed-width text scan of *dadger* — mirroring
-    :func:`~cobre_bridge.decomp.constraint_registers.resolve_libs_electrical_path`'s
-    own text-scan idiom for a deck-relative file named by an index entry —
-    rather than a full :class:`idecomp.decomp.Dadger` parse (the caller
-    re-parses *dadger* structurally right after discovery returns;
-    duplicating that heavier, structured parse here would be wasted work and
-    would need to guard against whatever exception surface a malformed
-    dadger raises through it). The ``FC`` register
-    (``idecomp.decomp.modelos.dadger.FC``) is fixed-width: identifier at
-    columns 0:4, ``tipo`` mnemonic at columns 4:10, ``caminho`` at columns
-    14:214 — confirmed against ``example/decomp-mar-26-rv2/dadger.rv2``'s own
-    ``FC  NEWV21    cortesh.dat`` / ``FC  NEWCUT    cortes-004.dat`` lines.
-    Resolves ``caminho`` (which may be a relative path, including
-    parent-directory references, e.g. ``../../cortesh.dat``) against
-    *deck_dir*.
-
-    Never raises: returns ``None`` — falling through to the glob idiom —
-    when *dadger* is unreadable, carries no ``FC`` record for *tipo*, or the
-    named path does not resolve to an existing file. Plain string slicing
-    cannot itself raise, so no malformed-content exception handling is
-    needed beyond the ``OSError`` guard on the read itself.
-    """
-    try:
-        text = dadger.read_text(encoding="latin-1")
-    except OSError:
-        return None
-    for line in text.splitlines():
-        if line[:4] != "FC  " or line[4:10].strip().upper() != tipo:
-            continue
-        caminho = line[14:214].strip()
-        if not caminho:
-            continue
-        # `.resolve()` collapses any `..` in `caminho` (e.g. `../../cortesh.dat`)
-        # so the returned path is a plain, normalized filesystem path rather
-        # than one carrying the FC record's own relative-path spelling.
-        candidate = (deck_dir / caminho).resolve()
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def discover_decomp_files(src: Path) -> DecompFiles:
-    """Resolve the deck files via ``caso.dat`` → the revision index file."""
-    caso = src / "caso.dat"
-    if not caso.is_file():
-        raise SourceFileError(
-            f"{caso} not found; not a deck directory",
-            path=str(src),
-            field="caso.dat",
-        )
-    revision = caso.read_text(encoding="latin-1").split()[0]
-
-    names: list[str] = []
-    index = src / revision
-    if index.is_file():
-        names = [
-            stripped
-            for line in index.read_text(encoding="latin-1").splitlines()
-            if (stripped := line.strip()) and not stripped.startswith("&")
-        ]
-
-    def find(prefix: str, required: bool, *, exclude: str | None = None) -> Path | None:
-        def is_candidate(name: str) -> bool:
-            lname = name.lower()
-            return lname.startswith(prefix) and (
-                exclude is None or not lname.startswith(exclude)
-            )
-
-        for name in names:
-            if is_candidate(name):
-                path = src / name
-                if path.is_file():
-                    return path
-        matches = sorted(p for p in src.glob(f"{prefix}*") if is_candidate(p.name))
-        if matches:
-            return matches[0]
-        if required:
-            raise SourceFileError(
-                f"no {prefix}* file found in {src}",
-                path=str(src),
-                field=prefix,
-            )
-        return None
-
-    dadger = find("dadger", required=True)
-    vazoes = find("vazoes", required=True)
-    hidr = find("hidr", required=True)
-    dadgnl = find("dadgnl", required=False)
-    renovaveis = find("renovaveis", required=False)
-    polinjus = find("polinjus", required=False)
-    assert dadger is not None and vazoes is not None and hidr is not None
-    # Prefer the deck's own FC record over the glob: its caminho may point
-    # outside `src` (e.g. `../../cortesh.dat`), which the glob can never find.
-    # The `cortes-` prefix is tried before the broader `cortes` so a
-    # single-stage partition export wins over the consolidated `cortes.dat`
-    # archive when both are present (matching `fcf/cortes.py`'s trailer-based
-    # shape detection); `exclude="cortesh"` keeps the `cortes` glob from
-    # mistaking the header file for the record file.
-    cortesh = _resolve_fc_record_path(dadger, src, tipo=_FC_TIPO_CORTESH) or find(
-        "cortesh", required=False
-    )
-    cortes = (
-        _resolve_fc_record_path(dadger, src, tipo=_FC_TIPO_CORTES)
-        or find("cortes-", required=False)
-        or find("cortes", required=False, exclude="cortesh")
-    )
-    return DecompFiles(
-        revision=revision,
-        dadger=dadger,
-        vazoes=vazoes,
-        hidr=hidr,
-        dadgnl=dadgnl,
-        renovaveis=renovaveis,
-        polinjus=polinjus,
-        libs_restricao_eletrica=constraint_registers.resolve_libs_electrical_path(src),
-        cortesh=cortesh,
-        cortes=cortes,
-    )
-
-
 #: Sentinel for a null ``block_id`` when joining two bound frames in polars:
 #: `nulls_equal` defaults to False, so two null block ids never match each
 #: other on their own; fill to this real value for the join, then restore
-#: null on the result. Shared by :func:`_rejoin_thermal_cost`,
-#: :func:`_rejoin_contract_price`, and :func:`_attach_water_withdrawal`.
+#: null on the result. See :func:`_fill_block_sentinel` /
+#: :func:`_restore_block_null`.
 _NULL_BLOCK_SENTINEL = -1
 
 #: The ``(stage_id, block_id)`` tail every resolved bound table sorts by,
@@ -335,13 +176,28 @@ _NULL_BLOCK_SENTINEL = -1
 _BOUND_SORT_KEYS = [("stage_id", "ascending"), ("block_id", "ascending")]
 
 
+def _fill_block_sentinel(frame: pl.DataFrame) -> pl.DataFrame:
+    """Map a null ``block_id`` to :data:`_NULL_BLOCK_SENTINEL` ahead of a join."""
+    return frame.with_columns(pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL))
+
+
+def _restore_block_null(frame: pl.DataFrame) -> pl.DataFrame:
+    """Undo :func:`_fill_block_sentinel` on a merged/joined result."""
+    return frame.with_columns(
+        pl.when(pl.col("block_id") == _NULL_BLOCK_SENTINEL)
+        .then(None)
+        .otherwise(pl.col("block_id"))
+        .alias("block_id")
+    )
+
+
 def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.Table:
     """Fold *cost_table* (``thermal.py``'s ``cost_per_mwh`` side-table) onto
     *thermal_bounds* (the accumulator's resolved ``THERMAL_BOUNDS_SCHEMA``
     table), restoring the ``cost_per_mwh`` column ``convert_thermal_bounds``
     carries alongside rather than through its bound contributions.
 
-    Merged via :func:`~cobre_bridge.bound_merge.merge_bound_tables`
+    Merged via :func:`~cobre_bridge.core.bound_merge.merge_bound_tables`
     (``precedence="base"``, immaterial here since the two frames share no
     non-key column) on ``(thermal_id, stage_id, block_id)`` — not a
     left-join keyed off *thermal_bounds* — because a ``(thermal, stage)``
@@ -361,19 +217,10 @@ def _rejoin_thermal_cost(thermal_bounds: pa.Table, cost_table: pa.Table) -> pa.T
     for frame in (bounds_df, cost_df):
         frame["block_id"] = frame["block_id"].astype("Int64")
 
-    bounds_pl = pl.from_pandas(bounds_df).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    cost_pl = pl.from_pandas(cost_df).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    merged_pl = merge_bound_tables(
-        bounds_pl, cost_pl, on=key, precedence="base"
-    ).with_columns(
-        pl.when(pl.col("block_id") == _NULL_BLOCK_SENTINEL)
-        .then(None)
-        .otherwise(pl.col("block_id"))
-        .alias("block_id")
+    bounds_pl = _fill_block_sentinel(pl.from_pandas(bounds_df))
+    cost_pl = _fill_block_sentinel(pl.from_pandas(cost_df))
+    merged_pl = _restore_block_null(
+        merge_bound_tables(bounds_pl, cost_pl, on=key, precedence="base")
     )
     merged = merged_pl.to_pandas()
 
@@ -564,18 +411,9 @@ def _rejoin_contract_price(
     for frame in (bounds_df, price_df):
         frame["block_id"] = frame["block_id"].astype("Int64")
 
-    bounds_pl = pl.from_pandas(bounds_df).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    price_pl = pl.from_pandas(price_df).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    merged_pl = bounds_pl.join(price_pl, on=key, how="left").with_columns(
-        pl.when(pl.col("block_id") == _NULL_BLOCK_SENTINEL)
-        .then(None)
-        .otherwise(pl.col("block_id"))
-        .alias("block_id")
-    )
+    bounds_pl = _fill_block_sentinel(pl.from_pandas(bounds_df))
+    price_pl = _fill_block_sentinel(pl.from_pandas(price_df))
+    merged_pl = _restore_block_null(bounds_pl.join(price_pl, on=key, how="left"))
     merged = merged_pl.to_pandas()
 
     schema = contracts_conv._CONTRACT_BOUNDS_SCHEMA
@@ -663,7 +501,7 @@ def _topology_relink_diagnostic(
 
 
 #: The withdrawal axis's own side-table schema -- mirrors
-#: :func:`~cobre_bridge.decomp.bounds.convert_irrigation_withdrawal`'s shape
+#: :func:`~cobre_bridge.decomp.converters.bounds.convert_irrigation_withdrawal`'s shape
 #: plus the ``block_id`` column :func:`_fan_resolved_rows` needs as a fan-out
 #: key (always ``None``: the axis is registered ``block_eligible=False``).
 _HYDRO_WITHDRAWAL_SCHEMA = pa.schema(
@@ -680,7 +518,8 @@ def _water_withdrawal_contributions(
     withdrawal: pa.Table,
 ) -> list[bounds_accumulator.BoundContribution]:
     """Base-only ``("hydro", "water_withdrawal")`` contributions from
-    *withdrawal* (:func:`~cobre_bridge.decomp.bounds.convert_irrigation_withdrawal`'s
+    *withdrawal*
+    (:func:`~cobre_bridge.decomp.converters.bounds.convert_irrigation_withdrawal`'s
     per-(hydro, stage) table) -- one ``block_id=None`` contribution per row,
     since irrigation withdrawal has no per-block dimension.
     """
@@ -707,15 +546,15 @@ def _attach_water_withdrawal(
     """Fold the ``TI`` irrigation withdrawal into ``hydro_bounds``.
 
     Routes *withdrawal*
-    (:func:`~cobre_bridge.decomp.bounds.convert_irrigation_withdrawal`) through
-    the same ``BoundContribution`` -> :func:`bounds_accumulator.resolve`
+    (:func:`~cobre_bridge.decomp.converters.bounds.convert_irrigation_withdrawal`)
+    through the same ``BoundContribution`` -> :func:`bounds_accumulator.resolve`
     primitive as every other hydro bound (so a withdrawal colliding with another
     contributor on the axis loud-fails instead of one silently overwriting the
     other), then attaches the resolved rows onto *hydro_bounds*.
     ``water_withdrawal_m3s`` is not a ``HYDRO_BOUNDS_SCHEMA`` column (its axis
     rides its own side-table, per that schema's own comment), so the resolved
     rows fan out into their own table (:func:`_fan_resolved_rows`) and attach via
-    :func:`~cobre_bridge.bound_merge.merge_bound_tables` — mirroring
+    :func:`~cobre_bridge.core.bound_merge.merge_bound_tables` — mirroring
     :func:`_rejoin_thermal_cost`'s ``-1`` block-id sentinel dance (polars' join
     never matches null keys against each other), restored to null afterward.
     Returns ``hydro_bounds`` unchanged when the deck declares no irrigation.
@@ -733,22 +572,11 @@ def _attach_water_withdrawal(
     )
 
     key = ["hydro_id", "stage_id", "block_id"]
-    hb = pl.from_arrow(hydro_bounds).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    w = pl.from_arrow(withdrawal_bounds).with_columns(
-        pl.col("block_id").fill_null(_NULL_BLOCK_SENTINEL)
-    )
-    merged = (
+    hb = _fill_block_sentinel(pl.from_arrow(hydro_bounds))
+    w = _fill_block_sentinel(pl.from_arrow(withdrawal_bounds))
+    merged = _restore_block_null(
         merge_bound_tables(hb, w, on=key, precedence="base")
-        .with_columns(
-            pl.when(pl.col("block_id") == _NULL_BLOCK_SENTINEL)
-            .then(None)
-            .otherwise(pl.col("block_id"))
-            .alias("block_id")
-        )
-        .sort(["hydro_id", "stage_id", "block_id"], nulls_last=False)
-    )
+    ).sort(["hydro_id", "stage_id", "block_id"], nulls_last=False)
     return merged.to_arrow()
 
 
@@ -892,7 +720,7 @@ def _libs_electrical_census_diagnostic(
     the authoritative per-restriction census for the deck's LIBs-era
     long-form electrical file -- how many restrictions converted to a cobre
     generic constraint, and how many were dropped, broken down by
-    :class:`~cobre_bridge.decomp.libs_electrical_emit.LibsElectricalResult`'s
+    :class:`~cobre_bridge.decomp.converters.libs_electrical_emit.LibsElectricalResult`'s
     four drop reasons (``inactive``/``unrecognized-token``/
     ``unresolved-bucket-bc``/``unresolved-bucket-a``, each already carrying
     its own per-restriction WARNING/INFO diagnostic).
@@ -1060,8 +888,8 @@ def _convert_core_entities(artifacts: DecompCaseArtifacts, writer: CaseWriter) -
     # function around its initial reservoir volume. FPHA-eligible reservoirs get
     # cobre's computed-FPHA model (geometry + tailrace families, fit over a
     # ±window around the initial volume); the rest keep constant productivity,
-    # whose ρ_eq is likewise anchored at the initial volume (not the full-range
-    # mean) — see hydro._equivalent_productivity_mw_per_m3s and decomp/fpha.py.
+    # whose ρ_eq is likewise anchored at the initial volume (not the full-range mean) —
+    # see hydro._equivalent_productivity_mw_per_m3s and decomp/converters/fpha.py.
     initial_volumes = hydro_conv._operated_initial_volumes(case, effective=effective)
     fpha_codes = fpha_conv.fpha_eligible_codes(effective, id_map)
     artifacts.fpha_codes = fpha_codes
@@ -1637,7 +1465,7 @@ def _emit_and_write(
     :class:`ConstraintIdAllocator`, write the generic-constraint artifacts and
     scalar parameters, emit the detection diagnostics and the travel-time
     deferral warning, and return the
-    :class:`~cobre_bridge.pipeline.ConversionReport` built from
+    :class:`~cobre_bridge.core.conversion.ConversionReport` built from
     ``writer.would_write``.
     """
     case = artifacts.case
@@ -1688,7 +1516,7 @@ def _emit_and_write(
     # hydro_bounds carries max_turbined_m3s/max_generation_mw whenever a
     # single-term special constraint (e.g. an RE FU generation ceiling) lowers
     # to one; it raises when such a bound exceeds the entity's own declared
-    # capacity. See cobre_bridge.emission_checks for the rule scope.
+    # capacity. See cobre_bridge.core.emission_checks for the rule scope.
     bound_families = [
         emission_checks.BoundFamily("Hydro", "hydro_id", hydro_bounds),
         emission_checks.BoundFamily("Thermal", "thermal_id", thermal_bounds_table),
@@ -1935,18 +1763,19 @@ def convert_decomp_case(
     """Convert one deck revision into a Cobre case directory.
 
     Mirrors the NEWAVE twin ``convert_newave_case``'s return contract: wraps
-    the conversion in a top-level :func:`cobre_bridge.diagnostics.collect`
+    the conversion in a top-level :func:`cobre_bridge.core.diagnostics.collect`
     sink and a package-logger ``dx.WarningCollector`` so every structured
     ``dx.emit`` finding *and* every residual ``logger.warning`` string is
     captured, then returns them as one de-duplicated
-    :class:`~cobre_bridge.pipeline.ConversionReport`.
+    :class:`~cobre_bridge.core.conversion.ConversionReport`.
 
     Parameters
     ----------
     dry_run:
         When ``True``, run the full in-memory conversion but write nothing to
         *dst* (no files, no subdirectories). The would-write paths are still
-        recorded in :attr:`~cobre_bridge.pipeline.ConversionReport.would_write_paths`.
+        recorded in
+        :attr:`~cobre_bridge.core.conversion.ConversionReport.would_write_paths`.
     fcf_inputs_out:
         Optional :class:`FcfInputs` out-parameter. When given, its
         ``config``/``initial_conditions`` fields are assigned the same
@@ -1966,7 +1795,7 @@ def convert_decomp_case(
     ------
     ValueError
         If the post-emission self-checks (cobre 0.13 rules 43/41/45/38/36 and
-        the ``block_id``-range rule; see :mod:`cobre_bridge.emission_checks`)
+        the ``block_id``-range rule; see :mod:`cobre_bridge.core.emission_checks`)
         find an ``ERROR``-severity violation in the converted artifacts. An
         ``INFO`` finding (e.g. rule 43's "not applicable" report, emitted when
         no hydro-bounds capacity column is populated) never raises. No report

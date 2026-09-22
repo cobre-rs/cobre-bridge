@@ -5,6 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-09-22
+
+Pairs the bridge with the **cobre 0.16.0** release: the `cobre-python` pin and
+`MIN_COBRE_VERSION` floor move to `0.16.0` (bridge `X.Y.Z` pairs cobre `X.Y.Z`,
+guarded by `tests/test_packaging.py`). `convert decomp` now authors the terminal
+boundary with cobre 0.16.0's date-driven contract — the change that requires the
+pairing — and the release also honours the `dger.dat` input-gating switches,
+fixes `modif.dat` volume units, ships generated Portuguese data maps, and
+reorganises the internal package layout.
+
+### Added
+
+- **Data maps, in Portuguese.** `docs/newave-data-map.md` and
+  `docs/decomp-data-map.md` trace every file and field of the converted case
+  back to the deck file, record, and column it comes from, state the
+  transformation applied, and list what the converter does not convert yet.
+  Both pages are generated from `docs/lineage/` and gated by tests against a
+  real conversion of the mini decks, so they cannot drift from the code.
+
+### Fixed
+
+- `modif.dat` volume records (`VOLMAX`, `VOLMIN`, `VMAXT`, `VMINT`) now honour
+  their unit column: `h` is hm³ and `%` is a percentage of the plant's useful
+  volume, resolved against the `hidr.dat` registry. Before, permanent records
+  were always read as hm³ and dated records always as a percentage, so a
+  `VOLMAX` declared in percent became an absolute volume of a few hm³. A
+  record with no recognisable unit keeps the old reading and raises a warning.
+- `check decomp` no longer reports GNL anticipated dispatch and `MP`
+  availability factors as deferred; both are converted, and the stale
+  warnings padded the list of what the conversion leaves out.
+
+### Changed
+
+- **cobre pairing.** `cobre-python>=0.16.0,<0.17` and `MIN_COBRE_VERSION =
+  "0.16.0"`; the conversion manifest records the `0.16.0` floor.
+- **`convert decomp` authors the terminal boundary with cobre's date-driven
+  contract.** The boundary cost-to-go function is now priced by calendar date —
+  the boundary pool carries the study horizon's terminal date, and each
+  anticipated delivery carries an explicit `interval_start`/`interval_end` date
+  window instead of a single delivery stage — and the case's season descriptor
+  round-trips through the policy checkpoint so cobre's season-compatibility gate
+  accepts the reconciled boundary. cobre now resolves `policy.boundary.path`
+  against the case directory, so a plain `cobre run <case>` loads the boundary;
+  the earlier `--output <case_dir>` guidance and its warning are retired. This is
+  the change that pairs the release with the next cobre.
+- **`dger.dat` switches are honoured.** `agrint.dat`, `c_adic.dat`,
+  `ghmin.dat`, `re.dat`, `restricao-eletrica.csv`, minimum outflow, and the
+  dated `TURBMAXT`/`TURBMINT` records of `modif.dat` are now left out when the
+  corresponding switch line (`AGRUPAMENTO LIVRE`, `CONS. CARGA ADICIONAL`,
+  `CONSIDERA GHMIN`, the two `RESTRICOES ELETRICAS` lines, `DESCONSIDERA
+  VAZMIN`, `REST. TURBINAMENTO`) turns them off, as NEWAVE leaves them out.
+  Each ignored input is reported by `check newave` and `convert newave` with an
+  informational `dger-switch-off` diagnostic; an absent switch line counts as
+  on, so decks without the line convert as before.
+- Internal package layout reorganised (`core/`, `cobre/`, `newave/`, `cli/`,
+  `comparators/{newave,decomp}/`, `ui/html/`); no CLI or output change.
+- **Documentation overhaul for onboarding.** The README now walks the
+  check → convert → solve → compare → dashboard flow and states every
+  command's exit codes, the `--json` envelope, and the configuration file
+  shape. New per-track pages `docs/newave.md` and `docs/decomp.md` (the latter
+  absorbs the former boundary-FCF page), a rewritten `docs/architecture.md`
+  with the end-to-end data flow and extension points, a new `CONTRIBUTING.md`,
+  and a project `CLAUDE.md` reduced to pointers instead of a stale module map.
+- `convert decomp --help` no longer describes the exchange network,
+  renewables, and GNL anticipation as deferred; all three are converted.
+
+### Removed
+
+- The unused per-REE `penalid.dat` reader in the NEWAVE hydro converters;
+  penalties are converted once, system-wide, into `penalties.json`.
+- **The real-deck test tier.** Forty-six tests skipped unless real decks were
+  present under the gitignored `example/` tree (some also needed a locally
+  built cobre binary at a fixed home-directory path), so they ran on one
+  machine at best and never in CI. They are removed and catalogued, with what
+  each verified and what it needs, in `docs/real-deck-checks.md`;
+  `tests/test_local_data_policy.py` now fails the build on any test that
+  reaches outside the repository. Small real-format excerpts under
+  `tests/fixtures/` replace the checks that only needed one, and the contract
+  tests read cobre's schema and example case from vendored copies instead of a
+  sibling checkout.
+
 ## [0.15.0] - 2026-08-24
 
 Pairs the bridge with the **cobre 0.15.0** release: the `cobre-python` pin and
@@ -918,11 +999,7 @@ MA → SOBRADINHO`) are correctly wired in `hydros.json::downstream_id`.
   The legacy field stayed in the converted output and confused users
   about which value the LP would actually use.
 
-## [0.5.1] - earlier
+## Earlier releases
 
-## [0.5.0] - earlier
-
-## [0.4.x] - earlier
-
-See git history (`git log v0.4.0..v0.5.1`) for the 0.4 / 0.5 entries —
-those were never recorded in this CHANGELOG.
+Releases 0.4.0 through 0.5.1 predate this changelog; their history is in the
+git log (`git log v0.4.0..v0.5.1`).

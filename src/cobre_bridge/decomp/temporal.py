@@ -15,7 +15,7 @@ rules:
 - the final stage carries its own calendar month's season.
 
 Season ids follow the shared 0-based convention (Jan=0 … Dec=11) via
-:func:`cobre_bridge.converters.temporal.monthly_season_definitions`.
+:func:`cobre_bridge.core.season_calendar.monthly_season_definitions`.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
-from cobre_bridge import cobre_schemas
-from cobre_bridge.converters.temporal import block_names, monthly_season_definitions
+from cobre_bridge.cobre import schemas as cobre_schemas
+from cobre_bridge.core.season_calendar import block_names, monthly_season_definitions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -60,7 +60,7 @@ def hours_weighted(values: Sequence[float], stage: OperativeStage) -> float:
     """Hours-weighted mean of per-block *values* over *stage*'s block hours.
 
     Shared by every converter that folds a per-block declaration down to one
-    stage-level number (``decomp/thermal.py``'s ``CT`` base row,
+    stage-level number (``decomp/converters/thermal.py``'s ``CT`` base row,
     ``decomp/anticipated.py``'s ``tg`` registry, ...) — the single canonical
     implementation of the convention.
     """

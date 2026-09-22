@@ -17,9 +17,9 @@ from cobre_bridge.comparators.html_report import (
     COLOR_COBRE,
     COLOR_NEWAVE,
 )
-from cobre_bridge.comparators.results import ResultComparison
-from cobre_bridge.ui.plotly_helpers import facet_grid
-from cobre_bridge.ui.plotly_helpers import plotly_div as _plotly_div
+from cobre_bridge.comparators.model import ResultComparison
+from cobre_bridge.ui.html.plotly import facet_grid
+from cobre_bridge.ui.html.plotly import plotly_div as _plotly_div
 
 
 def cobre_aggregate_chart(

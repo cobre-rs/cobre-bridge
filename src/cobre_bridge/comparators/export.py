@@ -10,7 +10,7 @@ workflow consumes: the tidy ``comparison.parquet`` frame, the per-variable
 
 It composes existing primitives only: it never recomputes diffs and adds no
 renderer dependencies (no import of the ``charts`` package / ``report``), so the HTML
-report and console paths are unaffected. It is wired into ``cli.py`` via the
+report and console paths are unaffected. It is wired into ``cli/app.py`` via the
 shared ``_export_compare_artifacts`` helper used by both ``compare`` subcommands.
 """
 
@@ -20,7 +20,7 @@ import json
 from collections import Counter
 from typing import TYPE_CHECKING
 
-from cobre_bridge.comparators.cobre_readers import read_cobre_training_metadata
+from cobre_bridge.cobre.readers import read_cobre_training_metadata
 from cobre_bridge.comparators.manifest import ComparisonManifest
 
 if TYPE_CHECKING:
@@ -92,7 +92,7 @@ def write_artifacts(
             conversion manifest's ``input_files``); omitted (``None``) records
             an empty list.
         diagnostics: The compare run's diagnostics, each as a
-            :meth:`~cobre_bridge.diagnostics.Diagnostic.to_dict` dict; omitted
+            :meth:`~cobre_bridge.core.diagnostics.Diagnostic.to_dict` dict; omitted
             (``None``) records an empty ``diagnostics`` list and an empty
             ``diagnostics_summary``.
 

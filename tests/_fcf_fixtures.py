@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cobre_bridge.converters.network import MONTH_HOURS
+from cobre_bridge.core.units import MONTH_HOURS
 from cobre_bridge.decomp.fcf.bootstrap import TerminalManifest
 from cobre_bridge.decomp.fcf.cortes import BoundaryCuts, CortesHeader, StageCutRecord
 from cobre_bridge.decomp.fcf.mapper import GnlRingPlan, MappedCut, map_boundary_cuts
@@ -115,32 +115,71 @@ def make_boundary_cuts(
     )
 
 
+_SLOT_DATE_SENTINEL = -2147483648
+
+
+def _next_month_anchor(yyyymmdd: int) -> int:
+    """The `YYYYMM01` of the month after `yyyymmdd`'s — a valid interval end
+    strictly after any `interval_start` inside that month.
+
+    Mirrors cobre's own `[stage.start_date, stage.end_date)` interval dating,
+    whose exclusive `end_date` for a monthly delivery stage is the next
+    month's first day.
+    """
+    year, month = divmod(yyyymmdd // 100, 100)
+    return (
+        (year + 1) * 10_000 + 101
+        if month == 12
+        else year * 10_000 + (month + 1) * 100 + 1
+    )
+
+
 def make_slot(
     entity_type: int,
     entity_id: int,
     subindex: int,
     *,
     was_active: bool = True,
-    delivery_date: int = -2147483648,
+    interval_start: int = _SLOT_DATE_SENTINEL,
+    interval_end: int | None = None,
 ) -> dict[str, object]:
     """One hand-authored terminal-manifest slot dict.
 
-    Carries `was_active` and `delivery_date` alongside the positional key
-    (`entity_type`, `entity_id`, `subindex`). `delivery_date` is the CBVF
-    checkpoint format's field (see `fcf/capability.py`) — the branch wheel's
-    `PyEntitySlot` reads this key, not the pre-schema-break `delivery_anchor`
-    (which it silently ignores, falling back to the default below). The
-    default `-2147483648` is `i32::MIN`, cobre's sentinel for "no delivery
-    date" — the same value `write_policy_checkpoint` itself defaults to when
-    a slot omits the key.
+    Carries `was_active`, `interval_start`, and `interval_end` alongside the
+    positional key (`entity_type`, `entity_id`, `subindex`). `interval_start`
+    is the slot's delivery-stage start day, the per-slot date field the GNL
+    ring placement (`fcf/mapper.py`) keys covered/non-covered lanes off.
+    `interval_end` defaults to the next-month anchor when `interval_start` is
+    live and left unset — cobre's checkpoint writer rejects a live
+    `interval_start` with no paired `interval_end` — and to the sentinel
+    otherwise. The default `-2147483648` is `i32::MIN`, cobre's
+    `ENTITY_SLOT_DATE_SENTINEL` for "no date" — the same value
+    `write_policy_checkpoint` itself defaults to when a slot omits the key.
     """
+    if interval_end is None:
+        interval_end = (
+            _next_month_anchor(interval_start)
+            if interval_start != _SLOT_DATE_SENTINEL
+            else _SLOT_DATE_SENTINEL
+        )
     return {
         "entity_type": entity_type,
         "entity_id": entity_id,
         "subindex": subindex,
         "was_active": was_active,
-        "delivery_date": delivery_date,
+        "interval_start": interval_start,
+        "interval_end": interval_end,
     }
+
+
+#: The absent season descriptor (cobre's `SEASON_CYCLE_CODE_ABSENT` == 255,
+#: no seasons, no hydros) — the seasonless-study default for a synthetic
+#: manifest; a seasonless loading study never fires the season gate.
+_ABSENT_SEASON_MANIFEST: dict[str, object] = {
+    "cycle_code": 255,
+    "n_seasons": 0,
+    "hydro_orders": [],
+}
 
 
 def make_manifest(
@@ -148,6 +187,8 @@ def make_manifest(
     *,
     node_id: int = 0,
     graph_stage_id: int = 10,
+    priced_state_date: int = 20_261_101,
+    season_manifest: dict[str, object] | None = None,
 ) -> TerminalManifest:
     """A synthetic terminal manifest; `state_dimension` == slot count.
 
@@ -155,12 +196,19 @@ def make_manifest(
     module's own terminal-stage convention (`make_boundary_cuts`'s
     `boundary_stage` and `synthetic_roundtrip`'s `stage_id` both default to
     `10`), never the `-1` shared-pool sentinel `TerminalManifest` forbids.
+    `priced_state_date` defaults to an arbitrary real `YYYYMMDD` (never the
+    undated sentinel `bootstrap_terminal_manifest` rejects). `season_manifest`
+    defaults to the absent descriptor (a seasonless synthetic study).
     """
     return TerminalManifest(
         entity_manifest=tuple(slots),
         state_dimension=len(slots),
         node_id=node_id,
         graph_stage_id=graph_stage_id,
+        priced_state_date=priced_state_date,
+        season_manifest=(
+            _ABSENT_SEASON_MANIFEST if season_manifest is None else season_manifest
+        ),
     )
 
 
@@ -256,6 +304,7 @@ def synthetic_roundtrip(
         cost_scale_factor=cost_scale_factor,
         node_id=manifest.node_id,
         graph_stage_id=manifest.graph_stage_id,
+        priced_state_date=manifest.priced_state_date,
     )
     completed_iterations = max((cut.iteration for cut in mapping.cuts), default=0)
     metadata = build_metadata(
@@ -269,6 +318,7 @@ def synthetic_roundtrip(
         rng_seed=0,
         created_at=_CREATED_AT,
         cobre_version=cobre.__version__,
+        season_manifest=manifest.season_manifest,
     )
     write_boundary_checkpoint(boundary_dir, stage_cuts_payload, metadata)
 

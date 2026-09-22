@@ -41,8 +41,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import pyarrow as pa
 
-from cobre_bridge.generic_constraint_builder import is_bounded
-from cobre_bridge.tolerances import relative_tolerance
+from cobre_bridge.core.generic_constraint_builder import is_bounded
+from cobre_bridge.core.tolerances import relative_tolerance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -162,7 +162,7 @@ AXES: Mapping[tuple[str, str], AxisSpec] = {
         upper_column="max_m3s",
         block_eligible=True,
     ),
-    # `convert_lines`/`decomp.network.convert_lines` emit one capacity per
+    # `convert_lines`/`decomp.converters.network.convert_lines` emit one capacity per
     # flow direction, not a min/max pair on one column — each direction is
     # its own upper-only axis (a lower contribution on either loud-fails).
     ("line", "direct"): AxisSpec(
@@ -225,7 +225,7 @@ def _effective(value: float | None) -> float | None:
     """*value* as an effective bound, or ``None`` for "no bound on that side".
 
     ``None`` and a magnitude at or past
-    :data:`~cobre_bridge.generic_constraint_builder.UNBOUNDED` both mean
+    :data:`~cobre_bridge.core.generic_constraint_builder.UNBOUNDED` both mean
     unbounded (per :func:`is_bounded`). A genuine ``0.0`` is a real bound
     (e.g. a zeroed pumping minimum) and passes through unchanged.
     """
@@ -496,7 +496,8 @@ class BoundTables(NamedTuple):
 
 
 def _empty(schema: pa.Schema) -> pa.Table:
-    """A 0-row table honouring *schema* exactly (mirrors ``decomp/bounds.py``)."""
+    """A 0-row table honouring *schema* exactly (mirrors
+    ``decomp/converters/bounds.py``)."""
     return pa.table(
         {field.name: pa.array([], type=field.type) for field in schema},
         schema=schema,

@@ -21,7 +21,7 @@ import polars as pl
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cobre_bridge.comparators.results import ResultComparison
+    from cobre_bridge.comparators.model import ResultComparison
 
 
 class SchemaError(ValueError):
@@ -454,7 +454,7 @@ def _render_from_json(view: dict[str, object]) -> RenderInputs:
             wrapped frame entry declares an unknown frame type; the message
             names the offending key.
     """
-    from cobre_bridge.comparators.results import ResultComparison
+    from cobre_bridge.comparators.model import ResultComparison
 
     raw = _metadata_from_json(view)
 

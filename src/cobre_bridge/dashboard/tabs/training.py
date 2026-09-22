@@ -17,14 +17,14 @@ from cobre_bridge.dashboard.tabs.timing_phases import (
     active_top_level_phases,
     build_timing_stacked_figure,
 )
-from cobre_bridge.ui.html import (
+from cobre_bridge.ui.html.document import (
     chart_grid,
     collapsible_section,
     metric_card,
     metrics_grid,
     section_title,
 )
-from cobre_bridge.ui.plotly_helpers import apply_standard_layout
+from cobre_bridge.ui.html.plotly import apply_standard_layout
 from cobre_bridge.ui.theme import (
     COLORS,
     COPPER_ACCENT,
@@ -411,7 +411,7 @@ def _chart_cut_activity_heatmap(
         height=500,
         margin={"l": 80, "r": 30, "t": 60, "b": 50},
     )
-    from cobre_bridge.ui.plotly_helpers import fig_to_html
+    from cobre_bridge.ui.html.plotly import fig_to_html
 
     return fig_to_html(fig, unified_hover=False)
 
@@ -466,7 +466,7 @@ def _chart_cut_deactivation_heatmap(
         height=500,
         margin={"l": 80, "r": 30, "t": 60, "b": 50},
     )
-    from cobre_bridge.ui.plotly_helpers import fig_to_html
+    from cobre_bridge.ui.html.plotly import fig_to_html
 
     return fig_to_html(fig, unified_hover=False)
 
