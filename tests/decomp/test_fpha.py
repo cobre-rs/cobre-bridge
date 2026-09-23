@@ -34,6 +34,10 @@ def _plant_row(
     cota_area: tuple[float, ...] = (1.0, 0.01, 0.0, 0.0, 0.0),
     rho_esp: float = 0.009,
     tipo_regulacao: str = "M",
+    n_conjuntos: int = 1,
+    maquinas: int = 2,
+    potencia: float = 50.0,
+    vazao: float = 100.0,
 ) -> dict:
     row: dict = {
         "nome_usina": name,
@@ -45,11 +49,22 @@ def _plant_row(
         "tipo_perda": 0,
         "perdas": 0.0,
         "tipo_regulacao": tipo_regulacao,
+        "numero_conjuntos_maquinas": n_conjuntos,
     }
     for i, a in enumerate(volume_cota):
         row[f"a{i}_volume_cota"] = a
     for i, a in enumerate(cota_area):
         row[f"a{i}_cota_area"] = a
+    # Machine set columns for up to 5 conjuntos
+    for i in range(1, 6):
+        if i <= n_conjuntos:
+            row[f"maquinas_conjunto_{i}"] = maquinas
+            row[f"potencia_nominal_conjunto_{i}"] = potencia
+            row[f"vazao_nominal_conjunto_{i}"] = vazao
+        else:
+            row[f"maquinas_conjunto_{i}"] = 0
+            row[f"potencia_nominal_conjunto_{i}"] = 0.0
+            row[f"vazao_nominal_conjunto_{i}"] = 0.0
     return row
 
 
@@ -109,6 +124,12 @@ def test_is_fpha_eligible_false_for_degenerate_cota() -> None:
 
 def test_is_fpha_eligible_false_for_nonpositive_rho_esp() -> None:
     eff = _effective({1: _plant_row(rho_esp=0.0)})
+    assert is_fpha_eligible(eff, 1) is False
+
+
+def test_is_fpha_eligible_false_for_zero_generation_capacity() -> None:
+    """A plant with zero effective power (e.g., AC POTEFE 0.0) is ineligible."""
+    eff = _effective({1: _plant_row(potencia=0.0)})
     assert is_fpha_eligible(eff, 1) is False
 
 
