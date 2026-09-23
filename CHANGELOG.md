@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`modif.dat` now corrects effective power and both cota polynomials.**
+  `POTEFE` (a conjunto's effective power), `VOLCOTA` (the volume-to-height
+  polynomial) and `COTAREA` (the height-to-area polynomial) join the permanent
+  records applied to the `hidr.dat` registry, so they reach the generation caps
+  in `hydros.json`, the curves in `system/hydro_geometry.parquet`, the per-stage
+  productivities, and the head-corrected turbined caps in
+  `constraints/hydro_bounds.parquet`. The three were previously skipped with a
+  debug log, and a deck that redeclared them converted with the registry values
+  and no warning. Reading them needs the `inewave` release that models the
+  records; the dependency floor moves with it.
+
 ### Fixed
 
 - **Hydros under expansion (`EE`) are no longer dropped.** `confhd.dat` marks a

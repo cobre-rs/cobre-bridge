@@ -1063,6 +1063,7 @@ summary = "Declara `rho_eq_h{id}` e `rho_acum_h{id}` para toda usina hidráulica
     { file = "confhd", item = "usinas · codigo_usina_jusante" },
     { file = "hidr", item = "cadastro · produtibilidade_especifica" },
     { file = "hidr", item = "cadastro · a0_volume_cota … a4_volume_cota" },
+    { file = "modif", item = "VOLCOTA · coeficientes a0 a a4" },
     { file = "hidr", item = "cadastro · canal_fuga_medio" },
     { file = "hidr", item = "cadastro · perdas" },
     { file = "hidr", item = "cadastro · tipo_perda" },
@@ -1496,6 +1497,7 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
   from = [
     { file = "dger", item = "funcao_producao_uhe" },
     { file = "hidr", item = "a0_volume_cota … a4_volume_cota" },
+    { file = "modif", item = "VOLCOTA · coeficientes a0 a a4" },
     { file = "hidr", item = "produtibilidade_especifica" },
   ]
   how = "`fpha` quando `funcao_producao_uhe = 0` e a usina tem polinômio cota-volume não nulo e produtibilidade específica positiva; `constant_productivity` nos demais casos."
@@ -1513,6 +1515,7 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
     { file = "hidr", item = "maquinas_conjunto_1 … maquinas_conjunto_5" },
     { file = "hidr", item = "vazao_nominal_conjunto_1 … vazao_nominal_conjunto_5" },
     { file = "hidr", item = "potencia_nominal_conjunto_1 … potencia_nominal_conjunto_5" },
+    { file = "modif", item = "POTEFE · potencia, conjunto" },
     { file = "hidr", item = "queda_nominal_conjunto_1 … queda_nominal_conjunto_5" },
     { file = "hidr", item = "teif" },
     { file = "hidr", item = "ip" },
@@ -1522,6 +1525,7 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
     { file = "hidr", item = "volume_maximo" },
     { file = "hidr", item = "volume_referencia" },
     { file = "hidr", item = "a0_volume_cota … a4_volume_cota" },
+    { file = "modif", item = "VOLCOTA · coeficientes a0 a a4" },
     { file = "hidr", item = "canal_fuga_medio" },
     { file = "hidr", item = "produtibilidade_especifica" },
     { file = "hidr", item = "tipo_perda" },
@@ -1549,10 +1553,11 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
     { file = "hidr", item = "numero_conjuntos_maquinas" },
     { file = "hidr", item = "maquinas_conjunto_1 … maquinas_conjunto_5" },
     { file = "hidr", item = "potencia_nominal_conjunto_1 … potencia_nominal_conjunto_5" },
+    { file = "modif", item = "POTEFE · potencia, conjunto" },
     { file = "modif", item = "NUMCNJ · numero" },
     { file = "modif", item = "NUMMAQ · numero_maquinas" },
   ]
-  how = "Potência instalada nominal: soma por conjunto de `maquinas_conjunto · potencia_nominal_conjunto`, sem desconto de `teif`/`ip` (o teto GHmax da FPHA do NEWAVE)."
+  how = "Potência instalada nominal: soma por conjunto de `maquinas_conjunto · potencia_nominal_conjunto` (potência do conjunto sobrescrita pelo registro permanente `POTEFE` de `modif.dat`), sem desconto de `teif`/`ip` (o teto GHmax da FPHA do NEWAVE)."
 
   [[output.field]]
   path = "hydros[].unit_groups[].id"
@@ -1588,6 +1593,7 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
     { file = "hidr", item = "numero_conjuntos_maquinas" },
     { file = "hidr", item = "maquinas_conjunto_1 … maquinas_conjunto_5" },
     { file = "hidr", item = "potencia_nominal_conjunto_1 … potencia_nominal_conjunto_5" },
+    { file = "modif", item = "POTEFE · potencia, conjunto" },
     { file = "modif", item = "NUMCNJ · numero" },
     { file = "modif", item = "NUMMAQ · numero_maquinas" },
   ]
@@ -1606,11 +1612,13 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
     { file = "hidr", item = "maquinas_conjunto_1 … maquinas_conjunto_5" },
     { file = "hidr", item = "vazao_nominal_conjunto_1 … vazao_nominal_conjunto_5" },
     { file = "hidr", item = "potencia_nominal_conjunto_1 … potencia_nominal_conjunto_5" },
+    { file = "modif", item = "POTEFE · potencia, conjunto" },
     { file = "hidr", item = "queda_nominal_conjunto_1 … queda_nominal_conjunto_5" },
     { file = "hidr", item = "teif" },
     { file = "hidr", item = "ip" },
     { file = "hidr", item = "tipo_turbina" },
     { file = "hidr", item = "a0_volume_cota … a4_volume_cota" },
+    { file = "modif", item = "VOLCOTA · coeficientes a0 a a4" },
     { file = "hidr", item = "canal_fuga_medio" },
     { file = "hidr", item = "produtibilidade_especifica" },
     { file = "modif", item = "CFUGA · nivel" },
@@ -1700,6 +1708,7 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
     { file = "dger", item = "funcao_producao_uhe" },
     { file = "hidr", item = "produtibilidade_especifica" },
     { file = "hidr", item = "a0_volume_cota … a4_volume_cota" },
+    { file = "modif", item = "VOLCOTA · coeficientes a0 a a4" },
   ]
   how = "Nulo para usinas fora da FPHA (caso linear ou usina sem polinômio cota-volume / produtibilidade específica); para usinas `fpha`, o bloco com `type` e `value`."
 
@@ -1811,6 +1820,7 @@ summary = "Uma entrada por usina ativa selecionando o modelo de produção (FPHA
   from = [
     { file = "dger", item = "funcao_producao_uhe" },
     { file = "hidr", item = "a0_volume_cota … a4_volume_cota" },
+    { file = "modif", item = "VOLCOTA · coeficientes a0 a a4" },
     { file = "hidr", item = "produtibilidade_especifica" },
   ]
   how = "`fpha` para usina elegível à FPHA (mesmo critério de `hydros[].generation.model`); `constant_productivity` caso contrário."
@@ -1867,6 +1877,7 @@ summary = "Uma entrada por usina ativa selecionando o modelo de produção (FPHA
   from = [
     { file = "dger", item = "funcao_producao_uhe" },
     { file = "hidr", item = "a0_volume_cota … a4_volume_cota" },
+    { file = "modif", item = "VOLCOTA · coeficientes a0 a a4" },
     { file = "hidr", item = "produtibilidade_especifica" },
   ]
   how = "`fpha` ou `constant_productivity`, igual em todas as estações, pelo critério de elegibilidade da usina."
@@ -1971,13 +1982,19 @@ summary = "Curva volume-cota-área amostrada por usina ativa: 100 pontos uniform
 
   [[output.field]]
   path = "height_m"
-  from = [ { file = "hidr", item = "a0_volume_cota … a4_volume_cota" } ]
-  how = "Cota de montante (m): polinômio `a0 + a1·V + a2·V² + a3·V³ + a4·V⁴` avaliado em cada volume, com valores negativos levados a 0."
+  from = [
+    { file = "hidr", item = "a0_volume_cota … a4_volume_cota" },
+    { file = "modif", item = "VOLCOTA · coeficientes a0 a a4" },
+  ]
+  how = "Cota de montante (m): polinômio `a0 + a1·V + a2·V² + a3·V³ + a4·V⁴` (coeficientes sobrescritos pelo registro permanente `VOLCOTA` de `modif.dat`) avaliado em cada volume, com valores negativos levados a 0."
 
   [[output.field]]
   path = "area_km2"
-  from = [ { file = "hidr", item = "a0_cota_area … a4_cota_area" } ]
-  how = "Área do espelho d'água (km²): polinômio cota-área avaliado na cota calculada, com valores negativos levados a 0."
+  from = [
+    { file = "hidr", item = "a0_cota_area … a4_cota_area" },
+    { file = "modif", item = "COTAREA · coeficientes a0 a a4" },
+  ]
+  how = "Área do espelho d'água (km²): polinômio cota-área (coeficientes sobrescritos pelo registro permanente `COTAREA` de `modif.dat`) avaliado na cota calculada, com valores negativos levados a 0."
 
 # ---------------------------------------------------------------------------
 # system/hydro_energy_productivity.parquet
@@ -2022,6 +2039,7 @@ summary = "Produtibilidade equivalente ρ_eq (MW por m³/s) por usina ativa, fon
   from = [
     { file = "hidr", item = "produtibilidade_especifica" },
     { file = "hidr", item = "a0_volume_cota … a4_volume_cota" },
+    { file = "modif", item = "VOLCOTA · coeficientes a0 a a4" },
     { file = "hidr", item = "canal_fuga_medio" },
     { file = "hidr", item = "tipo_perda" },
     { file = "hidr", item = "perdas" },
@@ -2225,6 +2243,7 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
     { file = "hidr", item = "maquinas_conjunto_1 … maquinas_conjunto_5" },
     { file = "hidr", item = "vazao_nominal_conjunto_1 … vazao_nominal_conjunto_5" },
     { file = "hidr", item = "potencia_nominal_conjunto_1 … potencia_nominal_conjunto_5" },
+    { file = "modif", item = "POTEFE · potencia, conjunto" },
     { file = "hidr", item = "queda_nominal_conjunto_1 … queda_nominal_conjunto_5" },
     { file = "hidr", item = "teif" },
     { file = "hidr", item = "ip" },
@@ -2268,6 +2287,7 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
     { file = "exph", item = "duracao_enchimento" },
     { file = "hidr", item = "maquinas_conjunto_1 … maquinas_conjunto_5" },
     { file = "hidr", item = "potencia_nominal_conjunto_1 … potencia_nominal_conjunto_5" },
+    { file = "modif", item = "POTEFE · potencia, conjunto" },
   ]
   how = "Potência nominal (MW) das máquinas já em operação da usina NE em cada estágio anterior à entrada de todas as unidades: soma de `n_online · potencia_nominal_conjunto` por conjunto, 0 antes do fim do enchimento. Nulo nas linhas de `modif.dat`/`ghmin.dat`. Valores acima do declarado em `hydros.json` são reduzidos ao declarado."
 
@@ -2759,6 +2779,7 @@ summary = "Limites por restrição, estágio e patamar das três famílias, conc
     { file = "hidr", item = "tipo_regulacao" },
     { file = "hidr", item = "produtibilidade_especifica" },
     { file = "hidr", item = "a0_volume_cota..a4_volume_cota" },
+    { file = "modif", item = "VOLCOTA · coeficientes a0 a a4" },
     { file = "hidr", item = "canal_fuga_medio" },
     { file = "hidr", item = "tipo_perda" },
     { file = "hidr", item = "perdas" },
@@ -3010,7 +3031,7 @@ note = "Cadastro binário lido integralmente pelo `inewave`; as colunas abaixo n
 
 [[source]]
 file = "modif"
-note = "Registros permanentes `VAZMIN`, `VOLMAX`, `VOLMIN`, `NUMCNJ`, `NUMMAQ` são aplicados ao cadastro; `VMAXT`, `VMINT`, `TURBMAXT`, `TURBMINT`, `VAZMINT` viram limites por estágio e `CFUGA`/`CMONT` alteram a produtibilidade por estágio."
+note = "Registros permanentes `VAZMIN`, `VOLMAX`, `VOLMIN`, `NUMCNJ`, `NUMMAQ`, `POTEFE`, `VOLCOTA`, `COTAREA` são aplicados ao cadastro; `VMAXT`, `VMINT`, `TURBMAXT`, `TURBMINT`, `VAZMINT` viram limites por estágio e `CFUGA`/`CMONT` alteram a produtibilidade por estágio."
 
   [[source.item]]
   item = "VMINP"
@@ -3021,11 +3042,6 @@ note = "Registros permanentes `VAZMIN`, `VOLMAX`, `VOLMIN`, `NUMCNJ`, `NUMMAQ` s
   item = "VAZMAXT"
   status = "deferred"
   note = "Defluência máxima por período. Reportado por `modif-permanent-override-unsupported` e ignorado; o Cobre aceita `max_outflow_m3s`, mas o bridge escreve sempre nulo em `hydros.json` e não emite coluna correspondente em `constraints/hydro_bounds.parquet`."
-
-  [[source.item]]
-  item = "COTAREA · VOLCOTA (registros que o inewave lê como DefaultRegister)"
-  status = "unread"
-  note = "Substituição dos polinômios cota × área e volume × cota. Só um log de depuração; o bridge sempre usa os polinômios do `hidr.dat` em `system/hydro_geometry.parquet`."
 
 [[source]]
 file = "ghmin"

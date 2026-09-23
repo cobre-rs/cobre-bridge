@@ -35,6 +35,41 @@ class TestConvertHydros:
             thermal_codes=[],
         )
 
+    def test_potefe_reaches_the_declared_max_generation(self, tmp_path) -> None:
+        """A permanent POTEFE override travels from modif.dat into hydros.json.
+
+        Pins the wiring, not the arithmetic: every cadastro consumer reads the
+        MODIF-corrected registry, so a converter that reached for
+        ``case.hidr.cadastro`` directly would emit the registry power instead.
+        """
+        from cobre_bridge.newave.converters.hydro import convert_hydros
+
+        potefe_rec = MagicMock()
+        type(potefe_rec).__name__ = "POTEFE"
+        potefe_rec.potencia = 100.0
+        potefe_rec.conjunto = 1
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.side_effect = lambda code: (
+            [potefe_rec] if code == 1 else []
+        )
+
+        with dx.collect():
+            base = convert_hydros(_hydro_case(tmp_path), self._make_id_map())["hydros"]
+            overridden = convert_hydros(
+                _hydro_case(tmp_path, modif=mock_modif), self._make_id_map()
+            )["hydros"]
+
+        # Plant 1 runs 4 machines in conjunto 1, declared at 200 MW each.
+        assert base[0]["generation"]["max_generation_mw"] == pytest.approx(800.0)
+        assert overridden[0]["generation"]["max_generation_mw"] == pytest.approx(400.0)
+        assert overridden[1]["generation"]["max_generation_mw"] == pytest.approx(
+            base[1]["generation"]["max_generation_mw"]
+        )
+
     def test_returns_hydros_key(self, tmp_path) -> None:
         case = _hydro_case(tmp_path)
         from cobre_bridge.newave.converters.hydro import convert_hydros
