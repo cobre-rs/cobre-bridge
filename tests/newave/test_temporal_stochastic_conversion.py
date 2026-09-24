@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import calendar
 import datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -15,6 +16,10 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity
+from cobre_bridge.core.errors import FieldParseError
+from cobre_bridge.newave.converters.stochastic import _posto_count, _read_vazoes
 from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 
@@ -1897,3 +1902,76 @@ class TestBuildUpstreamPostosFillingAdmission:
         assert 226 not in upstream
         # Walk-through finds no downstream EX, so no edge survives.
         assert upstream == {}
+
+
+# ---------------------------------------------------------------------------
+# Tests: vazoes.dat width
+# ---------------------------------------------------------------------------
+
+
+def _write_vazoes(tmp_path: Path, num_values: int) -> Path:
+    """A vazoes.dat of the given int32 value count; only its size matters."""
+    path = tmp_path / "vazoes.dat"
+    path.write_bytes(b"\x00" * (num_values * 4))
+    return path
+
+
+class TestPostoCount:
+    def test_width_that_alone_yields_whole_years_is_used(self, tmp_path) -> None:
+        # One year at 320 postos; the same size is not even a whole number of
+        # months at 600.
+        assert _posto_count(_write_vazoes(tmp_path, 320 * 12)) == 320
+
+    def test_six_hundred_posto_deck_is_detected(self, tmp_path) -> None:
+        assert _posto_count(_write_vazoes(tmp_path, 600 * 12)) == 600
+
+    def test_unambiguous_size_emits_nothing(self, tmp_path) -> None:
+        with dx.collect() as collected:
+            _posto_count(_write_vazoes(tmp_path, 600 * 12))
+        assert collected == []
+
+    def test_ambiguous_size_assumes_320_and_warns(self, tmp_path) -> None:
+        # 15 years at 320 postos is also 8 years at 600.
+        with dx.collect() as collected:
+            count = _posto_count(_write_vazoes(tmp_path, 320 * 12 * 15))
+
+        assert count == 320
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.code == "vazoes-posto-count-ambiguous"
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Historical inflows"
+        assert "320" in diag.summary
+        assert "600" in diag.summary
+
+    def test_size_that_fits_no_width_is_rejected(self, tmp_path) -> None:
+        with pytest.raises(FieldParseError) as excinfo:
+            _posto_count(_write_vazoes(tmp_path, 1000))
+        assert "320 or 600" in str(excinfo.value)
+
+    def test_whole_months_but_partial_year_is_rejected(self, tmp_path) -> None:
+        # 13 months at 320 postos: the historical record ends in December.
+        with pytest.raises(FieldParseError):
+            _posto_count(_write_vazoes(tmp_path, 320 * 13))
+
+    def test_empty_file_falls_back_to_the_default(self, tmp_path) -> None:
+        # Emptiness is the callers' finding, not the width derivation's.
+        path = tmp_path / "vazoes.dat"
+        path.touch()
+        with dx.collect() as collected:
+            assert _posto_count(path) == 320
+        assert collected == []
+
+
+class TestReadVazoes:
+    @patch("cobre_bridge.newave.converters.stochastic.Vazoes")
+    def test_default_width_is_not_passed(self, mock_vazoes_cls, tmp_path) -> None:
+        path = _write_vazoes(tmp_path, 320 * 12)
+        _read_vazoes(path)
+        mock_vazoes_cls.read.assert_called_once_with(path)
+
+    @patch("cobre_bridge.newave.converters.stochastic.Vazoes")
+    def test_other_width_reaches_the_reader(self, mock_vazoes_cls, tmp_path) -> None:
+        path = _write_vazoes(tmp_path, 600 * 12)
+        _read_vazoes(path)
+        mock_vazoes_cls.read.assert_called_once_with(path, postos=600)

@@ -19,7 +19,8 @@ import pyarrow as pa
 from inewave.newave import Cadic, Dger, Vazoes
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.core.diagnostics import emit
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.errors import FieldParseError
 from cobre_bridge.newave import plants
 from cobre_bridge.newave.case import NewaveCase
 from cobre_bridge.newave.horizon import POST_STUDY_YEAR, study_horizon
@@ -27,6 +28,85 @@ from cobre_bridge.newave.id_map import NewaveIdMap
 from cobre_bridge.newave.switches import switch_off_diagnostic
 
 logger = logging.getLogger(__name__)
+
+
+# ``vazoes.dat`` is a headerless int32 matrix (months x postos) whose width the
+# deck never declares anywhere, so it is derived from the file size.
+_POSTO_COUNTS: tuple[int, int] = (320, 600)
+_DEFAULT_POSTO_COUNT = 320
+
+
+def _posto_count(path: Path) -> int:
+    """Return the number of postos in ``vazoes.dat``, derived from its size.
+
+    A width qualifies when it divides the matrix into whole months *and* whole
+    years, since the historical record always ends in December.  Both widths
+    qualify whenever the value count is a common multiple, which is no corner
+    of the domain -- a 320-posto deck with 90 years of history is one -- so an
+    ambiguous size resolves to the far more common width and says so, because
+    reading a deck at the wrong width silently reinterprets the whole series.
+    A size neither width divides cannot be reshaped at all; failing here names
+    the file, where reading on surfaces as an opaque reshape error from inside
+    the reader.
+    """
+    num_values = path.stat().st_size // 4
+    if num_values == 0:
+        # An empty file implies nothing about its width, and the callers below
+        # already report the emptiness itself.
+        return _DEFAULT_POSTO_COUNT
+
+    candidates = [
+        count
+        for count in _POSTO_COUNTS
+        if num_values % count == 0 and (num_values // count) % 12 == 0
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise FieldParseError(
+            f"vazoes.dat holds {num_values} values, which is not a whole "
+            f"number of years at {' or '.join(str(c) for c in _POSTO_COUNTS)} "
+            "postos -- the file is truncated, or it is not a historical "
+            "inflow record.",
+            path=str(path),
+            field="vazoes.dat",
+        )
+
+    emit(
+        Diagnostic(
+            code="vazoes-posto-count-ambiguous",
+            severity=Severity.WARNING,
+            category="Historical inflows",
+            title="Ambiguous vazoes.dat width",
+            summary=(
+                f"vazoes.dat holds {num_values} values, a whole number of "
+                f"years at {' and at '.join(str(c) for c in candidates)} "
+                f"postos; it is read at {_DEFAULT_POSTO_COUNT}, the width "
+                "almost every deck uses. A deck written at the other width is "
+                "read as a different number of months of history, with no "
+                "further sign that anything is wrong."
+            ),
+            remediation=(
+                "→ Check the deck's posto count if the historical inflow "
+                "series look implausible."
+            ),
+        ),
+        logger=logger,
+    )
+    return _DEFAULT_POSTO_COUNT
+
+
+def _read_vazoes(path: Path) -> Vazoes:
+    """Read ``vazoes.dat`` at the width its size implies.
+
+    The count reaches the reader only when it differs from the reader's own
+    default, so a 320-posto deck still reads on an ``inewave`` that predates
+    the ``postos`` parameter.
+    """
+    count = _posto_count(path)
+    if count == _DEFAULT_POSTO_COUNT:
+        return Vazoes.read(path)
+    return Vazoes.read(path, postos=count)
 
 
 def _build_upstream_postos(
@@ -249,7 +329,7 @@ def _incremental_history(
         If the vazoes.dat DataFrame is absent or empty.
     """
     # vazoes.dat is large and read only here, so it stays uncached on case.files.
-    vazoes_obj = Vazoes.read(case.files.vazoes)
+    vazoes_obj = _read_vazoes(case.files.vazoes)
     df_vazoes: pd.DataFrame | None = vazoes_obj.vazoes
     if df_vazoes is None or df_vazoes.empty:
         raise FileNotFoundError("vazoes.dat not found or empty")
@@ -334,7 +414,7 @@ def convert_inflow_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
     FileNotFoundError
         If ``vazoes.dat`` DataFrame is empty.
     """
-    vazoes_obj = Vazoes.read(case.files.vazoes)
+    vazoes_obj = _read_vazoes(case.files.vazoes)
     df_vazoes: pd.DataFrame | None = vazoes_obj.vazoes
 
     if df_vazoes is None or df_vazoes.empty:

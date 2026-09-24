@@ -433,7 +433,7 @@ Uma fonte não controlável por par (`codigo_submercado`, `indice_bloco`) da ger
 **Quando:** sempre.  
 **Código:** `src/cobre_bridge/newave/converters/inflow_windows.py`
 
-Histórico de vazões incrementais mensais de `vazoes.dat`, uma linha por usina e mês-calendário, de janeiro do primeiro ano do histórico até o mês anterior ao início do estudo.
+Histórico de vazões incrementais mensais de `vazoes.dat`, uma linha por usina e mês-calendário, de janeiro do primeiro ano do histórico até o mês anterior ao início do estudo. A largura da matriz (320 ou 600 postos) não é declarada em nenhum lugar do deck e vem do tamanho do arquivo; um tamanho que sirva às duas larguras é lido como 320, com aviso.
 
 | Coluna | Origem | Transformação |
 | --- | --- | --- |
@@ -448,7 +448,7 @@ Histórico de vazões incrementais mensais de `vazoes.dat`, uma linha por usina 
 **Quando:** sempre.  
 **Código:** `src/cobre_bridge/newave/converters/stochastic.py`
 
-Média e desvio-padrão da vazão incremental histórica por usina e estágio, calculados por mês-calendário sobre `vazoes.dat`.
+Média e desvio-padrão da vazão incremental histórica por usina e estágio, calculados por mês-calendário sobre `vazoes.dat`. A largura da matriz (320 ou 600 postos) não é declarada em nenhum lugar do deck e vem do tamanho do arquivo; um tamanho que sirva às duas larguras é lido como 320, com aviso.
 
 | Coluna | Origem | Transformação |
 | --- | --- | --- |

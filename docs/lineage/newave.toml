@@ -2310,7 +2310,7 @@ reads = [
   { file = "hidr" },
   { file = "exph" },
 ]
-summary = "Histórico de vazões incrementais mensais de `vazoes.dat`, uma linha por usina e mês-calendário, de janeiro do primeiro ano do histórico até o mês anterior ao início do estudo."
+summary = "Histórico de vazões incrementais mensais de `vazoes.dat`, uma linha por usina e mês-calendário, de janeiro do primeiro ano do histórico até o mês anterior ao início do estudo. A largura da matriz (320 ou 600 postos) não é declarada em nenhum lugar do deck e vem do tamanho do arquivo; um tamanho que sirva às duas larguras é lido como 320, com aviso."
 
   [[output.field]]
   path = "hydro_id"
@@ -2360,7 +2360,7 @@ reads = [
   { file = "hidr" },
   { file = "exph" },
 ]
-summary = "Média e desvio-padrão da vazão incremental histórica por usina e estágio, calculados por mês-calendário sobre `vazoes.dat`."
+summary = "Média e desvio-padrão da vazão incremental histórica por usina e estágio, calculados por mês-calendário sobre `vazoes.dat`. A largura da matriz (320 ou 600 postos) não é declarada em nenhum lugar do deck e vem do tamanho do arquivo; um tamanho que sirva às duas larguras é lido como 320, com aviso."
 
   [[output.field]]
   path = "hydro_id"

@@ -22,6 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A 600-posto `vazoes.dat` is no longer read as a 320-posto one.** The
+  historical inflow record is a headerless matrix of months by gauging
+  stations, and the deck declares its width nowhere, so the reader assumed the
+  320 postos that almost every deck uses. A 600-posto deck was therefore
+  reshaped into the wrong number of months: it either aborted the conversion
+  with an opaque cast error from inside the reader or, when the value count
+  happened to divide, silently produced a different history. The width is now
+  derived from the file size, which has to yield whole months and whole years;
+  a size that fits both widths is read as 320 with a warning naming the
+  ambiguity, and a size that fits neither fails naming the file instead of the
+  reader's internals. Reading a 600-posto deck needs the `inewave` release that
+  accepts the station count; the dependency floor moves with it.
+
 - **Hydros under expansion (`EE`) are no longer dropped.** `confhd.dat` marks a
   plant already in operation but with machines still to enter as `EE`
   ("existente em expansão"). The converter admitted only `EX`, so every `EE`
