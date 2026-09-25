@@ -1,13 +1,15 @@
 """Minimum-outflow bounds for DECOMP-like decks (``RQ`` defaults).
 
-Semantics pinned against the reference manual (§4.5.11) and verified on
-the jul-26 deck's own outputs (2026-07-24):
+Semantics pinned against the reference manual (§4.5.11):
 
 - the default minimum defluence is zero;
-- ``RQ`` supplies, per REE, **per-block percentages of the registry's
-  historical minimum flow** (``vazao_minima_historica`` — *not* the
-  long-term mean), after ``AC VAZMIN`` overrides patch that registry
-  field (62 overrides in the jul-26 deck, many to zero);
+- ``RQ`` supplies, per REE, per-stage percentages of the registry's
+  historical minimum flow (``vazao_minima_historica`` — *not* the
+  long-term mean), after ``AC VAZMIN`` overrides patch that registry field.
+  One percentage per study stage (``vazao_1`` → stage 0, ``vazao_2`` →
+  stage 1, …); the last declared percentage carries forward for any stage
+  beyond the register's own columns (seasonal carry-forward, as
+  ``convert_irrigation_withdrawal`` does for ``TI``);
 - a ``UH``-declared minimum has priority over ``RQ`` and is fixed for all
   stages;
 - a plant with an explicit defluence window in the flow-constraint family
@@ -24,23 +26,18 @@ the jul-26 deck's own outputs (2026-07-24):
   *skipped* the ``RQ``/``UH`` contribution for any plant with a ``CQ``
   ``QDEF`` window — encoding the wrong "the window replaces the default"
   reading of the reference manual instead of the correct "both apply,
-  tighter wins" one; that skip was correctly retired
-  once the accumulator's ``intersect`` could express the co-apply
-  composition directly instead of this module approximating it via a skip.
+  tighter wins" one; that skip was correctly retired once the accumulator's
+  ``intersect`` could express the co-apply composition directly instead of
+  this module approximating it via a skip.
 
 Both emitters here return :class:`~cobre_bridge.decomp.bounds_accumulator.
 BoundContribution` lists — the accumulator, not this module, resolves
 per-cell collisions and fans them into the cobre bound parquet rows.
 
-Cobre's ``block_id`` axis is active for ``min_outflow_m3s``: an
-``RQ``-derived plant contributes either one stage-level base contribution
-(``block_id = None``, the hours-weighted value — unchanged from the earlier
-interim fold) when a stage's per-block percentages are all equal, **or**
-sparse per-block contributions (``block_id = 0..n-1``, no base) when they are
-not — never both, since ``resolve()`` does not replicate cobre's
-replace-not-merge column semantics and would otherwise double-count the
-shadowed base into every block's intersection. ``UH``-declared plants are
-unaffected — their bound never varies across blocks.
+The ``RQ``/``UH`` minimum-outflow floor is a stage-level value
+(``block_id = None``) that holds across every block. ``block_id`` on the
+``outflow`` axis is materialised by a per-patamar ``LU``/``LQ`` window
+(``single_term_bounds``).
 """
 
 from __future__ import annotations
@@ -73,14 +70,15 @@ def convert_hydro_bounds(
 
     A ``UH``-declared plant contributes a constant stage-level
     (``block_id = None``) value every stage. An ``RQ``-derived plant
-    contributes, per stage, **either** that same base value (``block_id =
-    None``) when the stage's per-block percentages are all equal, **or** one
-    contribution per block (``block_id = 0..n-1``, no base) when they are
-    not — see the module docstring's replace-vs-intersect note. A plant with
-    an explicit ``QDEF`` flow window still contributes its RQ/UH value here;
-    the accumulator co-applies it with that window's own contribution
+    contributes one stage-level (``block_id = None``) value per stage — the
+    REE's per-stage percentage (``vazao_1`` → stage 0, …, last declared
+    percentage carried forward past the register's columns) times the
+    plant's effective ``vazao_minima_historica`` for that stage. A plant
+    with an explicit ``QDEF`` flow window still contributes its RQ/UH value
+    here; the accumulator co-applies it with that window's own contribution
     (``single_term_bounds``) via max-of-lowers/min-of-uppers rather than
-    either one replacing the other.
+    either one replacing the other. Any stage whose effective floor is
+    non-positive (or ``NaN``) emits no contribution.
     """
     calendar = case.calendar
     dadger = case.dadger
@@ -99,7 +97,10 @@ def convert_hydro_bounds(
         if declared is not None and not pd.isna(declared):
             uh_declared[code] = float(declared)
 
-    pct_blocks: dict[int, list[float]] = {}
+    # ``pct_by_ree[ree]`` is the REE's per-stage percentage list of the
+    # historical minimum flow (``vazao_1`` → stage 0, ``vazao_2`` → stage 1,
+    # …).
+    pct_by_ree: dict[int, list[float]] = {}
     for _, row in rq.iterrows():
         values = []
         k = 1
@@ -107,41 +108,28 @@ def convert_hydro_bounds(
             value = row[f"vazao_{k}"]
             values.append(0.0 if pd.isna(value) else float(value))
             k += 1
-        pct_blocks[int(row["codigo_ree"])] = values
+        pct_by_ree[int(row["codigo_ree"])] = values
 
     contributions: list[BoundContribution] = []
     for code in id_map.hydro_codes:
-        # ``per_block_stage[stage.index]`` is the RQ-derived per-block
-        # minimum (``pct[b] / 100 * base``, one entry per declared block) —
-        # ``None`` for a UH-declared plant, which never varies across
-        # blocks.
-        per_block_stage: list[list[float]] | None
+        # ``per_stage[stage.index]`` is the effective minimum-outflow floor
+        # (m3/s) for this plant at that stage — a UH-declared constant, or
+        # the RQ per-stage percentage times the effective historical minimum.
         if code in uh_declared:
             per_stage = [uh_declared[code]] * len(calendar)
-            per_block_stage = None
             contributor = "UH"
         else:
             ree = ree_by_code.get(code)
-            if ree is None or ree not in pct_blocks or code not in effective.base.index:
+            if ree is None or ree not in pct_by_ree or code not in effective.base.index:
                 continue
-            values = pct_blocks[ree]
+            pct_by_stage = pct_by_ree[ree]
             per_stage = []
-            per_block_stage = []
             for stage in calendar:
+                # Carry the last declared percentage forward for any stage
+                # past the register's own columns (a no-op when they align).
+                pct = pct_by_stage[min(stage.index, len(pct_by_stage) - 1)]
                 base = effective.value(code, "vazao_minima_historica", stage.index)
-                n_blocks = len(stage.block_hours)
-                block_values = [pct / 100.0 * base for pct in values[:n_blocks]]
-                weighted_pct = (
-                    sum(
-                        pct * hours
-                        for pct, hours in zip(
-                            values[:n_blocks], stage.block_hours, strict=True
-                        )
-                    )
-                    / stage.total_hours
-                )
-                per_stage.append(weighted_pct / 100.0 * base)
-                per_block_stage.append(block_values)
+                per_stage.append(pct / 100.0 * base)
             contributor = "RQ"
 
         hydro_id = id_map.hydro_id(code)
@@ -149,51 +137,18 @@ def convert_hydro_bounds(
             value = per_stage[stage.index]
             if pd.isna(value) or value <= 0.0:
                 continue
-
-            if per_block_stage is None:
-                contributions.append(
-                    BoundContribution(
-                        family="hydro",
-                        entity_id=hydro_id,
-                        stage_id=stage.index,
-                        block_id=None,
-                        axis="outflow",
-                        lower=value,
-                        upper=None,
-                        contributor=contributor,
-                    )
+            contributions.append(
+                BoundContribution(
+                    family="hydro",
+                    entity_id=hydro_id,
+                    stage_id=stage.index,
+                    block_id=None,
+                    axis="outflow",
+                    lower=value,
+                    upper=None,
+                    contributor=contributor,
                 )
-                continue
-
-            block_values = per_block_stage[stage.index]
-            uniform = all(v == block_values[0] for v in block_values)
-            if uniform:
-                contributions.append(
-                    BoundContribution(
-                        family="hydro",
-                        entity_id=hydro_id,
-                        stage_id=stage.index,
-                        block_id=None,
-                        axis="outflow",
-                        lower=value,
-                        upper=None,
-                        contributor=contributor,
-                    )
-                )
-            else:
-                for b, block_value in enumerate(block_values):
-                    contributions.append(
-                        BoundContribution(
-                            family="hydro",
-                            entity_id=hydro_id,
-                            stage_id=stage.index,
-                            block_id=b,
-                            axis="outflow",
-                            lower=block_value,
-                            upper=None,
-                            contributor=contributor,
-                        )
-                    )
+            )
 
     return contributions
 

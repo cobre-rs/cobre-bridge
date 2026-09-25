@@ -9,9 +9,12 @@ style). Covers:
   ``list[BoundContribution]``; ``convert_thermal_bounds`` returns a
   ``ThermalBounds`` pair (contributions + cost side-table) — no converter
   returns a ``pa.Table`` bound table.
-- The replace-vs-intersect discipline (A.1/A.3): a block-uniform stage
-  contributes one base (``block_id = None``) contribution; a non-uniform
-  stage contributes per-block contributions only, never both.
+- ``RQ``/``UH`` outflow floors are stage-level (``block_id = None``): the
+  ``RQ`` register carries one percentage per stage, carried forward past its
+  columns. The replace-vs-intersect discipline (A.1/A.3) applies to the
+  thermal ``CT`` axis: a block-uniform stage contributes one base
+  contribution, a non-uniform stage per-block contributions only, never
+  both.
 - an RQ minimum-outflow contribution and an RHQ ``QDEF`` outflow
   contribution on the same ``(hydro, stage, block)`` cell intersect to one
   row via ``bounds_accumulator.resolve``.
@@ -99,7 +102,8 @@ def _case(dadger: _StubDadger, calendar: list[OperativeStage]) -> DecompCase:
     return make_decomp_case(Path("unused"), dadger=dadger, calendar=calendar)
 
 
-def _rq_dadger(pct_blocks: list[float], *, code: int = 1, ree: int = 1) -> _StubDadger:
+def _rq_dadger(pct_stages: list[float], *, code: int = 1, ree: int = 1) -> _StubDadger:
+    # ``pct_stages[k]`` is the RQ percentage for stage ``k`` (``vazao_{k+1}``).
     uh = pd.DataFrame(
         [
             {
@@ -111,7 +115,7 @@ def _rq_dadger(pct_blocks: list[float], *, code: int = 1, ree: int = 1) -> _Stub
         ]
     )
     rq_row: dict[str, object] = {"codigo_ree": ree}
-    for i, value in enumerate(pct_blocks, start=1):
+    for i, value in enumerate(pct_stages, start=1):
         rq_row[f"vazao_{i}"] = value
     return _StubDadger(uh=uh, rq=pd.DataFrame([rq_row]))
 
@@ -192,39 +196,62 @@ class TestContributionNativeReturnTypes:
 
 
 class TestReplaceVsIntersectDiscipline:
-    """A block-uniform stage contributes one base contribution; a
-    non-uniform stage contributes per-block contributions only — never
-    both (A.1/A.3's critical trap)."""
+    """``RQ``/``UH`` outflow floors are stage-level (``block_id = None``);
+    ``RQ`` carries one percentage per stage. Thermal (``CT``) is per-block,
+    so a non-uniform CT stage contributes per-block-only (A.1/A.3's critical
+    trap for the thermal axis)."""
 
-    def test_hydro_rq_uniform_stage_emits_single_base_contribution(self) -> None:
+    def test_hydro_rq_single_stage_emits_stage_level_contribution(self) -> None:
         calendar = [_stage(0, (10.0, 10.0))]
         id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
         effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0))
 
         contributions = convert_hydro_bounds(
-            _case(_rq_dadger([50.0, 50.0]), calendar), id_map, effective=effective
+            _case(_rq_dadger([50.0]), calendar), id_map, effective=effective
         )
 
         assert len(contributions) == 1
         contribution = contributions[0]
         assert contribution.block_id is None
         assert contribution.axis == "outflow"
-        assert contribution.lower == pytest.approx(20.0)
+        assert contribution.lower == pytest.approx(20.0)  # 50% of 40 m3/s
         assert contribution.upper is None
 
-    def test_hydro_rq_nonuniform_stage_emits_per_block_only_no_base(self) -> None:
-        calendar = [_stage(0, (10.0, 20.0))]
+    def test_hydro_rq_columns_are_per_stage(self) -> None:
+        # Two RQ columns (100, 0) over a two-stage calendar map to two stages:
+        # stage 0 gets 100% (40 m3/s, one stage-level row), stage 1 gets 0%
+        # (dropped by the non-positive gate).
+        calendar = [_stage(0, (10.0, 20.0)), _stage(1, (10.0, 20.0))]
         id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
-        effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0))
+        effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0), n_stages=2)
 
         contributions = convert_hydro_bounds(
             _case(_rq_dadger([100.0, 0.0]), calendar), id_map, effective=effective
         )
 
+        assert len(contributions) == 1
+        contribution = contributions[0]
+        assert contribution.stage_id == 0
+        assert contribution.block_id is None
+        assert contribution.axis == "outflow"
+        assert contribution.lower == pytest.approx(40.0)
+
+    def test_hydro_rq_carries_last_stage_percentage_forward(self) -> None:
+        # One RQ column (50) over a two-stage calendar: stage 0 uses the
+        # declared 50%, stage 1 (past the register's columns) carries the
+        # last declared percentage forward — both stage-level.
+        calendar = [_stage(0, (168.0,)), _stage(1, (168.0,))]
+        id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(1,))
+        effective = _effective(_hidr_frame(1, vazao_minima_historica=40.0), n_stages=2)
+
+        contributions = convert_hydro_bounds(
+            _case(_rq_dadger([50.0]), calendar), id_map, effective=effective
+        )
+
         assert len(contributions) == 2
-        assert all(c.block_id is not None for c in contributions)
-        by_block = {c.block_id: c.lower for c in contributions}
-        assert by_block == {0: 40.0, 1: 0.0}
+        assert all(c.block_id is None and c.axis == "outflow" for c in contributions)
+        by_stage = {c.stage_id: c.lower for c in contributions}
+        assert by_stage == {0: pytest.approx(20.0), 1: pytest.approx(20.0)}
 
     def test_thermal_uniform_stage_emits_single_base_contribution(self) -> None:
         calendar = [_stage(0, (10.0, 20.0))]

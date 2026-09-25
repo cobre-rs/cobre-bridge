@@ -1776,7 +1776,7 @@ summary = "Sobrescritas por (usina, estágio, patamar) dos limites declarados em
   path = "block_id"
   from = [ { file = "dadger", register = "DP", item = "numero_patamares" } ]
   status = "derived"
-  how = "Nulo na linha-base (vale para todos os patamares); 0..n−1 quando algum contribuinte do eixo naquele estágio é por patamar (`RQ` com percentuais desiguais, `LU`/`LQ` por patamar): então todos os patamares do estágio são materializados. Os eixos de armazenamento e retirada de água são sempre de estágio."
+  how = "Nulo na linha-base (vale para todos os patamares); 0..n−1 quando algum contribuinte do eixo naquele estágio é por patamar (`LU`/`LQ` por patamar): então todos os patamares do estágio são materializados. O piso `RQ`/`UH` de defluência é por estágio (linha-base). Os eixos de armazenamento e retirada de água são sempre de estágio."
 
   [[output.field]]
   path = "min_outflow_m3s"
@@ -1793,7 +1793,7 @@ summary = "Sobrescritas por (usina, estágio, patamar) dos limites declarados em
     { file = "dadger", register = "CQ", item = "tipo" },
     { file = "dadger", register = "CQ", item = "coeficiente" },
   ]
-  how = "Piso de defluência: a `vazao_defluente_minima` do `UH` (fixa em todos os estágios) ou, na sua ausência, o percentual por patamar do `RQ` da REE da usina aplicado à `vazao_minima_historica` efetiva (`AC VAZMIN`), como média ponderada pelas horas quando os patamares coincidem e por patamar quando não; valores não positivos não geram linha. Um piso `QDEF` de RHQ de termo único (`LQ` limite inferior por patamar, herdado entre estágios) coexiste e o maior piso prevalece."
+  how = "Piso de defluência: a `vazao_defluente_minima` do `UH` (fixa em todos os estágios) ou, na sua ausência, o percentual por estágio do `RQ` da REE da usina (`vazao_1` → estágio 0, `vazao_2` → estágio 1, …, repetindo o último declarado além das colunas do registro) aplicado à `vazao_minima_historica` efetiva (`AC VAZMIN`), um piso por (usina, estágio); valores não positivos não geram linha. Um piso `QDEF` de RHQ de termo único (`LQ` limite inferior por patamar, herdado entre estágios) coexiste e o maior piso prevalece."
 
   [[output.field]]
   path = "max_outflow_m3s"
