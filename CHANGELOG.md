@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Electric constraints no longer outlive the period they are declared for.**
+  Every limit in `re.dat` and in `restricao-eletrica.csv` is registered with a
+  start and an end period, and both were being ignored at the end: a `re.dat`
+  limit was carried forward to the last stage of the study, and a
+  `restricao-eletrica.csv` limit was repeated by calendar month across every
+  stage past the individualised period. A constraint the deck declared for a
+  couple of months — the usual shape, since the limits track dated grid work —
+  was therefore enforced over the whole horizon. Bounds now cover only the
+  stages their own registration spans; where two registrations overlap, the
+  existing precedence is unchanged, so a patamar-specific limit still wins its
+  own block inside a broader all-patamar one.
+
 - **A 600-posto `vazoes.dat` is no longer read as a 320-posto one.** The
   historical inflow record is a headerless matrix of months by gauging
   stations, and the deck declares its width nowhere, so the reader assumed the

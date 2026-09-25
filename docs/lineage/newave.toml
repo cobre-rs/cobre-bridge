@@ -2758,7 +2758,7 @@ summary = "Limites por restrição, estágio e patamar das três famílias, conc
     { file = "dger", item = "num_anos_pos_estudo" },
   ]
   status = "derived"
-  how = "Índice 0-based do estágio de `dger.dat`. Curva: estágio da `data` de cada registro; estágios de estudo sem registro e o pós-estudo repetem o último ano por mês-calendário quando o terceiro campo da linha de penalização de `curva.dat` é 1, senão o pós-estudo congela o percentual do último estágio de estudo. Elétricas: todo o horizonte em que há limite; os limites de `re.dat` valem só a partir do fim do período individualizado (`ree.dat`) e são propagados até o fim; sem `re.dat`, o pós-individualizado repete o mesmo mês-calendário. Agrupamentos: estágios de estudo cobertos pelos limites (fim aberto vai até o fim do horizonte) e congelamento do último estágio de estudo no pós-estudo."
+  how = "Índice 0-based do estágio de `dger.dat`. Curva: estágio da `data` de cada registro; estágios de estudo sem registro e o pós-estudo repetem o último ano por mês-calendário quando o terceiro campo da linha de penalização de `curva.dat` é 1, senão o pós-estudo congela o percentual do último estágio de estudo. Elétricas: somente os estágios cobertos pela janela de vigência do próprio limite — `mes_inicio`/`ano_inicio` a `mes_fim`/`ano_fim` no `re.dat`, `PerIni`/`PerFin` do `RE-LIM-FORM-PER-PAT` interseccionado com o `RE-HORIZ-PER` no CSV; estágio fora de toda janela declarada não recebe limite. Os limites de `re.dat` valem só a partir do fim do período individualizado (`ree.dat`). Agrupamentos: estágios de estudo cobertos pelos limites (fim aberto vai até o fim do horizonte) e congelamento do último estágio de estudo no pós-estudo."
 
   [[output.field]]
   path = "block_id"
