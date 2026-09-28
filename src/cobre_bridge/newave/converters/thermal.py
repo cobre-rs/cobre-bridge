@@ -284,25 +284,28 @@ def _step1_zero_ip_before_maintenance(
 
 
 def _step2_null_potencia_for_potef(
-    state: _StageInputs, stage_idx: int, maint_end_stage: int, has_potef: bool
+    state: _StageInputs, stage_idx: int, maint_end_stage: int, nullified: bool
 ) -> None:
-    """Step 2: null ``potencia`` for stages >= maint end when EXPT POTEF exists.
+    """Step 2: null ``potencia`` for stages >= maint end when CONFT nulls it.
 
     EXPT restores the real value in step 4; zeroing first means a plant with no
-    POTEF window covering a stage stays at zero capacity there.
+    POTEF window covering a stage stays at zero capacity there. ``nullified``
+    is the CONFT.DAT ``EE``/``NE`` status, for which the model discards the
+    registry capacity.
     """
-    if stage_idx >= maint_end_stage and has_potef:
+    if stage_idx >= maint_end_stage and nullified:
         state.potencia = 0.0
 
 
 def _step3_null_gen_min_for_gtmin(
-    state: _StageInputs, stage_idx: int, maint_end_stage: int, has_gtmin: bool
+    state: _StageInputs, stage_idx: int, maint_end_stage: int, nullified: bool
 ) -> None:
-    """Step 3: null ``gen_min`` for stages >= maint end when EXPT GTMIN exists.
+    """Step 3: null ``gen_min`` for stages >= maint end when CONFT nulls it.
 
-    EXPT restores the real value in step 4.
+    EXPT restores the real value in step 4. ``nullified`` is the CONFT.DAT
+    ``EE``/``NE`` status, for which the model discards the registry minimum.
     """
-    if stage_idx >= maint_end_stage and has_gtmin:
+    if stage_idx >= maint_end_stage and nullified:
         state.gen_min = 0.0
 
 
@@ -350,27 +353,23 @@ def _step4b_apply_potef_availability(
     windows: list[tuple[date, date]] | None,
     stage_date: date,
     *,
-    expt_without_potef: bool = False,
+    nullified: bool,
 ) -> None:
-    """Step 4b: a POTEF schedule defines the *only* periods the plant is available.
+    """Step 4b: for a plant whose registry capacity CONFT nulls, the POTEF
+    schedule defines the *only* periods it is available.
 
-    Outside every window (tested against the caller-supplied ``stage_date`` — the
-    actual stage date in-study, the frozen last-study-stage date in the post-study
-    tail) the plant is out of service for that stage.
-
-    A plant referenced in EXPT.DAT with modifier-only entries (TEIFT/FCMAX/ GTMIN/IPTER)
-    but **no establishing POTEF** has no installed power: the modifiers have nothing to
-    modify, so the source model reports ``GERACAO MAXIMA POR CLASSE TERMICA = 0`` for it
-    every stage. ``expt_without_potef`` marks that case so the plant is held out of
-    service across the whole horizon rather than falling back to its TERM.DAT registry
-    capacity (e.g. LINHARES, which carries only a TEIFT entry in the validation deck).
+    The manual (FAQ 33) discards the TERM.DAT effective power and minimum for a
+    plant with status ``EE`` or ``NE``, leaving EXPT.DAT as the whole timeline:
+    outside every POTEF window — tested against the caller-supplied
+    ``stage_date``, the actual stage date in-study and the frozen
+    last-study-stage date in the post-study tail — the plant is out of service,
+    and a plant with no POTEF window at all never enters service. An ``EX``
+    plant is untouched here: its registry capacity stays operative wherever
+    EXPT declares nothing.
     """
-    if windows is None:
-        if expt_without_potef:
-            state.potencia = 0.0
-            state.gen_min = 0.0
+    if not nullified:
         return
-    if not any(ws <= stage_date <= we for ws, we in windows):
+    if windows is None or not any(ws <= stage_date <= we for ws, we in windows):
         state.potencia = 0.0
         state.gen_min = 0.0
 
@@ -380,46 +379,40 @@ def _step4c_apply_gtmin_availability(
     windows: list[tuple[date, date]] | None,
     stage_date: date,
     *,
-    expt_without_gtmin: bool = False,
+    nullified: bool,
 ) -> None:
-    """Step 4c: a GTMIN schedule defines the *only* periods with a minimum.
+    """Step 4c: for a plant whose registry minimum CONFT nulls, the GTMIN
+    schedule defines the *only* periods with a minimum.
 
-    The source model takes the minimum generation from EXPT GTMIN windows and uses **0**
-    outside them — it ignores the TERM.DAT "GTMIN PARA O PRIMEIRO ANO" column. Outside
-    every window (tested against the caller-supplied ``stage_date`` — the actual stage
-    date in-study, the frozen last-study-stage date in the post-study tail) the plant's
-    minimum is dropped to 0.
-
-    A plant configured via EXPT but with **no GTMIN entry** has no minimum at
-    all (``expt_without_gtmin``); its TERM.DAT GTMIN must not leak in as a
-    spurious must-run (e.g. JARAQUI / MARLIM AZUL in the validation deck). This
-    only drops the *lower* bound — capacity (step 4b) is unaffected.
+    Same rule as step 4b applied to the lower bound: for an ``EE``/``NE`` plant
+    the minimum comes only from EXPT GTMIN windows and is 0 outside them, so a
+    TERM.DAT GTMIN cannot leak in as a spurious must-run. An ``EX`` plant keeps
+    its registry minimum where EXPT declares none. This drops only the lower
+    bound — capacity is step 4b's.
     """
-    if windows is None:
-        if expt_without_gtmin:
-            state.gen_min = 0.0
+    if not nullified:
         return
-    if not any(ws <= stage_date <= we for ws, we in windows):
+    if windows is None or not any(ws <= stage_date <= we for ws, we in windows):
         state.gen_min = 0.0
 
 
 def _potef_online_at(
     windows: list[tuple[date, date]] | None,
     *,
-    expt_without_potef: bool,
+    nullified: bool,
     when: date,
 ) -> bool:
     """Whether a plant has installed capacity at ``when`` per its POTEF schedule.
 
-    A plant with no POTEF schedule is always online (its capacity comes from the
-    TERM.DAT registry). A plant referenced in EXPT with no establishing POTEF has
-    no installed power. Otherwise it is online iff some POTEF window covers
-    ``when``. Used to pick the post-study freeze reference (see the loop).
+    A plant whose registry capacity CONFT does not null is always online (that
+    capacity is operative). One whose registry CONFT nulls is online iff some
+    POTEF window covers ``when``, and never when it declares no window at all.
+    Used to pick the post-study freeze reference (see the loop).
     """
-    if expt_without_potef:
-        return False
-    if not windows:
+    if not nullified:
         return True
+    if not windows:
+        return False
     return any(ws <= when <= we for ws, we in windows)
 
 
@@ -742,13 +735,14 @@ def convert_thermal_bounds(
         except Exception:  # noqa: BLE001
             _LOG.warning("expt.dat could not be parsed; EXPT overrides skipped.")
 
-    # Pre-compute which codes have POTEF / GTMIN in EXPT.
+    # Pre-compute which codes have POTEF in EXPT.
     codes_with_potef: set[int] = set()
-    codes_with_gtmin: set[int] = set()
     # ── EXPT-authoritative-timeline principle ─────────────────────────────
-    # The source model drives the thermal configuration from EXPT.DAT, not TERM.DAT.
-    # TERM.DAT supplies *registry/reference* values; EXPT.DAT declares the operative
-    # per-attribute timeline over date windows. Each attribute has a
+    # For a plant CONFT.DAT marks ``EE`` or ``NE``, the source model discards the
+    # TERM.DAT effective power and minimum generation (manual FAQ 33) and drives
+    # the configuration from EXPT.DAT. TERM.DAT then supplies only
+    # *registry/reference* values; EXPT.DAT declares the operative per-attribute
+    # timeline over date windows. Each attribute has a
     # DEFAULT it reverts to OUTSIDE its EXPT windows:
     #   • POTEF (installed capacity) -> default 0   (plant not motorised)
     #   • GTMIN (minimum generation) -> default 0   (no must-run)
@@ -779,45 +773,50 @@ def convert_thermal_bounds(
                 codes_with_potef.add(code)
                 potef_windows.setdefault(code, []).append(_window(o))
             elif o["tipo"] == "GTMIN":
-                codes_with_gtmin.add(code)
                 gtmin_windows.setdefault(code, []).append(_window(o))
 
     # Plants referenced in EXPT with modifier-only entries (TEIFT/FCMAX/GTMIN/ IPTER)
     # but no establishing POTEF have no installed power: The source model reports
     # ``GERACAO MAXIMA POR CLASSE TERMICA = 0`` for them every stage. Hold them out of
     # service (step 4b) rather than falling back to the TERM.DAT registry capacity.
-    codes_expt_without_potef = set(expt_by_code) - codes_with_potef
-    if codes_expt_without_potef:
+    # CONFT.DAT's status is the trigger: only ``EE``/``NE`` have their registry
+    # capacity and minimum discarded. Anything else — ``EX``, or a status the
+    # deck leaves blank — keeps them operative wherever EXPT declares nothing.
+    status_by_code = {
+        int(row["codigo_usina"]): str(row["usina_existente"]).strip()
+        for _, row in case.conft.usinas.iterrows()
+    }
+    nullified_codes = {
+        code for code, status in status_by_code.items() if status in ("EE", "NE")
+    }
+
+    codes_without_potef = nullified_codes - codes_with_potef
+    if codes_without_potef:
         names = _thermal_names(case)
         emit(
             Diagnostic(
                 code="thermal-expt-without-potef",
                 severity=Severity.INFO,
                 category="Thermal bounds",
-                title=f"EXPT entries without POTEF ({len(codes_expt_without_potef)})",
+                title=f"Plants without a POTEF entry ({len(codes_without_potef)})",
                 summary=(
-                    f"{len(codes_expt_without_potef)} thermal plant(s) appear in "
-                    "EXPT.DAT without a POTEF entry; treated as not installed "
-                    "(max generation 0), matching NEWAVE."
+                    f"{len(codes_without_potef)} thermal plant(s) are marked "
+                    '"existente/nao existente com expansao" in CONFT.DAT with no '
+                    "POTEF entry in EXPT.DAT; the model discards their registry "
+                    "capacity and declares none, so they are treated as not "
+                    "installed (max generation 0)."
                 ),
                 table=DiagnosticTable(
                     columns=["Plant", "Code"],
                     rows=[
                         [names.get(code, "?"), code]
-                        for code in sorted(codes_expt_without_potef)
+                        for code in sorted(codes_without_potef)
                     ],
                     justify=["left", "right"],
                 ),
             ),
             logger=_LOG,
         )
-
-    # The same authority applies to the minimum generation: The source model takes GTMIN
-    # only from EXPT GTMIN windows and uses 0 outside them, ignoring the TERM.DAT "GTMIN
-    # PARA O PRIMEIRO ANO" column. A plant configured via EXPT but with no GTMIN entry
-    # therefore has no minimum (its TERM.DAT GTMIN must not leak in as a spurious
-    # must-run). Handled in step 4c.
-    codes_expt_without_gtmin = set(expt_by_code) - codes_with_gtmin
 
     # ------------------------------------------------------------------
     # 3. Load MANUTT maintenance events.
@@ -885,11 +884,11 @@ def convert_thermal_bounds(
         last_study_idx = study_months - 1
         comes_online_in_post_study = not _potef_online_at(
             potef_windows.get(newave_code),
-            expt_without_potef=newave_code in codes_expt_without_potef,
+            nullified=newave_code in nullified_codes,
             when=stage_dates[last_study_idx],
         ) and _potef_online_at(
             potef_windows.get(newave_code),
-            expt_without_potef=newave_code in codes_expt_without_potef,
+            nullified=newave_code in nullified_codes,
             when=stage_dates[-1],
         )
         freeze_idx = (
@@ -907,13 +906,13 @@ def convert_thermal_bounds(
                 state,
                 stage_idx,
                 maint_end_stage,
-                newave_code in codes_with_potef,
+                newave_code in nullified_codes,
             )
             _step3_null_gen_min_for_gtmin(
                 state,
                 stage_idx,
                 maint_end_stage,
-                newave_code in codes_with_gtmin,
+                newave_code in nullified_codes,
             )
             _step4_apply_expt_overrides(
                 state, overrides, ref_date, is_post_study, stage_dates[-1]
@@ -922,13 +921,13 @@ def convert_thermal_bounds(
                 state,
                 potef_windows.get(newave_code),
                 ref_date,
-                expt_without_potef=newave_code in codes_expt_without_potef,
+                nullified=newave_code in nullified_codes,
             )
             _step4c_apply_gtmin_availability(
                 state,
                 gtmin_windows.get(newave_code),
                 ref_date,
-                expt_without_gtmin=newave_code in codes_expt_without_gtmin,
+                nullified=newave_code in nullified_codes,
             )
             _step5_apply_maint_reduction(
                 state, maint_reduction, stage_idx, maint_end_stage

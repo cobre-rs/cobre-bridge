@@ -233,6 +233,10 @@ class TestConvertThermalBoundsClastModificacoes:
         import datetime
 
         conft, clast, term = _thermal_readers()
+        # Only a plant CONFT marks EE/NE has its registry capacity and
+        # minimum discarded, which is what makes the EXPT schedule the
+        # whole timeline.
+        conft.usinas.loc[conft.usinas["codigo_usina"] == 10, "usina_existente"] = "EE"
 
         expt_df = pd.DataFrame(
             {
@@ -278,6 +282,56 @@ class TestConvertThermalBoundsClastModificacoes:
         # Stage 11 (Dec) past window 2 → zeroed.
         assert a_rows.iloc[11]["max_generation_mw"] == pytest.approx(0.0)
 
+    def test_ex_plant_keeps_its_registry_capacity_outside_the_windows(
+        self, tmp_path
+    ) -> None:
+        """An ``EX`` plant's TERM.DAT capacity survives where EXPT declares none.
+
+        The manual discards the registry capacity only for ``EE``/``NE`` (FAQ
+        33), so a POTEF schedule on an ``EX`` plant modifies it inside the
+        window instead of defining the only period it exists.
+        """
+        import datetime
+
+        conft, clast, term = _thermal_readers()
+        # The fixture's plants are EX; left as is on purpose.
+        expt_df = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "tipo": ["POTEF"],
+                "modificacao": [200.0],
+                "data_inicio": [datetime.datetime(2023, 1, 1)],
+                "data_fim": [datetime.datetime(2023, 3, 1)],
+            }
+        )
+        expt_obj = MagicMock()
+        expt_obj.expansoes = expt_df
+
+        nw = make_nw_files(tmp_path, expt=tmp_path / "expt.dat")
+        case = make_case(
+            nw,
+            conft=conft,
+            clast=clast,
+            term=term,
+            dger=self._make_dger(),
+            expt=expt_obj,
+        )
+
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
+
+        table = convert_thermal_bounds(case, self._make_id_map())
+        assert table is not None
+        a_rows = (
+            table.to_pandas()
+            .query("thermal_id == @self._make_id_map().thermal_id(10)")
+            .sort_values("stage_id")
+        )
+        # Inside the window the POTEF value applies: 200 * 90% * (100 - 0.05)%.
+        assert a_rows.iloc[0]["max_generation_mw"] == pytest.approx(179.910)
+        # Outside it the registry capacity stands, instead of being zeroed.
+        assert a_rows.iloc[6]["max_generation_mw"] == pytest.approx(89.955)
+        assert a_rows.iloc[11]["max_generation_mw"] == pytest.approx(89.955)
+
     def test_modificacao_with_open_end_extends_to_horizon(self, tmp_path) -> None:
         import datetime
 
@@ -322,6 +376,7 @@ class TestConvertThermalBoundsClastModificacoes:
         import datetime
 
         conft, clast, term = _thermal_readers()
+        conft.usinas.loc[conft.usinas["codigo_usina"] == 10, "usina_existente"] = "EE"
 
         # POTEF gives capacity across the whole horizon. GTMIN is active only
         # Jan-Apr and Sep-Dec 2023 (zero May-Aug). December — the freeze point —
@@ -426,6 +481,7 @@ class TestConvertThermalBoundsClastModificacoes:
         import datetime
 
         conft, clast, term = _thermal_readers()
+        conft.usinas.loc[conft.usinas["codigo_usina"] == 10, "usina_existente"] = "EE"
 
         # Plant exists only from 2024 (the post-study). GTMIN: a closed seasonal window
         # Jan-May (30) plus an open-ended tail from Jun (80). The source model freezes
@@ -578,24 +634,24 @@ class TestThermalBoundStageSteps:
         )
 
         state = self._state(potencia=100.0)
-        _step2_null_potencia_for_potef(state, 5, 5, has_potef=True)
+        _step2_null_potencia_for_potef(state, 5, 5, nullified=True)
         assert state.potencia == 0.0
-        # No POTEF → untouched; before maint end → untouched.
+        # Registry not nulled → untouched; before maint end → untouched.
         s_no_potef = self._state(potencia=100.0)
-        _step2_null_potencia_for_potef(s_no_potef, 5, 5, has_potef=False)
+        _step2_null_potencia_for_potef(s_no_potef, 5, 5, nullified=False)
         assert s_no_potef.potencia == 100.0
         s_before = self._state(potencia=100.0)
-        _step2_null_potencia_for_potef(s_before, 4, 5, has_potef=True)
+        _step2_null_potencia_for_potef(s_before, 4, 5, nullified=True)
         assert s_before.potencia == 100.0
 
     def test_step3_nulls_gen_min_only_for_gtmin_after_maint_end(self) -> None:
         from cobre_bridge.newave.converters.thermal import _step3_null_gen_min_for_gtmin
 
         state = self._state(gen_min=50.0)
-        _step3_null_gen_min_for_gtmin(state, 5, 5, has_gtmin=True)
+        _step3_null_gen_min_for_gtmin(state, 5, 5, nullified=True)
         assert state.gen_min == 0.0
         s_no = self._state(gen_min=50.0)
-        _step3_null_gen_min_for_gtmin(s_no, 5, 5, has_gtmin=False)
+        _step3_null_gen_min_for_gtmin(s_no, 5, 5, nullified=False)
         assert s_no.gen_min == 50.0
 
     def test_step4_applies_in_file_order_for_closed_window(self) -> None:
@@ -683,13 +739,24 @@ class TestThermalBoundStageSteps:
 
         state = self._state(potencia=100.0, gen_min=30.0)
         windows = [(date(2024, 1, 1), date(2024, 6, 1))]
-        _step4b_apply_potef_availability(state, windows, stage_date=date(2024, 9, 1))
+        _step4b_apply_potef_availability(
+            state, windows, stage_date=date(2024, 9, 1), nullified=True
+        )
         assert state.potencia == 0.0
         assert state.gen_min == 0.0
         # Inside a window → untouched.
         s_in = self._state(potencia=100.0, gen_min=30.0)
-        _step4b_apply_potef_availability(s_in, windows, stage_date=date(2024, 3, 1))
+        _step4b_apply_potef_availability(
+            s_in, windows, stage_date=date(2024, 3, 1), nullified=True
+        )
         assert s_in.potencia == 100.0
+        # Registry not nulled (an EX plant) → the schedule does not gate it.
+        s_ex = self._state(potencia=100.0, gen_min=30.0)
+        _step4b_apply_potef_availability(
+            s_ex, windows, stage_date=date(2024, 9, 1), nullified=False
+        )
+        assert s_ex.potencia == 100.0
+        assert s_ex.gen_min == 30.0
 
     def test_step4b_zeroes_expt_plant_without_potef(self) -> None:
         """EXPT plant with modifier-only entries (no POTEF) is not installed.
@@ -707,7 +774,7 @@ class TestThermalBoundStageSteps:
         # No POTEF window + flagged as EXPT-without-POTEF → held out of service.
         state = self._state(potencia=204.0, gen_min=0.0)
         _step4b_apply_potef_availability(
-            state, None, stage_date=date(2024, 9, 1), expt_without_potef=True
+            state, None, stage_date=date(2024, 9, 1), nullified=True
         )
         assert state.potencia == 0.0
         assert state.gen_min == 0.0
@@ -715,7 +782,7 @@ class TestThermalBoundStageSteps:
         # No POTEF window + NOT flagged (purely TERM.DAT plant) → untouched.
         s_keep = self._state(potencia=204.0, gen_min=0.0)
         _step4b_apply_potef_availability(
-            s_keep, None, stage_date=date(2024, 9, 1), expt_without_potef=False
+            s_keep, None, stage_date=date(2024, 9, 1), nullified=False
         )
         assert s_keep.potencia == 204.0
 
@@ -735,14 +802,24 @@ class TestThermalBoundStageSteps:
         windows = [(date(2024, 9, 1), date(2024, 10, 1))]
         # Inside the window → minimum kept; capacity untouched.
         s_in = self._state(potencia=235.0, gen_min=218.68)
-        _step4c_apply_gtmin_availability(s_in, windows, stage_date=date(2024, 9, 1))
+        _step4c_apply_gtmin_availability(
+            s_in, windows, stage_date=date(2024, 9, 1), nullified=True
+        )
         assert s_in.gen_min == 218.68
         assert s_in.potencia == 235.0
         # Outside the window → minimum dropped to 0; capacity untouched.
         s_out = self._state(potencia=235.0, gen_min=201.5)
-        _step4c_apply_gtmin_availability(s_out, windows, stage_date=date(2024, 11, 1))
+        _step4c_apply_gtmin_availability(
+            s_out, windows, stage_date=date(2024, 11, 1), nullified=True
+        )
         assert s_out.gen_min == 0.0
         assert s_out.potencia == 235.0
+        # Registry not nulled (an EX plant) → its minimum survives outside.
+        s_ex = self._state(potencia=235.0, gen_min=201.5)
+        _step4c_apply_gtmin_availability(
+            s_ex, windows, stage_date=date(2024, 11, 1), nullified=False
+        )
+        assert s_ex.gen_min == 201.5
 
     def test_step4c_drops_gtmin_for_expt_plant_without_gtmin(self) -> None:
         """EXPT plant with no GTMIN entry has no minimum (TERM.DAT GTMIN ignored).
@@ -759,14 +836,14 @@ class TestThermalBoundStageSteps:
         # No GTMIN window + flagged → minimum dropped, capacity untouched.
         s = self._state(potencia=75.0, gen_min=62.99)
         _step4c_apply_gtmin_availability(
-            s, None, stage_date=date(2024, 9, 1), expt_without_gtmin=True
+            s, None, stage_date=date(2024, 9, 1), nullified=True
         )
         assert s.gen_min == 0.0
         assert s.potencia == 75.0
         # No GTMIN window + NOT flagged (purely TERM.DAT plant) → untouched.
         s_keep = self._state(potencia=75.0, gen_min=62.99)
         _step4c_apply_gtmin_availability(
-            s_keep, None, stage_date=date(2024, 9, 1), expt_without_gtmin=False
+            s_keep, None, stage_date=date(2024, 9, 1), nullified=False
         )
         assert s_keep.gen_min == 62.99
 

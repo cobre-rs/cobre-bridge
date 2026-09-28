@@ -1184,9 +1184,10 @@ summary = "Limites de geração por (térmica, estágio) seguindo a ordem do sin
     { file = "expt", item = "expansoes · tipo = GTMIN · modificacao" },
     { file = "expt", item = "expansoes · data_inicio" },
     { file = "expt", item = "expansoes · data_fim" },
+    { file = "conft", item = "usinas · usina_existente" },
     { file = "dger", item = "num_anos_manutencao_utes" },
   ]
-  how = "`geracao_minima` de `term.dat` em dois regimes: nos anos de manutenção, a coluna do mês calendário do estágio (campos 7 a 18); a partir do fim deles, o valor único dos demais anos (campo 19, que a inewave entrega como `mes = 13`), quando a usina o declara. Em cima disso entram as janelas GTMIN de `expt.dat`; fora delas (e para usina em `expt.dat` sem GTMIN) vale 0, como o NEWAVE. No pós-estudo congela na configuração do último estágio de estudo (ou do estágio final, para usina que só entra no pós-estudo)."
+  how = "`geracao_minima` de `term.dat` em dois regimes: nos anos de manutenção, a coluna do mês calendário do estágio (campos 7 a 18); a partir do fim deles, o valor único dos demais anos (campo 19, que a inewave entrega como `mes = 13`), quando a usina o declara. Em cima disso entram as janelas GTMIN de `expt.dat`. Para usina `EE` ou `NE` em `conft.dat`, o NEWAVE descarta o mínimo de cadastro (FAQ 33 do manual): fora das janelas, e para usina sem nenhuma janela, vale 0. Usina `EX` conserva o valor do `term.dat` onde o `expt.dat` não declara nada. No pós-estudo congela na configuração do último estágio de estudo (ou do estágio final, para usina que só entra no pós-estudo)."
 
   [[output.field]]
   path = "max_generation_mw"
@@ -1202,9 +1203,10 @@ summary = "Limites de geração por (térmica, estágio) seguindo a ordem do sin
     { file = "manutt", item = "manutencoes · data_inicio" },
     { file = "manutt", item = "manutencoes · duracao" },
     { file = "manutt", item = "manutencoes · potencia" },
+    { file = "conft", item = "usinas · usina_existente" },
     { file = "dger", item = "num_anos_manutencao_utes" },
   ]
-  how = "`potencia` × FCMAX/100 × (100 − IP)/100 × (100 − TEIF)/100, com POTEF/FCMAX/TEIFT/IPTER de `expt.dat` aplicados por janela; usina fora de toda janela POTEF (ou em `expt.dat` sem POTEF) tem potência 0. IP é zerado e a redução de `manutt.dat` (potência × fração do mês em manutenção) subtraída só nos estágios antes do fim de `num_anos_manutencao_utes`; se GTMIN excede a capacidade, o máximo é elevado ao mínimo com aviso."
+  how = "`potencia` × FCMAX/100 × (100 − IP)/100 × (100 − TEIF)/100, com POTEF/FCMAX/TEIFT/IPTER de `expt.dat` aplicados por janela. Para usina `EE` ou `NE` em `conft.dat`, o NEWAVE descarta a potência de cadastro (FAQ 33 do manual): fora de toda janela POTEF, e sem nenhuma janela, a potência é 0; usina `EX` conserva a do `term.dat`. IP é zerado e a redução de `manutt.dat` (potência × fração do mês em manutenção) subtraída só nos estágios antes do fim de `num_anos_manutencao_utes`; se GTMIN excede a capacidade, o máximo é elevado ao mínimo com aviso."
 
   [[output.field]]
   path = "cost_per_mwh"

@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Whether a thermal plant's registry values are discarded now follows
+  `conft.dat`, not `expt.dat`.** The model discards `term.dat`'s effective power
+  and minimum generation for a plant whose status is `EE` or `NE`, leaving
+  `expt.dat` as its whole timeline; the converter instead keyed that on the
+  plant merely appearing in `expt.dat`. An `EX` plant with an `expt.dat` window
+  was therefore held out of service outside it rather than falling back to its
+  registry capacity, and an `EE`/`NE` plant absent from `expt.dat` kept a
+  capacity the model gives it none of. Both criteria coincide on a deck that
+  configures every thermal through `expt.dat`, which is why no deck at hand
+  changes.
+
 - **A thermal plant's minimum generation stops repeating the maintenance
   years' monthly profile over the whole horizon.** `term.dat` carries twelve
   minimum-generation columns that describe the maintenance years and a
