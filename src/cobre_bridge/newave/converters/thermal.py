@@ -358,8 +358,9 @@ def _step4b_apply_potef_availability(
     """Step 4b: for a plant whose registry capacity CONFT nulls, the POTEF
     schedule defines the *only* periods it is available.
 
-    The manual (FAQ 33) discards the TERM.DAT effective power and minimum for a
-    plant with status ``EE`` or ``NE``, leaving EXPT.DAT as the whole timeline:
+    A plant whose CONFT.DAT status is ``EE`` or ``NE`` has its TERM.DAT
+    effective power and minimum discarded, leaving EXPT.DAT as the whole
+    timeline:
     outside every POTEF window — tested against the caller-supplied
     ``stage_date``, the actual stage date in-study and the frozen
     last-study-stage date in the post-study tail — the plant is out of service,
@@ -663,8 +664,8 @@ def convert_thermal_bounds(
                 "gen_min": float(row["geracao_minima"]),
             }
 
-    # TERM.DAT's twelve monthly minimum-generation columns (manual fields 7-18)
-    # describe the maintenance years only; field 19 — which ``inewave`` exposes
+    # TERM.DAT's twelve monthly minimum-generation columns describe the
+    # maintenance years only; its thirteenth value — which ``inewave`` exposes
     # as ``mes == 13`` — is the minimum for the years after them.
     gen_min_other_years: dict[int, float] = {}
     if term_df is not None:
@@ -739,8 +740,8 @@ def convert_thermal_bounds(
     codes_with_potef: set[int] = set()
     # ── EXPT-authoritative-timeline principle ─────────────────────────────
     # For a plant CONFT.DAT marks ``EE`` or ``NE``, the source model discards the
-    # TERM.DAT effective power and minimum generation (manual FAQ 33) and drives
-    # the configuration from EXPT.DAT. TERM.DAT then supplies only
+    # TERM.DAT effective power and minimum generation and drives the
+    # configuration from EXPT.DAT. TERM.DAT then supplies only
     # *registry/reference* values; EXPT.DAT declares the operative per-attribute
     # timeline over date windows. Each attribute has a
     # DEFAULT it reverts to OUTSIDE its EXPT windows:
@@ -801,10 +802,9 @@ def convert_thermal_bounds(
                 title=f"Plants without a POTEF entry ({len(codes_without_potef)})",
                 summary=(
                     f"{len(codes_without_potef)} thermal plant(s) are marked "
-                    '"existente/nao existente com expansao" in CONFT.DAT with no '
-                    "POTEF entry in EXPT.DAT; the model discards their registry "
-                    "capacity and declares none, so they are treated as not "
-                    "installed (max generation 0)."
+                    "EE or NE in CONFT.DAT with no POTEF entry in EXPT.DAT; the "
+                    "model discards their registry capacity and declares none, "
+                    "so they are treated as not installed (max generation 0)."
                 ),
                 table=DiagnosticTable(
                     columns=["Plant", "Code"],
