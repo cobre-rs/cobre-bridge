@@ -481,6 +481,67 @@ class TestConvertThermalBoundsClastModificacoes:
 # ---------------------------------------------------------------------------
 
 
+class TestThermalBoundsMaintenanceYearMinimum:
+    def test_minimum_switches_to_the_remaining_years_value(self, tmp_path) -> None:
+        """TERM.DAT's monthly minima end with the maintenance years."""
+        import datetime
+
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
+
+        conft, clast, term = _thermal_readers()
+        # Plant 10 carries the "remaining years" column (mes 13); plant 20 does
+        # not, so its monthly profile keeps applying throughout.
+        term.usinas = pd.DataFrame(
+            {
+                "codigo_usina": [10] * 13 + [20] * 12,
+                "nome_usina": ["TERMO_A"] * 13 + ["TERMO_B"] * 12,
+                "potencia_instalada": [100.0] * 13 + [200.0] * 12,
+                "fator_capacidade_maximo": [100.0] * 25,
+                "teif": [0.0] * 25,
+                "indisponibilidade_programada": [0.0] * 25,
+                "mes": list(range(1, 14)) + list(range(1, 13)),
+                "geracao_minima": [11.0, 22.0] + [0.0] * 10 + [77.0] + [33.0] * 12,
+            }
+        )
+        # No EXPT/MANUTT here, so a cost modification is what makes the table be
+        # emitted at all (see convert_thermal_bounds' early return).
+        clast.modificacoes = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "nome_usina": ["TERMO_A"],
+                "data_inicio": [datetime.datetime(2023, 3, 1)],
+                "data_fim": [datetime.datetime(2023, 3, 1)],
+                "custo": [99.0],
+            }
+        )
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2023
+        dger.num_anos_estudo = 2
+        dger.num_anos_pos_estudo = 0
+        dger.num_anos_manutencao_utes = 1
+        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+
+        id_map = NewaveIdMap(
+            subsystem_ids=[1, 2], hydro_codes=[], thermal_codes=[10, 20]
+        )
+        table = convert_thermal_bounds(case, id_map)
+        assert table is not None
+        df = table.to_pandas()
+
+        a = df[df["thermal_id"] == id_map.thermal_id(10)].set_index("stage_id")
+        # 2023 is the single maintenance year: the monthly columns apply.
+        assert a.loc[0, "min_generation_mw"] == pytest.approx(11.0)
+        assert a.loc[1, "min_generation_mw"] == pytest.approx(22.0)
+        # 2024 onwards takes the mes-13 value instead of repeating January.
+        assert a.loc[12, "min_generation_mw"] == pytest.approx(77.0)
+        assert a.loc[13, "min_generation_mw"] == pytest.approx(77.0)
+
+        b = df[df["thermal_id"] == id_map.thermal_id(20)].set_index("stage_id")
+        # No mes-13 column: the monthly profile is all the deck declares.
+        assert b.loc[12, "min_generation_mw"] == pytest.approx(33.0)
+
+
 class TestThermalBoundStageSteps:
     """Each of the 6 per-stage steps is now an isolated, testable helper."""
 

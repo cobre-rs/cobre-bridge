@@ -1179,13 +1179,14 @@ summary = "Limites de geração por (térmica, estágio) seguindo a ordem do sin
   [[output.field]]
   path = "min_generation_mw"
   from = [
-    { file = "term", item = "usinas · geracao_minima" },
+    { file = "term", item = "usinas · geracao_minima (mes 1 a 12)" },
+    { file = "term", item = "usinas · geracao_minima (mes = 13)" },
     { file = "expt", item = "expansoes · tipo = GTMIN · modificacao" },
     { file = "expt", item = "expansoes · data_inicio" },
     { file = "expt", item = "expansoes · data_fim" },
     { file = "dger", item = "num_anos_manutencao_utes" },
   ]
-  how = "`geracao_minima` de `term.dat` no mês calendário do estágio, substituída pelas janelas GTMIN de `expt.dat`; fora delas (e para usina em `expt.dat` sem GTMIN) vale 0, como o NEWAVE. No pós-estudo congela na configuração do último estágio de estudo (ou do estágio final, para usina que só entra no pós-estudo)."
+  how = "`geracao_minima` de `term.dat` em dois regimes: nos anos de manutenção, a coluna do mês calendário do estágio (campos 7 a 18); a partir do fim deles, o valor único dos demais anos (campo 19, que a inewave entrega como `mes = 13`), quando a usina o declara. Em cima disso entram as janelas GTMIN de `expt.dat`; fora delas (e para usina em `expt.dat` sem GTMIN) vale 0, como o NEWAVE. No pós-estudo congela na configuração do último estágio de estudo (ou do estágio final, para usina que só entra no pós-estudo)."
 
   [[output.field]]
   path = "max_generation_mw"

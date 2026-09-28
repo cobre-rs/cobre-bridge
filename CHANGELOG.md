@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A thermal plant's minimum generation stops repeating the maintenance
+  years' monthly profile over the whole horizon.** `term.dat` carries twelve
+  minimum-generation columns that describe the maintenance years and a
+  thirteenth for the years after them; the converter dropped the thirteenth and
+  applied the monthly profile to every year, so a plant declaring no minimum in
+  January carried none in January of any year. The per-stage minimum now
+  follows both regimes: the calendar-month column inside the maintenance years,
+  the remaining-years value from their end onward, for a plant that declares
+  one. `expt.dat`'s GTMIN windows keep overriding it, so this surfaces only for
+  a plant the deck configures outside `expt.dat`.
+
 - **A thermal plant's published generation limits are read at the month the
   study starts.** `term.dat` indexes its twelve minimum-generation columns by
   *calendar* month, and the converter always read the January row. For a study

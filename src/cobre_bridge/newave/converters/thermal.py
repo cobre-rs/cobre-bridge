@@ -670,6 +670,17 @@ def convert_thermal_bounds(
                 "gen_min": float(row["geracao_minima"]),
             }
 
+    # TERM.DAT's twelve monthly minimum-generation columns (manual fields 7-18)
+    # describe the maintenance years only; field 19 — which ``inewave`` exposes
+    # as ``mes == 13`` — is the minimum for the years after them.
+    gen_min_other_years: dict[int, float] = {}
+    if term_df is not None:
+        for _, row in term_df.iterrows():
+            if int(row["mes"]) == 13:
+                gen_min_other_years[int(row["codigo_usina"])] = float(
+                    row["geracao_minima"]
+                )
+
     base_default: dict[int, BaseRow] = {}
     if term_df is not None:
         for _, row in term_df.iterrows():
@@ -688,20 +699,27 @@ def convert_thermal_bounds(
                     "gen_min": float(row["geracao_minima"]),
                 }
 
-    def _base(code: int, cal_month: int) -> BaseRow:
+    def _base(code: int, cal_month: int, stage_idx: int) -> BaseRow:
         row = base_by_code_month.get((code, cal_month))
-        if row is not None:
-            return dict(row)
-        default = base_default.get(code)
-        if default is not None:
-            return dict(default)
-        return {
-            "potencia": 0.0,
-            "fcmax": 100.0,
-            "teif": 0.0,
-            "ip": 0.0,
-            "gen_min": 0.0,
-        }
+        if row is None:
+            row = base_default.get(code)
+        base = (
+            dict(row)
+            if row is not None
+            else {
+                "potencia": 0.0,
+                "fcmax": 100.0,
+                "teif": 0.0,
+                "ip": 0.0,
+                "gen_min": 0.0,
+            }
+        )
+        # Past the maintenance years the monthly column no longer applies: the
+        # minimum is TERM.DAT's single "remaining years" value. Only the minimum
+        # switches — the other four fields repeat across a plant's month rows.
+        if stage_idx >= maint_end_stage and code in gen_min_other_years:
+            base["gen_min"] = gen_min_other_years[code]
+        return base
 
     # ------------------------------------------------------------------
     # 2. Load EXPT overrides.
@@ -882,7 +900,7 @@ def convert_thermal_bounds(
             ref_date = stage_dates[freeze_idx] if is_post_study else stage_date
 
             cal_month = ref_date.month
-            state = _StageInputs(**_base(newave_code, cal_month))
+            state = _StageInputs(**_base(newave_code, cal_month, stage_idx))
 
             _step1_zero_ip_before_maintenance(state, stage_idx, maint_end_stage)
             _step2_null_potencia_for_potef(
