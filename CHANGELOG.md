@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A thermal plant's published generation limits are read at the month the
+  study starts.** `term.dat` indexes its twelve minimum-generation columns by
+  *calendar* month, and the converter always read the January row. For a study
+  that starts in January the two coincide; for any other start month the pair
+  written to `system/thermals.json` came from a calendar date the case never
+  reaches, where the declared minimum is commonly zero. On an August-starting
+  deck this understated the published minimum of 32 of 158 plants — Angra 1 at
+  0 MW instead of 639.99, and GNA II at 0 instead of 1672.60. The maximum is
+  unaffected, since installed power and the capacity factor repeat across the
+  month rows. The per-stage bounds in `constraints/thermal_bounds.parquet` were
+  always read at each stage's own month and do not change.
+
 - **Electric constraints no longer outlive the period they are declared for.**
   Every limit in `re.dat` and in `restricao-eletrica.csv` is registered with a
   start and an end period, and both were being ignored at the end: a `re.dat`

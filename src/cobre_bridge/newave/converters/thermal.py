@@ -54,8 +54,12 @@ def thermal_generation_bounds(case: NewaveCase) -> dict[int, tuple[float, float]
     * ``max_mw = potencia_instalada * fator_capacidade_maximo / 100`` and
     * ``min_mw = geracao_minima``,
 
-    both from ``term.dat`` month 1 (falling back to any month for plants absent
-    from month 1, with ``min_mw = 0``). Plants absent from ``term.dat`` map to
+    both read at the calendar month the study starts in.  ``term.dat``'s twelve
+    minimum-generation columns are indexed by *calendar* month, not by position
+    in the horizon, so a study starting in August finds its first stage in the
+    ``mes == 8`` row; the months before it belong to calendar dates the case
+    never reaches.  A plant with no row for that month falls back to any row
+    with ``min_mw = 0``, and a plant absent from ``term.dat`` maps to
     ``(0.0, 0.0)``.
     """
     term_df = case.term.usinas
@@ -63,14 +67,16 @@ def thermal_generation_bounds(case: NewaveCase) -> dict[int, tuple[float, float]
     if term_df is None:
         return bounds
 
-    month1 = term_df[term_df["mes"] == 1]
-    for _, row in month1.iterrows():
+    first_month = int(case.dger.mes_inicio_estudo)
+    first_rows = term_df[term_df["mes"] == first_month]
+    for _, row in first_rows.iterrows():
         code = int(row["codigo_usina"])
         cap = float(row["potencia_instalada"])
         max_factor = float(row["fator_capacidade_maximo"])
         bounds[code] = (float(row["geracao_minima"]), cap * max_factor / 100.0)
 
-    # Plants present in term.dat but not in month 1: use any row, min_mw = 0.
+    # Plants present in term.dat but without a row for that month: any row,
+    # min_mw = 0.
     for _, row in term_df.iterrows():
         code = int(row["codigo_usina"])
         if code not in bounds:

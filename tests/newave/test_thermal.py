@@ -765,12 +765,18 @@ class TestThermalBoundStageSteps:
 class TestThermalGenerationBounds:
     """``thermal_generation_bounds`` returns the static ``[min_mw, max_mw]``."""
 
-    def test_bounds_from_term_month1(self, tmp_path) -> None:
+    @staticmethod
+    def _dger(mes_inicio: int) -> MagicMock:
+        dger = MagicMock()
+        dger.mes_inicio_estudo = mes_inicio
+        return dger
+
+    def test_bounds_read_at_the_study_start_month(self, tmp_path) -> None:
         from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
 
         term = MagicMock()
         term.usinas = _make_term_df()
-        case = make_case(tmp_path, term=term)
+        case = make_case(tmp_path, term=term, dger=self._dger(1))
 
         bounds = thermal_generation_bounds(case)
         # max_mw = potencia_instalada * fator_capacidade_maximo / 100;
@@ -778,6 +784,29 @@ class TestThermalGenerationBounds:
         assert bounds[10] == pytest.approx((10.0, 90.0))
         assert bounds[20] == pytest.approx((0.0, 200.0))
         assert bounds[30] == pytest.approx((5.0, 40.0))
+
+    def test_august_start_reads_the_august_row(self, tmp_path) -> None:
+        # term.dat indexes its minimum-generation columns by calendar month, so
+        # a study starting in August must read ``mes == 8``. January belongs to a
+        # date the case never reaches, and its minimum is often 0 there.
+        from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
+
+        term = MagicMock()
+        term.usinas = pd.DataFrame(
+            {
+                "codigo_usina": [10] * 12,
+                "nome_usina": ["TERMO_A"] * 12,
+                "potencia_instalada": [100.0] * 12,
+                "fator_capacidade_maximo": [90.0] * 12,
+                "teif": [0.0] * 12,
+                "indisponibilidade_programada": [0.0] * 12,
+                "mes": list(range(1, 13)),
+                "geracao_minima": [0.0] * 7 + [64.0] + [50.0] * 4,
+            }
+        )
+        case = make_case(tmp_path, term=term, dger=self._dger(8))
+
+        assert thermal_generation_bounds(case)[10] == pytest.approx((64.0, 90.0))
 
     def test_no_usinas_returns_empty(self, tmp_path) -> None:
         from cobre_bridge.newave.converters.thermal import thermal_generation_bounds

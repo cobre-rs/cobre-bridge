@@ -911,16 +911,20 @@ summary = "Uma entrada por usina térmica de `conft.dat`, ordenada pelo id Cobre
 
   [[output.field]]
   path = "thermals[].generation.min_mw"
-  from = [ { file = "term", item = "usinas · geracao_minima (mes = 1)" } ]
-  how = "Geração mínima do mês 1 de `term.dat`; usina só presente em outros meses recebe 0, ausente recebe 0."
+  from = [
+    { file = "term", item = "usinas · geracao_minima (mes = mes_inicio_estudo)" },
+    { file = "dger", item = "mes_inicio_estudo" },
+  ]
+  how = "Geração mínima da linha de `term.dat` cujo `mes` é o mês civil de início do estudo — as doze colunas são indexadas por mês civil, não por posição no horizonte, então um estudo que começa em agosto lê `mes = 8`; usina sem linha nesse mês recebe 0, ausente de `term.dat` recebe 0."
 
   [[output.field]]
   path = "thermals[].generation.max_mw"
   from = [
-    { file = "term", item = "usinas · potencia_instalada (mes = 1)" },
-    { file = "term", item = "usinas · fator_capacidade_maximo (mes = 1)" },
+    { file = "term", item = "usinas · potencia_instalada (mes = mes_inicio_estudo)" },
+    { file = "term", item = "usinas · fator_capacidade_maximo (mes = mes_inicio_estudo)" },
+    { file = "dger", item = "mes_inicio_estudo" },
   ]
-  how = "`potencia_instalada` × `fator_capacidade_maximo` / 100 do mês 1 (qualquer mês quando o 1 falta); 0 para usina ausente de `term.dat`. Sem TEIF nem IP: esses entram só nos limites por estágio."
+  how = "`potencia_instalada` × `fator_capacidade_maximo` / 100 da linha do mês civil de início do estudo (qualquer linha quando esse mês falta); 0 para usina ausente de `term.dat`. Sem TEIF nem IP: esses entram só nos limites por estágio."
 
   [[output.field]]
   path = "thermals[].anticipated_config"
