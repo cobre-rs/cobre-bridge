@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `constraints/hydro_bounds.parquet`. The three were previously skipped with a
   debug log, and a deck that redeclared them converted with the registry values
   and no warning. Reading them needs the `inewave` release that models the
-  records; the dependency floor moves with it.
+  records, which the dependency floor now requires.
 
 ### Fixed
 
