@@ -112,6 +112,19 @@ The removed `read_eco_fpha` check asserted only that a particular deck had no
 such file; the absent-file contract is covered synthetically and needs no
 excerpt.
 
+## Whole-deck checks run outside the suite
+
+These ran by hand on decks that are not in the repository. They are recorded
+here, with the deck identifier and the capture date, instead of being kept as
+tests that would skip everywhere else. Each entry names the unit coverage it
+complements, so what the whole-deck run adds is explicit.
+
+### A NEWAVE deck whose `vazoes.dat` is 600 postos wide (`newave-600-postos`)
+
+| Checked | Verified |
+| --- | --- |
+| `convert newave` over the whole deck, against the published `inewave` rather than a local checkout | The width derived from the file size reaches the reader and the history stays aligned: every converted plant carries the deck's full monthly series, whole calendar years with no gap, and the command exits 0. Captured 2026-09-29: 168 plants, 1116 months each, 1931-2023. The derivation itself (both widths, the ambiguous size, the rejected sizes) and the reader's 600-column layout are unit-covered in `tests/newave/test_temporal_stochastic_conversion.py`; the whole-deck run is what exercises the posto-to-plant mapping through `confhd.dat` at that width. |
+
 ## Restoring the whole-deck checks
 
 The checks in the tables above genuinely need a whole deck, a solved cobre

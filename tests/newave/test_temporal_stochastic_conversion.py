@@ -2,12 +2,15 @@
 
 All inewave I/O is mocked via ``unittest.mock.patch`` so no real the source model files
 are required.  Synthetic DataFrames exercise the core logic of each converter.
+``TestReadVazoes`` is the one exception: the width derivation has to prove the
+reader lays a 600-posto matrix out as declared, which a mock cannot show.
 """
 
 from __future__ import annotations
 
 import calendar
 import datetime
+import struct
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1975,3 +1978,22 @@ class TestReadVazoes:
         path = _write_vazoes(tmp_path, 600 * 12)
         _read_vazoes(path)
         mock_vazoes_cls.read.assert_called_once_with(path, postos=600)
+
+    def test_six_hundred_posto_matrix_is_laid_out_at_full_width(self, tmp_path) -> None:
+        """Through the real reader, which the two mocked cases above cannot reach.
+
+        A width the reader ignores, rejects or lays out transposed passes both of
+        them and still mis-assigns every posto's series. The 320-posto default is
+        covered end to end by the mini deck.
+        """
+        path = tmp_path / "vazoes.dat"
+        # Sequential values, unlike ``_write_vazoes``' zeros: the row-major
+        # assertions below are what pin the width.
+        path.write_bytes(b"".join(struct.pack("<i", v) for v in range(600 * 12)))
+
+        df = _read_vazoes(path).vazoes
+
+        assert df.shape == (12, 600)
+        assert df.iloc[0, 0] == 0
+        assert df.iloc[0, -1] == 599
+        assert df.iloc[1, 0] == 600
