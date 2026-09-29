@@ -528,6 +528,23 @@ def _thermal_readers():
     return conft, clast, term
 
 
+def _make_thermal_dger(mes_inicio: int = 1) -> MagicMock:
+    """The ``dger`` fields the thermal converters read: horizon plus the GNL switch.
+
+    Two study years from January 2023, no post-study tail, and one maintenance
+    year — so stages 0-11 are inside it and 12-23 after it, which is what the
+    IP and minimum-generation regimes switch on.
+    """
+    dger = MagicMock()
+    dger.ano_inicio_estudo = 2023
+    dger.mes_inicio_estudo = mes_inicio
+    dger.num_anos_estudo = 2
+    dger.num_anos_pos_estudo = 0
+    dger.num_anos_manutencao_utes = 1
+    dger.despacho_antecipado_gnl = 0
+    return dger
+
+
 def _make_sistema_mock() -> MagicMock:
     """Build the ``Sistema`` reader mock shared by the network tests."""
     mock_sistema = MagicMock()

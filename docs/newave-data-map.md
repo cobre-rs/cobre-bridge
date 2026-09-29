@@ -45,7 +45,9 @@ Uma matriz por diretório do caso. As linhas são os arquivos do deck (no DECOMP
 | `patamar.dat` |  |  | ● |  |  |  |  |  |  |
 | `hidr.dat` |  |  |  | ● | ● | ● | ● | ● |  |
 | `modif.dat` (opcional) |  |  |  | ● | ● | ● | ● |  |  |
+| `expt.dat` (opcional) |  |  | ● |  |  |  |  |  |  |
 | `exph.dat` (opcional) |  |  |  | ● | ● | ● | ● | ● |  |
+| `manutt.dat` (opcional) |  |  | ● |  |  |  |  |  |  |
 | `volref_saz.dat` (opcional) |  |  |  | ● | ● |  | ● |  |  |
 | `adterm.dat` (opcional) |  |  | ● |  |  |  |  |  |  |
 | `polinjus.csv` (opcional) |  |  |  |  |  |  |  | ● |  |
@@ -212,7 +214,7 @@ Armazenamento inicial por usina ativa; opcionalmente o volume morto já enchido 
 | `past_anticipated_commitments[].thermal_id` | `dger.dat` › `despacho_antecipado_gnl`, `adterm.dat` › `despachos · codigo_usina` *(derivado; condicional: somente quando `despacho_antecipado_gnl` ≠ 0 e `adterm.dat` tem despachos)* | Id Cobre da térmica de `conft.dat`; códigos ausentes do mapa são ignorados com aviso. |
 | `past_anticipated_commitments[].start_date` | `adterm.dat` › `despachos · lag`, `dger.dat` › `mes_inicio_estudo`, `dger.dat` › `ano_inicio_estudo` *(derivado; condicional: somente quando `despacho_antecipado_gnl` ≠ 0 e `adterm.dat` tem despachos)* | Primeiro dia do mês de entrega: `lag` = 1 é o primeiro mês do estudo, `lag` = 2 o segundo, e assim por diante; uma janela por `lag` de 1 ao máximo da usina. |
 | `past_anticipated_commitments[].end_date` | `adterm.dat` › `despachos · lag`, `dger.dat` › `mes_inicio_estudo`, `dger.dat` › `ano_inicio_estudo` *(derivado; condicional: somente quando `despacho_antecipado_gnl` ≠ 0 e `adterm.dat` tem despachos)* | Primeiro dia do mês seguinte à entrega (fim exclusivo). |
-| `past_anticipated_commitments[].value_mw` | `adterm.dat` › `despachos · valor`, `adterm.dat` › `despachos · patamar`, `patamar.dat` › `duracao_mensal_patamares · valor`, `term.dat` › `usinas · potencia_instalada`, `term.dat` › `usinas · fator_capacidade_maximo`, `term.dat` › `usinas · geracao_minima` *(condicional: somente quando `despacho_antecipado_gnl` ≠ 0 e `adterm.dat` tem despachos)* | Média dos MW por patamar ponderada pela fração de duração do patamar no mês de entrega (preserva o MWh comprometido). Limitado aos limites estáticos [`min_mw`, `max_mw`] da térmica, com aviso. |
+| `past_anticipated_commitments[].value_mw` | `adterm.dat` › `despachos · valor`, `adterm.dat` › `despachos · patamar`, `patamar.dat` › `duracao_mensal_patamares · valor`, `term.dat` › `usinas · potencia_instalada`, `term.dat` › `usinas · fator_capacidade_maximo`, `term.dat` › `usinas · geracao_minima` *(condicional: somente quando `despacho_antecipado_gnl` ≠ 0 e `adterm.dat` tem despachos)* | Média dos MW por patamar ponderada pela fração de duração do patamar no mês de entrega (preserva o MWh comprometido). Limitado ao par estático [`min_mw`, `max_mw`] da térmica — o envelope dos limites por estágio —, com aviso. |
 | `recent_observations[].hydro_id` | `vazpast.dat` › `tendencia · codigo_usina`, `confhd.dat` › `usinas · posto` *(derivado; condicional: somente quando `vazpast.dat` está presente com dados de tendência)* | `codigo_usina` de `vazpast.dat` é o posto; mapeado ao id Cobre pela coluna `posto` de `confhd.dat`. Ordenado pelo id. |
 | `recent_observations[].start_date` | `vazpast.dat` › `tendencia · mes`, `dger.dat` › `mes_inicio_estudo`, `dger.dat` › `ano_inicio_estudo` *(derivado; condicional: somente quando `vazpast.dat` está presente com dados de tendência)* | Primeiro dia de cada um dos 12 meses calendário anteriores ao início do estudo, do mais antigo ao mais recente; mês sem valor na tendência é omitido. |
 | `recent_observations[].end_date` | `vazpast.dat` › `tendencia · mes`, `dger.dat` › `mes_inicio_estudo`, `dger.dat` › `ano_inicio_estudo` *(derivado; condicional: somente quando `vazpast.dat` está presente com dados de tendência)* | Primeiro dia do mês seguinte (fim exclusivo). |
@@ -255,11 +257,11 @@ Uma linha por par não ordenado de submercados presente em `limites_intercambio`
 
 ### `system/thermals.json`
 
-**Lê:** `conft.dat`, `clast.dat`, `term.dat`, `dger.dat`, `adterm.dat` (opcional), `patamar.dat`, `sistema.dat`, `ree.dat`  
+**Lê:** `conft.dat`, `clast.dat`, `term.dat`, `expt.dat` (opcional), `manutt.dat` (opcional), `dger.dat`, `adterm.dat` (opcional), `patamar.dat`, `sistema.dat`, `ree.dat`  
 **Quando:** sempre.  
 **Esquema:** [thermals.schema.json](https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/thermals.schema.json) · **Código:** `src/cobre_bridge/newave/converters/thermal.py`
 
-Uma entrada por usina térmica de `conft.dat`, ordenada pelo id Cobre, com limites estáticos de `term.dat` e custo do primeiro ano de `clast.dat`.
+Uma entrada por usina térmica de `conft.dat`, ordenada pelo id Cobre, com o par estático de geração — o envelope dos limites por estágio — e o custo do primeiro ano de `clast.dat`.
 
 | Campo | Origem | Transformação |
 | --- | --- | --- |
@@ -268,8 +270,8 @@ Uma entrada por usina térmica de `conft.dat`, ordenada pelo id Cobre, com limit
 | `thermals[].operational_start_date` | `dger.dat` › `ano_inicial_historico` *(derivado)* | 1º de janeiro de `ano_inicial_historico`: o NEWAVE não tem data de entrada por térmica. |
 | `thermals[].bus_id` | `conft.dat` › `usinas · submercado` *(derivado)* | Id Cobre do submercado da usina. |
 | `thermals[].cost_per_mwh` | `clast.dat` › `usinas · valor (indice_ano_estudo = 1)` | Custo do primeiro ano de estudo; 0.0 para usina sem linha em `clast.dat`. Anos com custo diferente e as modificações datadas vão para `constraints/thermal_bounds.parquet`. |
-| `thermals[].generation.min_mw` | `term.dat` › `usinas · geracao_minima (mes = mes_inicio_estudo)`, `dger.dat` › `mes_inicio_estudo` | Geração mínima da linha de `term.dat` cujo `mes` é o mês civil de início do estudo — as doze colunas são indexadas por mês civil, não por posição no horizonte, então um estudo que começa em agosto lê `mes = 8`; usina sem linha nesse mês recebe 0, ausente de `term.dat` recebe 0. |
-| `thermals[].generation.max_mw` | `term.dat` › `usinas · potencia_instalada (mes = mes_inicio_estudo)`, `term.dat` › `usinas · fator_capacidade_maximo (mes = mes_inicio_estudo)`, `dger.dat` › `mes_inicio_estudo` | `potencia_instalada` × `fator_capacidade_maximo` / 100 da linha do mês civil de início do estudo (qualquer linha quando esse mês falta); 0 para usina ausente de `term.dat`. Sem TEIF nem IP: esses entram só nos limites por estágio. |
+| `thermals[].generation.min_mw` | `term.dat` › `usinas · geracao_minima (mes 1 a 12)`, `term.dat` › `usinas · geracao_minima (mes = 13)`, `expt.dat` › `expansoes · tipo = GTMIN · modificacao`, `expt.dat` › `expansoes · data_inicio`, `expt.dat` › `expansoes · data_fim`, `conft.dat` › `usinas · usina_existente`, `dger.dat` › `num_anos_manutencao_utes` | Menor mínimo do horizonte: o envelope de `min_generation_mw` de `constraints/thermal_bounds.parquet`, que detalha as fontes. Ler só a linha de cadastro do `term.dat` publicaria um par que contradiz a tabela por estágio, porque as janelas de `expt.dat`, as manutenções e a regra de IP dos anos de manutenção entram apenas por ela. Usina que nenhuma fonte de capacidade descreve recebe 0. |
+| `thermals[].generation.max_mw` | `term.dat` › `usinas · potencia_instalada`, `term.dat` › `usinas · fator_capacidade_maximo`, `term.dat` › `usinas · teif`, `term.dat` › `usinas · indisponibilidade_programada`, `expt.dat` › `expansoes · tipo = POTEF · modificacao`, `expt.dat` › `expansoes · tipo = FCMAX · modificacao`, `expt.dat` › `expansoes · tipo = TEIFT · modificacao`, `expt.dat` › `expansoes · tipo = IPTER · modificacao`, `manutt.dat` › `manutencoes · potencia`, `conft.dat` › `usinas · usina_existente`, `dger.dat` › `num_anos_manutencao_utes` | Maior máximo do horizonte: o envelope de `max_generation_mw` de `constraints/thermal_bounds.parquet`, que detalha as fontes — logo já com TEIF, IP e manutenção. Quando a geração mínima de cadastro supera o produto `potencia_instalada` × `fator_capacidade_maximo` / 100, o teto por estágio é elevado ao mínimo inflexível e o envelope herda essa ordenação, em vez de publicar o intervalo vazio que o Cobre rejeita (`max_mw` tem de ser ≥ `min_mw`). Usina que nenhuma fonte de capacidade descreve recebe 0. |
 | `thermals[].anticipated_config` | `dger.dat` › `despacho_antecipado_gnl`, `adterm.dat` › `despachos · codigo_usina` | Nulo quando `despacho_antecipado_gnl` = 0, quando `adterm.dat` está ausente ou quando a usina não tem despacho nele; caso contrário o objeto `anticipated_config.lead_stages`. |
 | `thermals[].anticipated_config.lead_stages` | `adterm.dat` › `despachos · lag` *(condicional: somente para térmicas com despacho em `adterm.dat` quando `despacho_antecipado_gnl` ≠ 0)* | Maior `lag` da usina, limitado ao número total de estágios (aviso quando truncado). |
 | `thermals[].entry_stage_id` | — *(sempre nulo)* | Sempre nulo: térmicas do NEWAVE não entram dentro do horizonte; a expansão de `expt.dat` é expressa por limites por estágio. |
@@ -736,8 +738,8 @@ O bridge lê cerca de trinta campos (horizonte, aberturas, forwards, iterações
 - `mes_inicio_estudo` → `system/lines.json` › `lines[].capacity.reverse_mw`
 - `ano_inicio_estudo` → `system/lines.json` › `lines[].capacity.reverse_mw`
 - `ano_inicial_historico` → `system/thermals.json` › `thermals[].operational_start_date`
-- `mes_inicio_estudo` → `system/thermals.json` › `thermals[].generation.min_mw`
-- `mes_inicio_estudo` → `system/thermals.json` › `thermals[].generation.max_mw`
+- `num_anos_manutencao_utes` → `system/thermals.json` › `thermals[].generation.min_mw`
+- `num_anos_manutencao_utes` → `system/thermals.json` › `thermals[].generation.max_mw`
 - `despacho_antecipado_gnl` → `system/thermals.json` › `thermals[].anticipated_config`
 - `ano_inicial_historico` → `system/non_controllable_sources.json` › `non_controllable_sources[].operational_start_date`
 - `curva_aversao` → `constraints/generic_parameters.json` › `scalar_parameters[].kind`
@@ -892,6 +894,8 @@ Entram no caso as usinas em operação e não fictícias — `usina_existente` i
 - `usinas · codigo_usina` → `system/thermals.json` › `thermals[].id`
 - `usinas · nome_usina` → `system/thermals.json` › `thermals[].name`
 - `usinas · submercado` → `system/thermals.json` › `thermals[].bus_id`
+- `usinas · usina_existente` → `system/thermals.json` › `thermals[].generation.min_mw`
+- `usinas · usina_existente` → `system/thermals.json` › `thermals[].generation.max_mw`
 - `usinas · codigo_usina` → `constraints/thermal_bounds.parquet` › `thermal_id`
 - `usinas · usina_existente` → `constraints/thermal_bounds.parquet` › `min_generation_mw`
 - `usinas · usina_existente` → `constraints/thermal_bounds.parquet` › `max_generation_mw`
@@ -987,9 +991,12 @@ Todas as colunas de `usinas` são lidas (potência, FCMAX, TEIF, IP, GTMIN por m
 - `usinas · potencia_instalada` → `initial_conditions.json` › `past_anticipated_commitments[].value_mw`
 - `usinas · fator_capacidade_maximo` → `initial_conditions.json` › `past_anticipated_commitments[].value_mw`
 - `usinas · geracao_minima` → `initial_conditions.json` › `past_anticipated_commitments[].value_mw`
-- `usinas · geracao_minima (mes = mes_inicio_estudo)` → `system/thermals.json` › `thermals[].generation.min_mw`
-- `usinas · potencia_instalada (mes = mes_inicio_estudo)` → `system/thermals.json` › `thermals[].generation.max_mw`
-- `usinas · fator_capacidade_maximo (mes = mes_inicio_estudo)` → `system/thermals.json` › `thermals[].generation.max_mw`
+- `usinas · geracao_minima (mes 1 a 12)` → `system/thermals.json` › `thermals[].generation.min_mw`
+- `usinas · geracao_minima (mes = 13)` → `system/thermals.json` › `thermals[].generation.min_mw`
+- `usinas · potencia_instalada` → `system/thermals.json` › `thermals[].generation.max_mw`
+- `usinas · fator_capacidade_maximo` → `system/thermals.json` › `thermals[].generation.max_mw`
+- `usinas · teif` → `system/thermals.json` › `thermals[].generation.max_mw`
+- `usinas · indisponibilidade_programada` → `system/thermals.json` › `thermals[].generation.max_mw`
 - `usinas · geracao_minima (mes 1 a 12)` → `constraints/thermal_bounds.parquet` › `min_generation_mw`
 - `usinas · geracao_minima (mes = 13)` → `constraints/thermal_bounds.parquet` › `min_generation_mw`
 - `usinas · potencia_instalada` → `constraints/thermal_bounds.parquet` › `max_generation_mw`
@@ -1393,10 +1400,17 @@ A curva de segurança vira uma restrição genérica `VminOP_<REE>` por REE com 
 
 ### `expt.dat`
 
-**Estado:** convertido. **Lido por:** `constraints/thermal_bounds.parquet`.
+**Estado:** convertido. **Lido por:** `constraints/thermal_bounds.parquet`, `system/thermals.json`.
 
 Os cinco tipos (`POTEF`, `FCMAX`, `TEIFT`, `GTMIN`, `IPTER`) são aplicados em `constraints/thermal_bounds.parquet` na ordem do arquivo; usinas presentes sem `POTEF` são tratadas como não instaladas (`thermal-expt-without-potef`). A coluna `nome_usina` não é lida.
 
+- `expansoes · tipo = GTMIN · modificacao` → `system/thermals.json` › `thermals[].generation.min_mw`
+- `expansoes · data_inicio` → `system/thermals.json` › `thermals[].generation.min_mw`
+- `expansoes · data_fim` → `system/thermals.json` › `thermals[].generation.min_mw`
+- `expansoes · tipo = POTEF · modificacao` → `system/thermals.json` › `thermals[].generation.max_mw`
+- `expansoes · tipo = FCMAX · modificacao` → `system/thermals.json` › `thermals[].generation.max_mw`
+- `expansoes · tipo = TEIFT · modificacao` → `system/thermals.json` › `thermals[].generation.max_mw`
+- `expansoes · tipo = IPTER · modificacao` → `system/thermals.json` › `thermals[].generation.max_mw`
 - `expansoes · tipo = GTMIN · modificacao` → `constraints/thermal_bounds.parquet` › `min_generation_mw`
 - `expansoes · data_inicio` → `constraints/thermal_bounds.parquet` › `min_generation_mw`
 - `expansoes · data_fim` → `constraints/thermal_bounds.parquet` › `min_generation_mw`
@@ -1440,10 +1454,11 @@ Só o registro de enchimento (`data_inicio_enchimento`, `duracao_enchimento`, `v
 
 ### `manutt.dat`
 
-**Estado:** convertido em parte. **Lido por:** `constraints/thermal_bounds.parquet`.
+**Estado:** convertido em parte. **Lido por:** `constraints/thermal_bounds.parquet`, `system/thermals.json`.
 
 Cada linha reduz a potência da usina proporcionalmente aos dias de sobreposição com o mês, somando unidades em manutenção simultânea; só até `num_anos_manutencao_utes`.
 
+- `manutencoes · potencia` → `system/thermals.json` › `thermals[].generation.max_mw`
 - `manutencoes · data_inicio` → `constraints/thermal_bounds.parquet` › `max_generation_mw`
 - `manutencoes · duracao` → `constraints/thermal_bounds.parquet` › `max_generation_mw`
 - `manutencoes · potencia` → `constraints/thermal_bounds.parquet` › `max_generation_mw`

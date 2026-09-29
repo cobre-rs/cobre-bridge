@@ -693,7 +693,7 @@ summary = "Armazenamento inicial por usina ativa; opcionalmente o volume morto j
     { file = "term", item = "usinas · geracao_minima" },
   ]
   when = "somente quando `despacho_antecipado_gnl` ≠ 0 e `adterm.dat` tem despachos"
-  how = "Média dos MW por patamar ponderada pela fração de duração do patamar no mês de entrega (preserva o MWh comprometido). Limitado aos limites estáticos [`min_mw`, `max_mw`] da térmica, com aviso."
+  how = "Média dos MW por patamar ponderada pela fração de duração do patamar no mês de entrega (preserva o MWh comprometido). Limitado ao par estático [`min_mw`, `max_mw`] da térmica — o envelope dos limites por estágio —, com aviso."
 
   [[output.field]]
   path = "recent_observations[].hydro_id"
@@ -873,13 +873,15 @@ reads = [
   { file = "conft" },
   { file = "clast" },
   { file = "term" },
+  { file = "expt" },
+  { file = "manutt" },
   { file = "dger" },
   { file = "adterm" },
   { file = "patamar" },
   { file = "sistema" },
   { file = "ree" },
 ]
-summary = "Uma entrada por usina térmica de `conft.dat`, ordenada pelo id Cobre, com limites estáticos de `term.dat` e custo do primeiro ano de `clast.dat`."
+summary = "Uma entrada por usina térmica de `conft.dat`, ordenada pelo id Cobre, com o par estático de geração — o envelope dos limites por estágio — e o custo do primeiro ano de `clast.dat`."
 
   [[output.field]]
   path = "thermals[].id"
@@ -912,19 +914,32 @@ summary = "Uma entrada por usina térmica de `conft.dat`, ordenada pelo id Cobre
   [[output.field]]
   path = "thermals[].generation.min_mw"
   from = [
-    { file = "term", item = "usinas · geracao_minima (mes = mes_inicio_estudo)" },
-    { file = "dger", item = "mes_inicio_estudo" },
+    { file = "term", item = "usinas · geracao_minima (mes 1 a 12)" },
+    { file = "term", item = "usinas · geracao_minima (mes = 13)" },
+    { file = "expt", item = "expansoes · tipo = GTMIN · modificacao" },
+    { file = "expt", item = "expansoes · data_inicio" },
+    { file = "expt", item = "expansoes · data_fim" },
+    { file = "conft", item = "usinas · usina_existente" },
+    { file = "dger", item = "num_anos_manutencao_utes" },
   ]
-  how = "Geração mínima da linha de `term.dat` cujo `mes` é o mês civil de início do estudo — as doze colunas são indexadas por mês civil, não por posição no horizonte, então um estudo que começa em agosto lê `mes = 8`; usina sem linha nesse mês recebe 0, ausente de `term.dat` recebe 0."
+  how = "Menor mínimo do horizonte: o envelope de `min_generation_mw` de `constraints/thermal_bounds.parquet`, que detalha as fontes. Ler só a linha de cadastro do `term.dat` publicaria um par que contradiz a tabela por estágio, porque as janelas de `expt.dat`, as manutenções e a regra de IP dos anos de manutenção entram apenas por ela. Usina que nenhuma fonte de capacidade descreve recebe 0."
 
   [[output.field]]
   path = "thermals[].generation.max_mw"
   from = [
-    { file = "term", item = "usinas · potencia_instalada (mes = mes_inicio_estudo)" },
-    { file = "term", item = "usinas · fator_capacidade_maximo (mes = mes_inicio_estudo)" },
-    { file = "dger", item = "mes_inicio_estudo" },
+    { file = "term", item = "usinas · potencia_instalada" },
+    { file = "term", item = "usinas · fator_capacidade_maximo" },
+    { file = "term", item = "usinas · teif" },
+    { file = "term", item = "usinas · indisponibilidade_programada" },
+    { file = "expt", item = "expansoes · tipo = POTEF · modificacao" },
+    { file = "expt", item = "expansoes · tipo = FCMAX · modificacao" },
+    { file = "expt", item = "expansoes · tipo = TEIFT · modificacao" },
+    { file = "expt", item = "expansoes · tipo = IPTER · modificacao" },
+    { file = "manutt", item = "manutencoes · potencia" },
+    { file = "conft", item = "usinas · usina_existente" },
+    { file = "dger", item = "num_anos_manutencao_utes" },
   ]
-  how = "`potencia_instalada` × `fator_capacidade_maximo` / 100 da linha do mês civil de início do estudo (qualquer linha quando esse mês falta); 0 para usina ausente de `term.dat`. Sem TEIF nem IP: esses entram só nos limites por estágio."
+  how = "Maior máximo do horizonte: o envelope de `max_generation_mw` de `constraints/thermal_bounds.parquet`, que detalha as fontes — logo já com TEIF, IP e manutenção. Quando a geração mínima de cadastro supera o produto `potencia_instalada` × `fator_capacidade_maximo` / 100, o teto por estágio é elevado ao mínimo inflexível e o envelope herda essa ordenação, em vez de publicar o intervalo vazio que o Cobre rejeita (`max_mw` tem de ser ≥ `min_mw`). Usina que nenhuma fonte de capacidade descreve recebe 0."
 
   [[output.field]]
   path = "thermals[].anticipated_config"

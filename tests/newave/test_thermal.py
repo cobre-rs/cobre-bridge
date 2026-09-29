@@ -9,7 +9,10 @@ import pytest
 
 from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
-from tests.newave.conftest import _make_term_df, _thermal_readers
+from tests.newave.conftest import (
+    _make_thermal_dger,
+    _thermal_readers,
+)
 
 # ---------------------------------------------------------------------------
 # Thermal conversion
@@ -26,9 +29,9 @@ class TestConvertThermals:
 
     def test_returns_thermals_key(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
@@ -36,9 +39,9 @@ class TestConvertThermals:
 
     def test_thermal_count(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
@@ -46,9 +49,9 @@ class TestConvertThermals:
 
     def test_thermal_ids_are_zero_based_sorted(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
@@ -58,9 +61,9 @@ class TestConvertThermals:
 
     def test_cost_per_mwh_scalar(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
@@ -74,9 +77,9 @@ class TestConvertThermals:
 
     def test_bus_id_assignment(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
@@ -89,15 +92,15 @@ class TestConvertThermals:
 
     def test_capacity_uses_factor(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
-        # TERMO_A: potencia=100, factor=0.9 -> max_mw=90.
+        # TERMO_A: potencia=100, factor=0.9, teif=0.05% -> max_mw=89.955.
         termo_a = next(t for t in result["thermals"] if t["name"] == "TERMO_A")
-        assert termo_a["generation"]["max_mw"] == pytest.approx(90.0)
+        assert termo_a["generation"]["max_mw"] == pytest.approx(89.955)
 
 
 class TestConvertThermalBoundsClastModificacoes:
@@ -903,54 +906,79 @@ class TestThermalBoundStageSteps:
 class TestThermalGenerationBounds:
     """``thermal_generation_bounds`` returns the static ``[min_mw, max_mw]``."""
 
-    @staticmethod
-    def _dger(mes_inicio: int) -> MagicMock:
-        dger = MagicMock()
-        dger.mes_inicio_estudo = mes_inicio
-        return dger
+    def test_pair_envelopes_both_minimum_and_availability_regimes(
+        self, tmp_path
+    ) -> None:
+        """The pair spans the whole horizon, not the registry row alone.
 
-    def test_bounds_read_at_the_study_start_month(self, tmp_path) -> None:
+        IP is zeroed inside the maintenance year and applies after it, and the
+        minimum switches from the monthly columns to the ``mes``-13 value there,
+        so the widest maximum and the smallest minimum come from different
+        stages.
+        """
         from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
 
-        term = MagicMock()
-        term.usinas = _make_term_df()
-        case = make_case(tmp_path, term=term, dger=self._dger(1))
-
-        bounds = thermal_generation_bounds(case)
-        # max_mw = potencia_instalada * fator_capacidade_maximo / 100;
-        # min_mw = geracao_minima.
-        assert bounds[10] == pytest.approx((10.0, 90.0))
-        assert bounds[20] == pytest.approx((0.0, 200.0))
-        assert bounds[30] == pytest.approx((5.0, 40.0))
-
-    def test_august_start_reads_the_august_row(self, tmp_path) -> None:
-        # term.dat indexes its minimum-generation columns by calendar month, so
-        # a study starting in August must read ``mes == 8``. January belongs to a
-        # date the case never reaches, and its minimum is often 0 there.
-        from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
-
-        term = MagicMock()
+        conft, clast, term = _thermal_readers()
         term.usinas = pd.DataFrame(
             {
-                "codigo_usina": [10] * 12,
-                "nome_usina": ["TERMO_A"] * 12,
-                "potencia_instalada": [100.0] * 12,
-                "fator_capacidade_maximo": [90.0] * 12,
-                "teif": [0.0] * 12,
-                "indisponibilidade_programada": [0.0] * 12,
-                "mes": list(range(1, 13)),
-                "geracao_minima": [0.0] * 7 + [64.0] + [50.0] * 4,
+                "codigo_usina": [10] * 13,
+                "nome_usina": ["TERMO_A"] * 13,
+                "potencia_instalada": [100.0] * 13,
+                "fator_capacidade_maximo": [90.0] * 13,
+                "teif": [0.0] * 13,
+                "indisponibilidade_programada": [10.0] * 13,
+                "mes": list(range(1, 14)),
+                "geracao_minima": [50.0] * 12 + [20.0],
             }
         )
-        case = make_case(tmp_path, term=term, dger=self._dger(8))
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
 
-        assert thermal_generation_bounds(case)[10] == pytest.approx((64.0, 90.0))
+        # max: 100 * 90% with IP zeroed (stages 0-11), against 100 * 90% * 90%
+        # after the maintenance year. min: the mes-13 value, below every month.
+        assert thermal_generation_bounds(case)[10] == pytest.approx((20.0, 90.0))
+
+    def test_registry_minimum_above_capacity_keeps_the_pair_ordered(
+        self, tmp_path
+    ) -> None:
+        """A registry GTMIN above the registry capacity product cannot invert the pair.
+
+        ``term.dat`` may declare a minimum the ``potencia x fcmax`` product
+        cannot reach; the per-stage evaluation lifts the ceiling to the
+        inflexible minimum, and the envelope inherits that ordering instead of
+        publishing an empty interval no committed value could satisfy.
+        """
+        from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
+
+        conft, clast, term = _thermal_readers()
+        term.usinas = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "nome_usina": ["TERMO_A"],
+                "potencia_instalada": [161.0],
+                "fator_capacidade_maximo": [93.0],
+                "teif": [0.0],
+                "indisponibilidade_programada": [0.0],
+                "mes": [1],
+                "geracao_minima": [161.38],
+            }
+        )
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
+
+        low, high = thermal_generation_bounds(case)[10]
+        assert low <= high
+        assert (low, high) == pytest.approx((161.38, 161.38))
 
     def test_no_usinas_returns_empty(self, tmp_path) -> None:
         from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
 
-        term = MagicMock()
+        conft, clast, term = _thermal_readers()
         term.usinas = None
-        case = make_case(tmp_path, term=term)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
 
         assert thermal_generation_bounds(case) == {}

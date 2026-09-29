@@ -44,17 +44,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one. `expt.dat`'s GTMIN windows keep overriding it, so this surfaces only for
   a plant the deck configures outside `expt.dat`.
 
-- **A thermal plant's published generation limits are read at the month the
-  study starts.** `term.dat` indexes its twelve minimum-generation columns by
-  *calendar* month, and the converter always read the January row. For a study
-  that starts in January the two coincide; for any other start month the pair
-  written to `system/thermals.json` came from a calendar date the case never
-  reaches, where the declared minimum is commonly zero. On an August-starting
-  deck this understated the published minimum of 32 of 158 plants — Angra 1 at
-  0 MW instead of 639.99, and GNA II at 0 instead of 1672.60. The maximum is
-  unaffected, since installed power and the capacity factor repeat across the
-  month rows. The per-stage bounds in `constraints/thermal_bounds.parquet` were
-  always read at each stage's own month and do not change.
+- **A thermal plant's published generation limits are the envelope of its
+  per-stage limits, not its `term.dat` registry row.** The pair in
+  `system/thermals.json` is now the smallest minimum and the largest maximum the
+  plant reaches over the horizon, so it can never be tighter than the stage
+  cobre enforces it at. Read from the registry row alone it ignored `expt.dat`'s
+  windows, `manutt.dat`'s outages and the maintenance-year availability rule,
+  which reach the plant only through those stages: a deck whose registry minimum
+  exceeds its registry `potencia_instalada` × `fator_capacidade_maximo` product
+  published an inverted interval — 161.38 MW minimum against a 149.73 MW maximum
+  — that cobre rejects outright, so the converted case would not load. The same
+  read also took the minimum from the January column whatever month the study
+  started in, understating the published minimum of a plant whose must-run is
+  seasonal. Two consequences of the wider pair: the maximum now carries TEIF, IP
+  and maintenance, and a plant that is out of service or without a declared
+  minimum in any stage of the horizon publishes a minimum of 0 (24 of 107
+  plants on the deck at hand, against 75 before). Thermal cost and the per-stage
+  bounds in `constraints/thermal_bounds.parquet` are unchanged.
 
 - **Electric constraints no longer outlive the period they are declared for.**
   Every limit in `re.dat` and in `restricao-eletrica.csv` is registered with a
