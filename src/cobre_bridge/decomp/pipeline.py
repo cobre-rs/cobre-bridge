@@ -1175,6 +1175,39 @@ def _resolve_bounds(artifacts: DecompCaseArtifacts, writer: CaseWriter) -> None:
         )
         for hydro in hydros_dict["hydros"]
     }
+    # Run-of-river plants from a cascade headwater down to (but excluding) the
+    # first reservoir have their RQ/UH minimum-outflow default released, to
+    # avoid infeasibility on a zero-inflow stage/scenario. Only the RQ/UH
+    # default floor (convert_hydro_bounds) is released; an explicit RHQ QDEF
+    # window (single_term_bound_contributions) is a user-declared constraint
+    # and is kept.
+    unregulated_codes = cadastro_conv.unregulated_runofriver_codes(
+        effective, id_map.hydro_codes
+    )
+    for code in sorted(unregulated_codes):
+        if effective.downstream_plant_varies(code):
+            _LOG.warning(
+                "plant %d's downstream link (AC NUMJUS) varies across stages; "
+                "the run-of-river minimum-outflow relaxation uses the stage-0 "
+                "effective link for the whole horizon",
+                code,
+            )
+    if unregulated_codes:
+        dx.emit(
+            dx.Diagnostic(
+                code="decomp-runofriver-outflow-relaxed",
+                severity=dx.Severity.INFO,
+                category="Minimum outflow",
+                title="Run-of-river minimum-outflow restriction released",
+                summary=(
+                    f"{len(unregulated_codes)} run-of-river plant(s) "
+                    f"({sorted(unregulated_codes)}) sit above the first cascade "
+                    "reservoir; their RQ/UH minimum-defluence default is "
+                    "released. An explicit RHQ QDEF window, if any, is kept."
+                ),
+            ),
+            logger=_LOG,
+        )
     # Every per-entity bound — the legacy RQ/UH minimum-outflow, the per-stage
     # storage envelope, the CT thermal generation bounds, and the RE/RHQ/RHV
     # single-term special-constraint bounds — is collected as
@@ -1184,7 +1217,9 @@ def _resolve_bounds(artifacts: DecompCaseArtifacts, writer: CaseWriter) -> None:
     # block) cell correctly intersects instead of producing the
     # two-rows-same-column parquet cobre rejects.
     contribs = [
-        *bounds_conv.convert_hydro_bounds(case, id_map, effective=effective),
+        *bounds_conv.convert_hydro_bounds(
+            case, id_map, effective=effective, unregulated_codes=unregulated_codes
+        ),
         *bounds_conv.convert_storage_bounds(case, id_map, effective=effective),
         *bounds_conv.convert_volume_espera_bounds(case, id_map, effective=effective),
         *thermal_generation_contribs,

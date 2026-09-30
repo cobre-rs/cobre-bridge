@@ -28,7 +28,15 @@ Semantics pinned against the reference manual (§4.5.11):
   reading of the reference manual instead of the correct "both apply,
   tighter wins" one; that skip was correctly retired once the accumulator's
   ``intersect`` could express the co-apply composition directly instead of
-  this module approximating it via a skip.
+  this module approximating it via a skip;
+- the ``RQ``/``UH`` minimum-outflow default is released for a run-of-river
+  plant from the cascade headwater down to — but excluding — the first
+  reservoir, to avoid infeasibility on a stage/scenario with zero inflow.
+  Such a plant
+  (:func:`~cobre_bridge.decomp.converters.cadastro.unregulated_runofriver_codes`)
+  contributes no ``outflow`` floor here (neither RQ nor UH). An explicit RHQ
+  ``QDEF`` window is a user-declared constraint and is **not** released — it
+  still lowers to its ``outflow`` bound in ``single_term_bounds``.
 
 Both emitters here return :class:`~cobre_bridge.decomp.bounds_accumulator.
 BoundContribution` lists — the accumulator, not this module, resolves
@@ -65,6 +73,7 @@ def convert_hydro_bounds(
     id_map: DecompIdMap,
     *,
     effective: EffectiveCadastro,
+    unregulated_codes: set[int] | None = None,
 ) -> list[BoundContribution]:
     """Minimum-outflow contributions from the ``RQ``/``UH`` defaults.
 
@@ -79,7 +88,14 @@ def convert_hydro_bounds(
     (``single_term_bounds``) via max-of-lowers/min-of-uppers rather than
     either one replacing the other. Any stage whose effective floor is
     non-positive (or ``NaN``) emits no contribution.
+
+    *unregulated_codes* (see
+    :func:`~cobre_bridge.decomp.converters.cadastro.unregulated_runofriver_codes`)
+    is the set of run-of-river plant codes whose minimum-outflow floor is
+    released: a plant in it contributes no ``outflow`` floor here at all, RQ
+    or UH alike.
     """
+    unregulated_codes = unregulated_codes or set()
     calendar = case.calendar
     dadger = case.dadger
     rq = dadger.rq(df=True)
@@ -112,6 +128,10 @@ def convert_hydro_bounds(
 
     contributions: list[BoundContribution] = []
     for code in id_map.hydro_codes:
+        # A run-of-river plant above the first cascade reservoir has its
+        # minimum-outflow restriction released — no RQ/UH floor.
+        if code in unregulated_codes:
+            continue
         # ``per_stage[stage.index]`` is the effective minimum-outflow floor
         # (m3/s) for this plant at that stage — a UH-declared constant, or
         # the RQ per-stage percentage times the effective historical minimum.

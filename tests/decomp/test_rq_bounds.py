@@ -29,7 +29,10 @@ import pandas as pd
 
 from cobre_bridge.decomp.case import DecompCase
 from cobre_bridge.decomp.converters.bounds import convert_hydro_bounds
-from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
+from cobre_bridge.decomp.converters.cadastro import (
+    EffectiveCadastro,
+    unregulated_runofriver_codes,
+)
 from cobre_bridge.decomp.id_map import DecompIdMap
 from cobre_bridge.decomp.temporal import OperativeStage, build_operative_calendar
 from tests.conftest import make_decomp_case
@@ -278,3 +281,124 @@ class TestSyntheticStageIndexedAndUhDeclared:
         )
         plant1_id = self._ID_MAP.hydro_id(1)
         assert [c for c in contributions if c.entity_id == plant1_id] == []
+
+
+class TestRunOfRiverOutflowRelaxation:
+    """The run-of-river release: run-of-river plants from a cascade headwater
+    down to (but excluding) the first reservoir lose their minimum-outflow
+    floor.
+
+    Cascade fixture (``codigo_usina_jusante``; ``0`` is the sink):
+
+        10 (D) -> 20 (D) -> 30 (M reservoir) -> 40 (D) -> 0
+        50 (D) -> 0                          (headwater D, no reservoir below)
+        60 (M reservoir) -> 0
+
+    Relaxed = {10, 20, 50}: 10/20 are the ``D`` run above reservoir 30; 50 is
+    a ``D`` headwater draining straight to the sink (no reservoir upstream).
+    Not relaxed: 30/60 (reservoirs, not ``D``) and 40 (``D`` but below the
+    reservoir 30).
+    """
+
+    _CODES = (10, 20, 30, 40, 50, 60)
+    _ID_MAP = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=_CODES)
+
+    def _hidr(self) -> pd.DataFrame:
+        # tipo_regulacao per plant; reservoirs (M) carry usable storage, the
+        # D plants a collapsed range. codigo_usina_jusante wires the cascade.
+        rows = {
+            10: ("D", 0.0, 0.0, 20),
+            20: ("D", 0.0, 0.0, 30),
+            30: ("M", 0.0, 100.0, 40),
+            40: ("D", 0.0, 0.0, 0),
+            50: ("D", 0.0, 0.0, 0),
+            60: ("M", 0.0, 100.0, 0),
+        }
+        df = pd.DataFrame(
+            {
+                code: {
+                    "tipo_regulacao": reg,
+                    "volume_minimo": vmin,
+                    "volume_maximo": vmax,
+                    "codigo_usina_jusante": jus,
+                    "vazao_minima_historica": 40.0,
+                }
+                for code, (reg, vmin, vmax, jus) in rows.items()
+            }
+        ).T
+        df.index.name = "codigo_usina"
+        return df
+
+    def _effective(self, n_stages: int = 1) -> EffectiveCadastro:
+        return EffectiveCadastro(base=self._hidr(), n_stages=n_stages, stage_varying={})
+
+    def _calendar(self) -> list[OperativeStage]:
+        # Four 168 h weekly stages (Jul) + one aggregate stage closing the
+        # second operative month (Aug 1 -> Sep 1, 744 h).
+        weekly = [[168.0]] * 4
+        aggregate = [[744.0]]
+        return build_operative_calendar(date(2026, 7, 4), weekly + aggregate)
+
+    def _dadger(self) -> _StubDadger:
+        # Every plant is RQ-derived via REE 1 at 100% (so a non-relaxed plant
+        # would get a 40 m3/s floor); no UH-declared minimum.
+        uh = pd.DataFrame(
+            [
+                {
+                    "codigo_usina": code,
+                    "codigo_ree": 1,
+                    "volume_inicial": 50.0,
+                    "vazao_defluente_minima": None,
+                }
+                for code in self._CODES
+            ]
+        )
+        rq = pd.DataFrame([{"codigo_ree": 1, "vazao_1": 100.0}])
+        return _StubDadger(uh=uh, rq=rq)
+
+    def test_relaxed_set_is_headwater_d_run_above_first_reservoir(self) -> None:
+        unregulated = unregulated_runofriver_codes(
+            self._effective(), self._ID_MAP.hydro_codes
+        )
+        assert unregulated == {10, 20, 50}
+
+    def test_relaxed_plants_get_no_rq_floor(self) -> None:
+        calendar = self._calendar()
+        unregulated = unregulated_runofriver_codes(
+            self._effective(len(calendar)), self._ID_MAP.hydro_codes
+        )
+        case = make_decomp_case(
+            Path("unused"), dadger=self._dadger(), calendar=calendar
+        )
+        contributions = convert_hydro_bounds(
+            case,
+            self._ID_MAP,
+            effective=self._effective(len(calendar)),
+            unregulated_codes=unregulated,
+        )
+
+        floored_codes = {
+            code
+            for code in self._CODES
+            if any(c.entity_id == self._ID_MAP.hydro_id(code) for c in contributions)
+        }
+        # 40 (D below the reservoir) keeps its floor; 30/60 (reservoirs) keep
+        # theirs; 10/20/50 (relaxed) get none.
+        assert floored_codes == {30, 40, 60}
+
+    def test_without_relaxed_set_all_plants_get_the_floor(self) -> None:
+        # The default (no relaxed_codes) is unchanged behaviour: every
+        # RQ-derived plant floors at 100% x 40 = 40 m3/s.
+        calendar = self._calendar()
+        case = make_decomp_case(
+            Path("unused"), dadger=self._dadger(), calendar=calendar
+        )
+        contributions = convert_hydro_bounds(
+            case, self._ID_MAP, effective=self._effective(len(calendar))
+        )
+        floored_codes = {
+            code
+            for code in self._CODES
+            if any(c.entity_id == self._ID_MAP.hydro_id(code) for c in contributions)
+        }
+        assert floored_codes == set(self._CODES)
