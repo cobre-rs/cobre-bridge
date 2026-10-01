@@ -1619,22 +1619,30 @@ def test_load_line_block_bounds_no_file_is_empty_not_raising(_v2_case: Path) -> 
 
 
 def test_load_inflow_history_present(_v2_case: Path) -> None:
-    """inflow_history is a non-empty DataFrame when inflow_history.parquet exists."""
+    """The converter's windowed inflow_history loads, and the stochastic tab
+    reads it without falling back to its error placeholder."""
+    from datetime import date
+
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     from cobre_bridge.dashboard.data import DashboardData
+    from cobre_bridge.dashboard.tabs import stochastic
+    from cobre_bridge.newave.converters.inflow_windows import (
+        INFLOW_HISTORY_WINDOW_SCHEMA,
+    )
 
     scenarios_dir = _v2_case / "scenarios"
     scenarios_dir.mkdir(parents=True, exist_ok=True)
     pq.write_table(
         pa.table(
             {
-                "hydro_id": pa.array([0, 0, 1, 1], type=pa.int32()),
-                "year": pa.array([2000, 2001, 2000, 2001], type=pa.int32()),
-                "month": pa.array([1, 1, 1, 1], type=pa.int32()),
-                "inflow_m3s": pa.array([100.0, 110.0, 50.0, 55.0], type=pa.float64()),
-            }
+                "hydro_id": [0, 0, 1, 1],
+                "start_date": [date(2000, 1, 1), date(2001, 1, 1)] * 2,
+                "end_date": [date(2000, 2, 1), date(2001, 2, 1)] * 2,
+                "value_m3s": [100.0, 110.0, 50.0, 55.0],
+            },
+            schema=INFLOW_HISTORY_WINDOW_SCHEMA,
         ),
         scenarios_dir / "inflow_history.parquet",
     )
@@ -1642,7 +1650,7 @@ def test_load_inflow_history_present(_v2_case: Path) -> None:
     data = DashboardData.load(_v2_case)
 
     assert not data.inflow_history.empty
-    assert "hydro_id" in data.inflow_history.columns
+    assert not stochastic._compute_historical_stats(data).empty
 
 
 def test_load_inflow_history_absent(_v2_case: Path) -> None:

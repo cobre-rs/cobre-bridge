@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DECOMP weekly-regulating (`S`) plants count as reservoirs** for that
   release and in `RHE` stored-energy constraints, which also evaluate them
   with the volume-integrated productivity.
+- **The dashboard's Stochastic Model tab renders again.** It still read the
+  historical inflows by a single `date` column, which the windowed
+  `scenarios/inflow_history.parquet` replaced, so the tab showed an error
+  placeholder; it now reads each window's `start_date`. A case with no fitted
+  AR model shows a note instead of an empty order chart.
 - **A plant with zero rated turbined flow or rated power stays on constant
   productivity** on both tracks, instead of being emitted as FPHA and making
   cobre's fit abort the run; such plants are listed in an informational
