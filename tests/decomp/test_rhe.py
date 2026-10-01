@@ -4,7 +4,8 @@ Synthetic ``ConstraintRecord``/``ConstraintTerm``/``StageBounds``/
 ``EffectiveCadastro``/``DecompIdMap``/``OperativeStage`` only — no deck, no
 ``example/`` read, no ``import cobre``. One test per acceptance criterion:
 absolute (``tipo_limite=1``) round-trip, percentage (``tipo_limite=2``) RHS,
-two-reservoir cascade override, run-of-river exclusion, no-storage
+two-reservoir cascade override, run-of-river exclusion, weekly-regulating
+(``"S"``) reservoir participation with the integrated ρ, no-storage
 skip+WARNING (under ``diagnostics.collect()``), weekly-vs-monthly
 energy-factor scaling, and the negative-CM sign path.
 """
@@ -75,8 +76,8 @@ def _hydro_row(
     A degenerate (flat) cota polynomial by default (``a0`` only, ``a1..a4 ==
     0``), no tailrace, no hydraulic loss — the plant's productivity then
     reduces to ``produtibilidade_especifica * a0`` for either the
-    integrated (``"M"``) or point (``"D"``/``"S"``) branch of
-    ``stored_energy_productivity``, since the head is constant everywhere.
+    integrated (``"M"``/``"S"``) or point (``"D"``) productivity branch,
+    since the head is constant everywhere.
     """
     row: dict[str, object] = {
         "tipo_regulacao": tipo_regulacao,
@@ -316,6 +317,47 @@ def test_emit_rhe_generics_run_of_river_excluded() -> None:
     assert constraint["expression"] == "@rho_acum_h0 * hydro_storage(0)"
     assert "hydro_storage(1)" not in constraint["expression"]
     assert 1 not in result.rho_acum_overrides
+
+
+# ---------------------------------------------------------------------------
+# Weekly-regulating ("S") plant is a reservoir: participates, integrated rho
+# ---------------------------------------------------------------------------
+
+
+def test_emit_rhe_generics_weekly_regulating_reservoir_uses_integrated_rho() -> None:
+    id_map = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=(5,))
+    row = _hydro_row(tipo_regulacao="S", volume_referencia=200.0)
+    # A linear cota polynomial separates the integrated mean head over
+    # [0, 1000] (100 + 0.01 * 500 = 105 m) from the point head at
+    # volume_referencia (100 + 0.01 * 200 = 102 m).
+    row["a1_volume_cota"] = 0.01
+    effective = EffectiveCadastro(
+        base=_hidr_frame({5: row}), n_stages=1, stage_varying={}
+    )
+    record = _he_record(
+        constraint_id=105,
+        ree_code=1,
+        coefficient=1.0,
+        bounds={0: StageBounds(lower=(50.0,), upper=(None,))},
+        tipo_limite=1,
+        valor_penalidade=250.0,
+    )
+    calendar = [_stage(0, 730.0)]
+
+    result = emit_rhe_generics(
+        _case(calendar),
+        id_map,
+        census=_census(record),
+        effective=effective,
+        hydro_to_ree={5: 1},
+    )
+
+    assert result.result is not None
+    assert result.result.constraints[0]["expression"] == (
+        "@rho_acum_h0 * hydro_storage(0)"
+    )
+    expected_rho = 0.01 * 105.0 / (3600.0 * 730.0 / 1e6)
+    assert result.rho_acum_overrides[0][0] == pytest.approx(expected_rho)
 
 
 # ---------------------------------------------------------------------------

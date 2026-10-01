@@ -19,6 +19,9 @@ from cobre_bridge.decomp.converters.cadastro.effective import (
     effective_storage_range as effective_storage_range,
 )
 from cobre_bridge.decomp.converters.cadastro.effective import (
+    is_reservoir as is_reservoir,
+)
+from cobre_bridge.decomp.converters.cadastro.effective import (
     storage_envelope as storage_envelope,
 )
 from cobre_bridge.decomp.converters.cadastro.effective import (

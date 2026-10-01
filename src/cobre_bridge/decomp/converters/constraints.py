@@ -41,8 +41,9 @@ plumbing).
 
 ``HE`` (RHE stored-energy) constraints are emitted by
 ``emit_rhe_generics``: unlike the three families above, it
-owns its own model-agnostic productivity reconstruction (the shared
-``productivity.stored_energy_productivity`` primitive, driven over the
+owns its own productivity reconstruction (the shared
+``productivity.integrated_productivity``/``compute_productivity``
+primitives, branched on the DECOMP reservoir predicate and driven over the
 operated-cascade walk this module imports as
 :func:`_downstream_operated`) rather than reading a bounds axis off the
 register directly — the RHS is a
@@ -62,9 +63,15 @@ from cobre_bridge.core.generic_constraint_builder import (
     GenericConstraintResult,
     is_bounded,
 )
-from cobre_bridge.core.productivity import stored_energy_productivity
+from cobre_bridge.core.productivity import (
+    compute_productivity,
+    integrated_productivity,
+)
 from cobre_bridge.decomp.constraint_registers import StageBounds
-from cobre_bridge.decomp.converters.cadastro import effective_storage_range
+from cobre_bridge.decomp.converters.cadastro import (
+    effective_storage_range,
+    is_reservoir,
+)
 from cobre_bridge.decomp.converters.hydro import _downstream_operated
 from cobre_bridge.decomp.converters.scalar_parameters import rho_acum_name
 
@@ -783,18 +790,15 @@ class RheResult(NamedTuple):
 
 
 def _is_stored_energy_reservoir(effective: EffectiveCadastro, code: int) -> bool:
-    """True iff the source model counts plant *code*'s storage in a REE's
-    stored energy.
+    """True iff DECOMP counts plant *code*'s storage in a REE's stored energy.
 
-    Mirrors ``converters/constraints.py::_is_stored_energy_reservoir``:
-    strictly monthly-regulating reservoirs (``tipo_regulacao == "M"``) with
-    usable storage (``volume_maximo > volume_minimo``), read off the *base*
-    cadastro. Run-of-river (``"D"``) and special-regime (``"S"``) plants are
-    excluded even when their accumulated cascade productivity is positive.
+    A reservoir under the DECOMP predicate (:func:`~cobre_bridge.decomp.
+    converters.cadastro.is_reservoir`: ``"M"`` or ``"S"``) with usable
+    storage (``volume_maximo > volume_minimo``), read off the *base*
+    cadastro. Run-of-river (``"D"``) plants are excluded even when their
+    accumulated cascade productivity is positive.
     """
-    if code not in effective.base.index:
-        return False
-    if str(effective.base.loc[code, "tipo_regulacao"]).strip() != "M":
+    if not is_reservoir(effective, code):
         return False
     vol_min = float(effective.base.loc[code, "volume_minimo"])
     vol_max = float(effective.base.loc[code, "volume_maximo"])
@@ -833,14 +837,18 @@ def _per_stage_own_integrated_rho(
     EffectiveCadastro.cota_polynomial`)
     and ``canal_fuga_medio``/``volume_minimo``/``volume_maximo``/
     ``volume_referencia`` (:meth:`~cobre_bridge.decomp.converters.cadastro.
-    effective.EffectiveCadastro.value`) — then calls
-    :func:`~cobre_bridge.core.productivity.stored_energy_productivity` on it,
-    which itself branches on ``tipo_regulacao`` (the volume-integrated EARM
-    ρ for ``"M"``, the point ρ at ``volume_referencia`` for ``"D"``/``"S"``).
+    effective.EffectiveCadastro.value`) — then evaluates the volume-integrated
+    EARM ρ (:func:`~cobre_bridge.core.productivity.integrated_productivity`)
+    for a DECOMP reservoir (``"M"`` or ``"S"``) or the point ρ at
+    ``volume_referencia``
+    (:func:`~cobre_bridge.core.productivity.compute_productivity`) for a
+    run-of-river ``"D"`` plant. This deliberately differs from the source
+    model's ``stored_energy_productivity``, which integrates only ``"M"``.
     A plant with no per-stage override on any of these falls through to the
     base row at every stage, so this collapses to a stage-invariant series —
     the common case.
     """
+    reservoir = is_reservoir(effective, code)
     values: list[float] = []
     for stage_index in range(n_stages):
         hreg = effective.base.loc[code].copy()
@@ -855,7 +863,9 @@ def _per_stage_own_integrated_rho(
         hreg["volume_referencia"] = effective.value(
             code, "volume_referencia", stage_index
         )
-        values.append(stored_energy_productivity(hreg))
+        values.append(
+            integrated_productivity(hreg) if reservoir else compute_productivity(hreg)
+        )
     return values
 
 

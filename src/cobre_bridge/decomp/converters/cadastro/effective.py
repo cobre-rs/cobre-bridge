@@ -257,8 +257,7 @@ def is_reservoir(effective: EffectiveCadastro, code: int) -> bool:
 
     DECOMP classifies both monthly-regulating (``"M"``) and weekly-regulating
     (``"S"``) plants as reservoirs; only ``"D"`` is run-of-river. This differs
-    from the source model's monthly predicate (``"M"`` only) and from the RHE
-    stored-energy predicate in ``decomp.converters.constraints``.
+    from the source model's monthly predicate (``"M"`` only).
     """
     if code not in effective.base.index:
         return False
