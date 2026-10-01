@@ -432,7 +432,7 @@ summary = "Volume inicial de cada usina operada (`UH` com `volume_inicial`), em 
   path = "past_anticipated_commitments[].value_mw"
   from = [ { file = "dadgnl", register = "GL", item = "geracao" }, { file = "dadgnl", register = "GL", item = "duracao" }, { file = "dadgnl", register = "TG", item = "inflexibilidade, disponibilidade" } ]
   when = "somente quando `dadgnl` declara despacho GNL comprometido (algum `GL` com `geracao` não nula)"
-  how = "MW comprometido: média de `geracao` ponderada pelas `duracao` de patamar de cada registro `GL`; nas janelas de classe 2, as semanas `GL` que caem no estágio são refundidas por horas sobre o estágio (0 onde não há nenhuma). O valor é limitado à faixa `[min_mw, max_mw]` da usina com aviso."
+  how = "MW comprometido: média de `geracao` ponderada pelas `duracao` de patamar de cada registro `GL`; nas janelas de classe 2, as semanas `GL` que caem no estágio são refundidas por horas sobre o estágio (0 onde não há nenhuma). O valor é limitado, com aviso, à faixa de `TG` do seu estágio (inflexibilidade e disponibilidade ponderadas pelas horas de patamar, herdando o último `TG` declarado); as janelas de classe 4 usam a do último estágio do estudo."
 
 # ---------------------------------------------------------------------------
 # system/buses.json
@@ -583,18 +583,18 @@ summary = "Uma térmica por `codigo_usina` de `CT`, com os valores do estágio 1
 
   [[output.field]]
   path = "thermals[].cost_per_mwh"
-  from = [ { file = "dadger", register = "CT", item = "cvu" }, { file = "dadger", register = "DP", item = "duracao" }, { file = "dadgnl", register = "TG", item = "cvu" }, { file = "dadgnl", register = "GL", item = "duracao" } ]
-  how = "CVU do estágio 1 por patamar (`cvu_k`, em branco lido como 0), ponderado pelas horas de patamar de `DP`; estágios seguintes vão para `constraints/thermal_bounds.parquet`. GNL: `cvu_1..3` de `TG` ponderados pelas `duracao` do `GL` do estágio 1 (média simples sem ele)."
+  from = [ { file = "dadger", register = "CT", item = "cvu" }, { file = "dadger", register = "DP", item = "duracao" }, { file = "dadgnl", register = "TG", item = "cvu" } ]
+  how = "CVU do estágio 1 por patamar (`cvu_k`, em branco lido como 0), ponderado pelas horas de patamar de `DP`; estágios seguintes vão para `constraints/thermal_bounds.parquet`. GNL: o mesmo com o `TG` do estágio 1."
 
   [[output.field]]
   path = "thermals[].generation.min_mw"
   from = [ { file = "dadger", register = "CT", item = "inflexibilidade" }, { file = "dadger", register = "DP", item = "duracao" }, { file = "dadgnl", register = "TG", item = "inflexibilidade" } ]
-  how = "Inflexibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: `inflexibilidade_1..3` de `TG` com a mesma ponderação do custo."
+  how = "Inflexibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: a menor inflexibilidade de `TG` entre os estágios, cada um ponderado pelas suas horas de patamar (um estágio sem registro `TG` herda o último declarado, como em `CT`), para que todo compromisso dentro da capacidade do seu estágio seja aceito."
 
   [[output.field]]
   path = "thermals[].generation.max_mw"
   from = [ { file = "dadger", register = "CT", item = "disponibilidade" }, { file = "dadger", register = "DP", item = "duracao" }, { file = "dadgnl", register = "TG", item = "disponibilidade" } ]
-  how = "Disponibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: `disponibilidade_1..3` de `TG` com a mesma ponderação do custo."
+  how = "Disponibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: a maior disponibilidade de `TG` entre os estágios, com a mesma ponderação e herança da inflexibilidade."
 
   [[output.field]]
   path = "thermals[].anticipated_config.lead_time_hours"
@@ -991,18 +991,18 @@ summary = "Calendário pós-estudo na grade semanal (sábados): preenche as sema
 
   [[output.field]]
   path = "thermal_bounds[].cost_per_mwh"
-  from = [ { file = "dadgnl", register = "TG", item = "cvu" }, { file = "dadgnl", register = "GL", item = "duracao" } ]
-  how = "`cvu_1..3` de `TG` ponderados pelas `duracao` do `GL` do estágio 1 (média simples sem ele); o mesmo valor de `system/thermals.json`."
+  from = [ { file = "dadgnl", register = "TG", item = "cvu" }, { file = "dadger", register = "DP", item = "duracao" } ]
+  how = "`cvu_1..3` do `TG` vigente no último estágio do estudo (o último declarado), ponderados pelas horas de patamar desse estágio."
 
   [[output.field]]
   path = "thermal_bounds[].min_mw"
-  from = [ { file = "dadgnl", register = "TG", item = "inflexibilidade" }, { file = "dadgnl", register = "GL", item = "duracao" } ]
-  how = "`inflexibilidade_1..3` de `TG` com a mesma ponderação."
+  from = [ { file = "dadgnl", register = "TG", item = "inflexibilidade" }, { file = "dadger", register = "DP", item = "duracao" } ]
+  how = "`inflexibilidade_1..3` do mesmo `TG`, com a mesma ponderação."
 
   [[output.field]]
   path = "thermal_bounds[].max_mw"
-  from = [ { file = "dadgnl", register = "TG", item = "disponibilidade" }, { file = "dadgnl", register = "GL", item = "duracao" } ]
-  how = "`disponibilidade_1..3` de `TG` com a mesma ponderação."
+  from = [ { file = "dadgnl", register = "TG", item = "disponibilidade" }, { file = "dadger", register = "DP", item = "duracao" } ]
+  how = "`disponibilidade_1..3` do mesmo `TG`, com a mesma ponderação."
 
 # ---------------------------------------------------------------------------
 # system/energy_contracts.json (conditional)

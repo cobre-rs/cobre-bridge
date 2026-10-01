@@ -49,26 +49,30 @@ if TYPE_CHECKING:
     from cobre_bridge.decomp.temporal import OperativeStage
 
 
-def _ct_dense(
-    dadger: Dadger,
+def dense_stage_records(
+    frame: pd.DataFrame | None,
     calendar: Sequence[OperativeStage],
+    *,
+    register: str,
+    name_column: str,
 ) -> dict[int, dict]:
-    """Read ``CT`` into dense per-stage block values per plant.
+    """Densify a per-stage thermal register (``CT``, ``TG``) over *calendar*.
 
-    Returns ``{code: {"name", "bus_code", "stages": [{cvu, disp, inflex}
-    per block, one entry per stage]}}`` with declared stages forward-filled
-    (stage 1 mandatory).
+    Both registers declare, per ``(plant, estagio)``, the per-block ``cvu``,
+    ``disponibilidade`` and ``inflexibilidade``, sparsely: stage 1 is
+    mandatory and a later stage inherits the last declared record. Returns
+    ``{code: {"name", "bus_code", "stages": [{cvu, disp, inflex} per block,
+    one entry per calendar stage]}}``.
     """
-    ct = dadger.ct(df=True)
-    if ct is None or ct.empty:
+    if frame is None or frame.empty:
         return {}
 
     declared: dict[int, dict] = {}
-    for _, row in ct.iterrows():
+    for _, row in frame.iterrows():
         stage_index = int(row["estagio"]) - 1
         if not 0 <= stage_index < len(calendar):
             raise ValueError(
-                f"CT stage {int(row['estagio'])} outside the calendar "
+                f"{register} stage {int(row['estagio'])} outside the calendar "
                 f"(1..{len(calendar)})"
             )
         n_blocks = len(calendar[stage_index].block_hours)
@@ -85,7 +89,7 @@ def _ct_dense(
         plant = declared.setdefault(
             code,
             {
-                "name": str(row["nome_usina"]).strip(),
+                "name": str(row[name_column]).strip(),
                 "bus_code": int(row["codigo_submercado"]),
                 "declared": {},
             },
@@ -99,8 +103,8 @@ def _ct_dense(
     for code, plant in declared.items():
         if 0 not in plant["declared"]:
             raise ValueError(
-                f"CT plant {code} ({plant['name']}) does not declare stage 1; "
-                "sparse-stage inheritance has no base"
+                f"{register} plant {code} ({plant['name']}) does not declare "
+                "stage 1; sparse-stage inheritance has no base"
             )
         dense: list[dict] = []
         for stage in calendar:
@@ -108,6 +112,15 @@ def _ct_dense(
         plant["stages"] = dense
         del plant["declared"]
     return declared
+
+
+def _ct_dense(
+    dadger: Dadger,
+    calendar: Sequence[OperativeStage],
+) -> dict[int, dict]:
+    return dense_stage_records(
+        dadger.ct(df=True), calendar, register="CT", name_column="nome_usina"
+    )
 
 
 def convert_thermals(

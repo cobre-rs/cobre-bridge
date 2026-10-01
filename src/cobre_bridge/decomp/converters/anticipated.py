@@ -9,16 +9,19 @@ turns ``dadgnl`` into a structured commitment model and does nothing else — no
 declaration or ring placement; it returns the true committed values as data. The
 **emission layer** (:func:`convert_gnl`) turns that model into cobre's
 anticipated-dispatch inputs and owns the bounds policy the reader defers: it
-clamps committed MW into each plant's ``[min_mw, max_mw]`` capability, warning
-(via the module logger) on an out-of-range value, so the converted case never
-pins a delivery cobre would reject.
+clamps each committed MW into the plant's ``tg`` capability at its own delivery
+stage, warning (via the module logger) on an out-of-range value, so the
+converted case never pins a delivery cobre would reject.
 
 ``dadgnl`` has three register families:
 
-* ``tg`` — the GNL thermal registry (one row per plant): ``codigo_usina``,
+* ``tg`` — the GNL thermal registry, per ``(codigo_usina, estagio)``:
   ``codigo_submercado``, ``nome``, and per-block ``cvu`` (fuel cost, $/MWh),
-  ``disponibilidade`` (max MW), ``inflexibilidade`` (min MW). Fixed 3-block shape,
-  so ``tg(df=True)`` is well-formed.
+  ``disponibilidade`` (max MW), ``inflexibilidade`` (min MW). Like ``CT`` it is
+  sparse by stage — stage 1 is mandatory and a later stage inherits the last
+  declared record — and is densified by the same routine
+  (:func:`~cobre_bridge.decomp.converters.thermal.dense_stage_records`). Fixed
+  3-block shape, so ``tg(df=True)`` is well-formed.
 * ``gl`` — the committed weekly dispatch: one register per ``(codigo_usina,
   estagio)`` carrying ``data_inicio`` (the delivery-stage start date, a
   ``ddmmyyyy`` string), a per-block ``duracao`` list, and a per-block ``geracao``
@@ -59,13 +62,18 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
+
+from cobre_bridge.decomp.converters.thermal import dense_stage_records
+from cobre_bridge.decomp.temporal import hours_weighted
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     import pandas as pd
     from idecomp.decomp import Dadgnl
+
+    from cobre_bridge.decomp.temporal import OperativeStage
 
 _LOG = logging.getLogger(__name__)
 
@@ -75,21 +83,13 @@ _HOURS_PER_OPERATIVE_WEEK = 168  # 7 days x 24 h; the study/post-study grid step
 
 @dataclass(frozen=True)
 class GnlThermal:
-    """One GNL plant's registry data (from ``tg``), block-weighted to a scalar.
-
-    ``cost_per_mwh``/``min_mw``/``max_mw`` come from the plant's ``cvu`` /
-    ``inflexibilidade`` / ``disponibilidade`` block values, weighted by its
-    stage-1 ``gl`` block durations (uniform when the plant has no ``gl`` stage-1
-    register or the block counts disagree). No clamping — the emission site owns
-    bounds policy.
-    """
+    """One GNL plant's identity in the ``tg`` registry. Its per-stage cost and
+    capability stay in :attr:`GnlCommitmentModel.tg`, densified against the
+    operative calendar at emission."""
 
     code: int
     name: str
     submarket_code: int
-    cost_per_mwh: float
-    min_mw: float
-    max_mw: float
 
 
 @dataclass(frozen=True)
@@ -147,12 +147,15 @@ class GnlCommitmentModel:
     study-span lead, so this drives only the uniform-lag consistency check
     (:func:`_warn_on_nonuniform_lag`) — a deck mixing lags is surfaced, not
     silently averaged.
+
+    ``tg`` is every declared ``tg`` record, one per ``(codigo_usina, estagio)``.
     """
 
     thermals: tuple[GnlThermal, ...]
     commitments: dict[int, GnlCommitment]
     weeks_per_month: dict[int, int]
     nl_lag_months: dict[int, int]
+    tg: pd.DataFrame
 
 
 def _as_floats(value: object) -> list[float]:
@@ -221,9 +224,10 @@ def read_gnl_model(dadgnl: Dadgnl) -> GnlCommitmentModel | None:
     """Read ``dadgnl`` into a :class:`GnlCommitmentModel`, or ``None`` if GNL-off.
 
     Returns ``None`` when :func:`is_gnl_enabled` is ``False``. Otherwise builds
-    the ``tg`` registry (ascending by code), the ``gl`` commitments (keyed by
-    code, ascending by ``estagio``, each stage carrying its parsed delivery date
-    and block-weighted committed MW), and the ``gs`` weeks-per-month map.
+    the ``tg`` plants (ascending by code) and their declared records, the ``gl``
+    commitments (keyed by code, ascending by ``estagio``, each stage carrying its
+    parsed delivery date and block-weighted committed MW), and the ``gs``
+    weeks-per-month map.
 
     Raises
     ------
@@ -234,11 +238,17 @@ def read_gnl_model(dadgnl: Dadgnl) -> GnlCommitmentModel | None:
     if not is_gnl_enabled(dadgnl):
         return None
 
-    registry = _read_tg_registry(dadgnl)
-    stage1_weights = _stage1_block_hours(dadgnl)
+    tg = dadgnl.tg(df=True)
+    first_records = tg.sort_values(["codigo_usina", "estagio"]).drop_duplicates(
+        "codigo_usina", keep="first"
+    )
     thermals = tuple(
-        _build_gnl_thermal(row, stage1_weights.get(int(row["codigo_usina"])))
-        for _, row in registry.sort_values("codigo_usina").iterrows()
+        GnlThermal(
+            code=int(row["codigo_usina"]),
+            name=str(row["nome"]).strip(),
+            submarket_code=int(row["codigo_submercado"]),
+        )
+        for _, row in first_records.iterrows()
     )
     known_codes = {t.code for t in thermals}
 
@@ -254,39 +264,7 @@ def read_gnl_model(dadgnl: Dadgnl) -> GnlCommitmentModel | None:
         commitments=commitments,
         weeks_per_month=_read_weeks_per_month(dadgnl),
         nl_lag_months=_read_nl_lags(dadgnl),
-    )
-
-
-def _read_tg_registry(dadgnl: Dadgnl) -> pd.DataFrame:
-    """The one-row-per-plant ``tg`` registry (stage-1 base), as a DataFrame."""
-    frame = dadgnl.tg(df=True)
-    return frame.sort_values(["codigo_usina", "estagio"]).drop_duplicates(
-        "codigo_usina", keep="first"
-    )
-
-
-def _stage1_block_hours(dadgnl: Dadgnl) -> dict[int, list[float]]:
-    """Each plant's stage-1 ``gl`` block durations, for weighting the registry."""
-    weights: dict[int, list[float]] = {}
-    for register in dadgnl.gl():
-        if int(register.estagio) == 1:
-            weights.setdefault(int(register.codigo_usina), _as_floats(register.duracao))
-    return weights
-
-
-def _build_gnl_thermal(row: pd.Series, block_hours: list[float] | None) -> GnlThermal:
-    """Assemble one :class:`GnlThermal` from a ``tg`` row + stage-1 block hours."""
-    weights = block_hours or []
-    cvu = [float(row[f"cvu_{b}"]) for b in (1, 2, 3)]
-    disp = [float(row[f"disponibilidade_{b}"]) for b in (1, 2, 3)]
-    inflex = [float(row[f"inflexibilidade_{b}"]) for b in (1, 2, 3)]
-    return GnlThermal(
-        code=int(row["codigo_usina"]),
-        name=str(row["nome"]).strip(),
-        submarket_code=int(row["codigo_submercado"]),
-        cost_per_mwh=_block_weighted_mean(cvu, weights),
-        min_mw=_block_weighted_mean(inflex, weights),
-        max_mw=_block_weighted_mean(disp, weights),
+        tg=tg,
     )
 
 
@@ -534,8 +512,38 @@ def _reject_straddling_windows(
             )
 
 
-def _clamp_committed(value: float, thermal: GnlThermal, context: str) -> float:
-    """Clamp a committed MW into the plant's ``[min_mw, max_mw]`` capability.
+class _StageCapability(NamedTuple):
+    """A GNL plant's hours-weighted ``tg`` cost and ``[min, max]`` at one stage."""
+
+    cost_per_mwh: float
+    min_mw: float
+    max_mw: float
+
+
+def _stage_capabilities(
+    tg: pd.DataFrame, calendar: Sequence[OperativeStage]
+) -> dict[int, list[_StageCapability]]:
+    """Each GNL plant's capability per calendar stage, from its ``tg`` records
+    densified like ``CT`` (a stage inherits the last declared record)."""
+    dense = dense_stage_records(tg, calendar, register="TG", name_column="nome")
+    return {
+        code: [
+            _StageCapability(
+                cost_per_mwh=hours_weighted(values["cvu"], stage),
+                min_mw=hours_weighted(values["inflex"], stage),
+                max_mw=hours_weighted(values["disp"], stage),
+            )
+            for stage, values in zip(calendar, plant["stages"], strict=True)
+        ]
+        for code, plant in dense.items()
+    }
+
+
+def _clamp_committed(
+    value: float, name: str, lo: float, hi: float, context: str
+) -> float:
+    """Clamp a committed MW into the plant's ``[lo, hi]`` capability at its
+    delivery stage.
 
     The emission site owns bounds policy (the reader returns the true committed
     values): the source model's ``gl`` geração and ``tg`` disponibilidade are
@@ -546,12 +554,11 @@ def _clamp_committed(value: float, thermal: GnlThermal, context: str) -> float:
     is clamped into range with a warning instead — mirroring the sibling NEWAVE
     path (``converters/initial_conditions.py``).
     """
-    lo, hi = thermal.min_mw, thermal.max_mw
     if lo > hi:
         _LOG.warning(
             "GNL %s: inflexibility %.4g > availability %.4g (degenerate bounds); "
             "clamping commitments to <= %.4g",
-            thermal.name,
+            name,
             lo,
             hi,
             hi,
@@ -561,7 +568,7 @@ def _clamp_committed(value: float, thermal: GnlThermal, context: str) -> float:
     if abs(clamped - value) > _NONZERO_TOLERANCE:
         _LOG.warning(
             "GNL %s: committed %.4g MW (%s) outside [%.4g, %.4g]; clamped to %.4g",
-            thermal.name,
+            name,
             value,
             context,
             lo,
@@ -596,7 +603,7 @@ def _record_bound(
     seen: set[tuple[int, int]],
     tid: int,
     idx: int,
-    thermal: GnlThermal,
+    capability: _StageCapability,
 ) -> None:
     """Append a ``(tid, idx)`` ``thermal_bounds`` row once (idempotent on ``seen``)."""
     if (tid, idx) in seen:
@@ -606,9 +613,9 @@ def _record_bound(
         {
             "thermal_id": tid,
             "post_study_stage_index": idx,
-            "cost_per_mwh": thermal.cost_per_mwh,
-            "min_mw": thermal.min_mw,
-            "max_mw": thermal.max_mw,
+            "cost_per_mwh": capability.cost_per_mwh,
+            "min_mw": capability.min_mw,
+            "max_mw": capability.max_mw,
         }
     )
 
@@ -718,7 +725,7 @@ def convert_gnl(
     *,
     first_thermal_id: int,
     bus_id_of: Callable[[int], int],
-    stages: Sequence[Mapping],
+    calendar: Sequence[OperativeStage],
 ) -> GnlEmission:
     """Convert a :class:`GnlCommitmentModel` into cobre's anticipated-GNL inputs.
 
@@ -748,7 +755,9 @@ def convert_gnl(
       none); and the class-4 já-comandada run (:func:`classify_gnl_windows`),
       tiling ``[horizon_end, class4_end)`` at coverage 1.0 (an explicit
       ``0 MW`` stub included) with each window's own committed MW. Every
-      window, either class, is clamped into ``[min_mw, max_mw]``
+      window, either class, is clamped into the plant's ``tg`` capability at
+      its own stage — an in-study tile at that study stage, a post-horizon
+      window at the last study stage, which every later stage inherits
       (:func:`_clamp_committed`); no window may straddle the horizon
       (:func:`_reject_straddling_windows` raises otherwise) — class-2 always
       ends at or before it, class-4 always starts at or after it.
@@ -756,26 +765,29 @@ def convert_gnl(
     Every plant also gets a ``thermal_bounds`` row for each **class-3
     (signaled)** post-study calendar stage — one whose ``start_date >=
     class4_end`` — carrying its ``cvu`` (fuel-inclusive) as ``cost_per_mwh``
-    and its ``[min_mw, max_mw]`` capability, the carrier a signaled stage
-    needs to be priced at all. A class-4 (já-comandada) stage gets none: its
-    delivery is already fixed by the ``past_anticipated_commitments`` window
-    above, and a ``thermal_bounds`` row there would let cobre re-optimize a
-    cell the source model has already committed. ``post_study_stages`` is
-    ``None`` when the model declares no ``GS`` calendar
-    (``model.weeks_per_month`` empty) — the deck's own signal that there is no
-    post-study month to price; otherwise it is emitted with its
+    and its ``[min_mw, max_mw]`` capability at the last study stage, the
+    carrier a signaled stage needs to be priced at all. A class-4
+    (já-comandada) stage gets none: its delivery is already fixed by the
+    ``past_anticipated_commitments`` window above, and a ``thermal_bounds`` row
+    there would let cobre re-optimize a cell the source model has already
+    committed. ``post_study_stages`` is ``None`` when the model declares no
+    ``GS`` calendar (``model.weeks_per_month`` empty) — the deck's own signal
+    that there is no post-study month to price; otherwise it is emitted with its
     ``thermal_bounds`` possibly empty, when every post-study stage is
     class-4.
 
-    ``stages`` is the converted ``stages.json`` stage list (each a mapping with
-    ``start_date``, ``end_date``, and ``blocks[].hours``).
+    Each plant's ``thermals.json`` ``generation`` pair is the envelope of its
+    per-stage capability (smallest minimum, largest maximum): cobre validates
+    every ``past_anticipated_commitments`` value against that static pair, so a
+    stage-1 pair would reject a commitment the plant's own stage allows. Its
+    ``cost_per_mwh`` is the first stage's, as for ``CT`` plants.
+
+    ``calendar`` is the operative calendar the case's ``stages.json`` is built
+    from.
     """
-    horizon_start = date.fromisoformat(stages[0]["start_date"])
-    stage_spans = [
-        (date.fromisoformat(s["start_date"]), date.fromisoformat(s["end_date"]))
-        for s in stages
-    ]
-    stage_hours = [sum(float(b["hours"]) for b in s["blocks"]) for s in stages]
+    horizon_start = calendar[0].start_date
+    stage_spans = [(stage.start_date, stage.end_date) for stage in calendar]
+    stage_hours = [stage.total_hours for stage in calendar]
     # Cumulative operative-stage boundaries S_0=0, S_1, .., S_n, matching cobre's
     # `cumulative_stage_boundaries(study_stage_durations)` — the clock the
     # anticipated-delivery decider is resolved against.
@@ -794,7 +806,7 @@ def convert_gnl(
     # calendar (model.weeks_per_month) -- the same "is there a post-study
     # month to price" signal _study_lead_hours uses for H; the calendar's own
     # shape no longer depends on H, only on the plants' shared class4_end.
-    calendar = (
+    post_calendar = (
         _build_post_study_calendar(
             stage_spans,
             _shared_class4_end(classification, model.thermals, horizon_end),
@@ -803,7 +815,7 @@ def convert_gnl(
         else []
     )
 
-    if calendar:
+    if post_calendar:
         # The left boundary tiles exactly the leading stages cobre derives from H
         # (every study stage, since H spans the whole study horizon).
         tile_k = _lead_delivery_stage_count(lead_hours, cumulative_hours)
@@ -820,9 +832,12 @@ def convert_gnl(
     bounds: list[dict] = []
     seen_bounds: set[tuple[int, int]] = set()
 
+    capabilities = _stage_capabilities(model.tg, calendar)
     for thermal in model.thermals:
         tid = gnl_id[thermal.code]
         commitment = model.commitments[thermal.code]
+        stage_capability = capabilities[thermal.code]
+        last_capability = stage_capability[-1]
 
         # Fold weekly gl deliveries onto study stages (hours-weighted MW rate).
         folded: list[float] = []
@@ -844,7 +859,7 @@ def convert_gnl(
         # only class-3 (signaled) stages need thermal_bounds pricing.
         emitted_lead_hours = (
             (plant_classification.class4_end - horizon_start).days * 24.0
-            if calendar
+            if post_calendar
             else lead_hours
         )
         thermals.append(
@@ -853,8 +868,11 @@ def convert_gnl(
                 "name": thermal.name,
                 "operational_start_date": horizon_start.isoformat(),
                 "bus_id": bus_id_of(thermal.submarket_code),
-                "cost_per_mwh": thermal.cost_per_mwh,
-                "generation": {"min_mw": thermal.min_mw, "max_mw": thermal.max_mw},
+                "cost_per_mwh": stage_capability[0].cost_per_mwh,
+                "generation": {
+                    "min_mw": min(c.min_mw for c in stage_capability),
+                    "max_mw": max(c.max_mw for c in stage_capability),
+                },
                 "anticipated_config": {"lead_time_hours": emitted_lead_hours},
                 "entry_stage_id": None,
                 "exit_stage_id": None,
@@ -864,10 +882,14 @@ def convert_gnl(
             past.append(
                 {
                     "thermal_id": tid,
-                    "start_date": stages[j]["start_date"],
-                    "end_date": stages[j]["end_date"],
+                    "start_date": calendar[j].start_date.isoformat(),
+                    "end_date": calendar[j].end_date.isoformat(),
                     "value_mw": _clamp_committed(
-                        folded[j], thermal, f"in-horizon study stage {j}"
+                        folded[j],
+                        thermal.name,
+                        stage_capability[j].min_mw,
+                        stage_capability[j].max_mw,
+                        f"in-horizon study stage {j}",
                     ),
                 }
             )
@@ -879,7 +901,9 @@ def convert_gnl(
                     "end_date": end.isoformat(),
                     "value_mw": _clamp_committed(
                         committed_mw,
-                        thermal,
+                        thermal.name,
+                        last_capability.min_mw,
+                        last_capability.max_mw,
                         f"post-horizon class-4 window {start.isoformat()}",
                     ),
                 }
@@ -890,14 +914,16 @@ def convert_gnl(
         # re-optimize an already-committed cell. Only class-3 (signaled)
         # stages get the carrier.
         class4_end = plant_classification.class4_end
-        for m, stage in enumerate(calendar):
+        for m, stage in enumerate(post_calendar):
             if date.fromisoformat(stage["start_date"]) >= class4_end:
-                _record_bound(bounds, seen_bounds, tid, m, thermal)
+                _record_bound(bounds, seen_bounds, tid, m, last_capability)
 
     _reject_straddling_windows(past, horizon_end)
     past.sort(key=lambda w: (w["thermal_id"], w["start_date"]))
     bounds.sort(key=lambda b: (b["thermal_id"], b["post_study_stage_index"]))
-    post_study = {"stages": calendar, "thermal_bounds": bounds} if calendar else None
+    post_study = (
+        {"stages": post_calendar, "thermal_bounds": bounds} if post_calendar else None
+    )
 
     return GnlEmission(
         thermals=thermals,

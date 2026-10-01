@@ -34,6 +34,7 @@ from cobre_bridge.decomp.converters.anticipated import (
     is_gnl_enabled,
     read_gnl_model,
 )
+from cobre_bridge.decomp.temporal import OperativeStage
 
 
 class _GlReg:
@@ -192,18 +193,17 @@ def test_data_inicio_integer_with_dropped_leading_zero() -> None:
     assert model.commitments[86].stages[0].start_date == date(2026, 4, 4)
 
 
-def test_registry_cost_and_bounds_from_tg() -> None:
+def test_registry_keeps_every_declared_tg_stage() -> None:
     gl = [_GlReg(86, 1, "14032026", [30.0, 74.0, 64.0], [100.0, 100.0, 100.0])]
-    tg = [_tg_row(86, "SANTA CRUZ", cvu=199.22, disp=500.0, inflex=0.0)]
+    tg = [
+        _tg_row(86, "SANTA CRUZ", inflex=50.0),
+        {**_tg_row(86, "SANTA CRUZ", inflex=0.0), "estagio": 2},
+    ]
     model = read_gnl_model(_StubDadgnl(gl, tg, []))
 
     assert model is not None
-    thermal = model.thermals[0]
-    assert thermal.name == "SANTA CRUZ"
-    assert thermal.submarket_code == 1
-    assert thermal.cost_per_mwh == pytest.approx(199.22)
-    assert thermal.max_mw == pytest.approx(500.0)
-    assert thermal.min_mw == 0.0
+    assert model.thermals == (GnlThermal(86, "SANTA CRUZ", 1),)
+    assert model.tg["estagio"].tolist() == [1, 2]
 
 
 def test_weeks_per_month_from_gs() -> None:
@@ -246,6 +246,7 @@ def _stage_model(
     code: int, stages: tuple[GnlStageCommitment, ...]
 ) -> GnlCommitmentModel:
     return GnlCommitmentModel(
+        tg=_TG,
         thermals=(),
         commitments={code: GnlCommitment(code, stages)},
         weeks_per_month={},
@@ -431,6 +432,24 @@ _EMIT_STAGES = [
 ]
 _EMIT_WEEKS_PER_MONTH = {1: 3, 2: 4, 3: 5}
 _BUS_OF = {1: 0, 3: 2}.get
+_EMIT_CALENDAR = [
+    OperativeStage(
+        index=i,
+        start_date=date.fromisoformat(s["start_date"]),
+        end_date=date.fromisoformat(s["end_date"]),
+        season_id=date.fromisoformat(s["start_date"]).month - 1,
+        block_hours=tuple(b["hours"] for b in s["blocks"]),
+    )
+    for i, s in enumerate(_EMIT_STAGES)
+]
+_SANTA = GnlThermal(86, "SANTA CRUZ", 1)
+_PSERG = GnlThermal(224, "PSERGIPE I", 3)
+_TG = pd.DataFrame(
+    [
+        _tg_row(86, "SANTA CRUZ", cvu=199.22, disp=500.0),
+        _tg_row(224, "PSERGIPE I", sub=3, cvu=321.26, disp=1593.0),
+    ]
+)
 
 
 def _emit_model() -> GnlCommitmentModel:
@@ -438,9 +457,10 @@ def _emit_model() -> GnlCommitmentModel:
     já-comandada run (class-4): SANTA CRUZ's is a 0 MW stub then 500 MW;
     PSERGIPE's is all-zero. Both share the 2-month anticipation lag and both
     get a ``thermal_bounds`` row for every mirror-calendar stage."""
-    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
-    pserg = GnlThermal(224, "PSERGIPE I", 3, 321.26, 0.0, 1593.0)
+    santa = _SANTA
+    pserg = _PSERG
     return GnlCommitmentModel(
+        tg=_TG,
         thermals=(santa, pserg),
         commitments={
             86: GnlCommitment(
@@ -472,7 +492,7 @@ def test_gnl_emission_has_no_future_anticipated_deliveries_field() -> None:
 
 def test_convert_gnl_emitted_lead_reaches_each_plants_class4_end() -> None:
     e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
     )
     assert [(t["id"], t["name"]) for t in e.thermals] == [
         (94, "SANTA CRUZ"),
@@ -498,7 +518,7 @@ def test_convert_gnl_left_boundary_tiles_the_h_derived_leading_stages() -> None:
     # (0 MW: no in-horizon gl commitment folds in), followed by each plant's
     # class-4 já-comandada run (asserted separately).
     e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
     )
     for tid in (94, 95):
         past = [p for p in e.past_anticipated_commitments if p["thermal_id"] == tid]
@@ -514,7 +534,7 @@ def test_convert_gnl_left_boundary_tiles_the_h_derived_leading_stages() -> None:
 
 def test_convert_gnl_post_study_stages_carry_grid_calendar() -> None:
     e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
     )
     pss = e.post_study_stages
     assert pss is not None
@@ -537,7 +557,7 @@ def test_convert_gnl_thermal_bounds_cover_only_class3_stages() -> None:
     # stages 3-6 (one per study stage) do, matching cobre's own post-study
     # e2e fixture.
     e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
     )
     pss = e.post_study_stages
     assert pss is not None
@@ -561,8 +581,9 @@ def test_convert_gnl_thermal_bounds_cover_every_stage_when_no_class4_run() -> No
     # test_convert_gnl_thermal_bounds_cover_only_class3_stages -- the class-3
     # mirror always starts exactly at class4_end, so a calendar with every
     # stage class-4 is not constructible.
-    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
+    santa = _SANTA
     model = GnlCommitmentModel(
+        tg=_TG,
         thermals=(santa,),
         commitments={
             86: GnlCommitment(
@@ -572,7 +593,9 @@ def test_convert_gnl_thermal_bounds_cover_every_stage_when_no_class4_run() -> No
         weeks_per_month=_EMIT_WEEKS_PER_MONTH,
         nl_lag_months={86: 2},
     )
-    e = convert_gnl(model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES)
+    e = convert_gnl(
+        model, first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
+    )
 
     pss = e.post_study_stages
     assert pss is not None
@@ -590,9 +613,10 @@ def test_convert_gnl_raises_on_differing_class4_end_across_plants() -> None:
     # post_study_stages is emitted once, globally: SANTA CRUZ's já-comandada
     # run through 05-16 and PSERGIPE's total absence of one (class4_end
     # defaults to horizon_end) can't share a single calendar boundary.
-    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
-    pserg = GnlThermal(224, "PSERGIPE I", 3, 321.26, 0.0, 1593.0)
+    santa = _SANTA
+    pserg = _PSERG
     model = GnlCommitmentModel(
+        tg=_TG,
         thermals=(santa, pserg),
         commitments={
             86: GnlCommitment(
@@ -611,12 +635,14 @@ def test_convert_gnl_raises_on_differing_class4_end_across_plants() -> None:
         nl_lag_months={86: 2, 224: 2},
     )
     with pytest.raises(ValueError, match="differing já-comandada cutoffs"):
-        convert_gnl(model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES)
+        convert_gnl(
+            model, first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
+        )
 
 
 def test_convert_gnl_thermal_bounds_match_capability_and_cost() -> None:
     e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
     )
     pss = e.post_study_stages
     assert pss is not None
@@ -636,9 +662,10 @@ def test_convert_gnl_warns_on_nonuniform_nl_lag(
     # A deck mixing NL lags is surfaced (the single global H tile-sizing the
     # class-2 boundary assumes a uniform lag); the per-plant emitted lead is
     # unaffected by nl_lag_months either way.
-    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
-    pserg = GnlThermal(224, "PSERGIPE I", 3, 321.26, 0.0, 1593.0)
+    santa = _SANTA
+    pserg = _PSERG
     model = GnlCommitmentModel(
+        tg=_TG,
         thermals=(santa, pserg),
         commitments={
             86: GnlCommitment(
@@ -655,7 +682,7 @@ def test_convert_gnl_warns_on_nonuniform_nl_lag(
         logging.WARNING, logger="cobre_bridge.decomp.converters.anticipated"
     ):
         e = convert_gnl(
-            model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+            model, first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
         )
 
     assert any("differing anticipation lags" in r.message for r in caplog.records)
@@ -671,8 +698,9 @@ def test_convert_gnl_empty_gs_yields_no_post_study() -> None:
     # No GS calendar (degenerate deck): no post-study horizon to price, so
     # post_study_stages stays None — but the plant stays a valid anticipated
     # thermal with the mandatory single leading commitment.
-    pserg = GnlThermal(224, "PSERGIPE I", 3, 321.26, 0.0, 1593.0)
+    pserg = _PSERG
     model = GnlCommitmentModel(
+        tg=_TG,
         thermals=(pserg,),
         commitments={
             224: GnlCommitment(
@@ -682,7 +710,9 @@ def test_convert_gnl_empty_gs_yields_no_post_study() -> None:
         weeks_per_month={},
         nl_lag_months={224: 2},
     )
-    e = convert_gnl(model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES)
+    e = convert_gnl(
+        model, first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
+    )
 
     assert e.post_study_stages is None
     assert len(e.past_anticipated_commitments) == 1  # left boundary still mandatory
@@ -695,8 +725,9 @@ def test_convert_gnl_clamps_past_commitment_above_capability(
     # gl geracao and tg disponibilidade are independent; an in-study commitment
     # above the plant's max_mw is clamped into [min_mw, max_mw] (+ warned) so
     # cobre's semantic validator (value_mw in [min, max]) never rejects it.
-    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
+    santa = _SANTA
     model = GnlCommitmentModel(
+        tg=_TG,
         thermals=(santa,),
         commitments={
             86: GnlCommitment(
@@ -710,11 +741,58 @@ def test_convert_gnl_clamps_past_commitment_above_capability(
         logging.WARNING, logger="cobre_bridge.decomp.converters.anticipated"
     ):
         e = convert_gnl(
-            model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+            model, first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
         )
 
     assert e.past_anticipated_commitments[0]["value_mw"] == 500.0  # 900 -> max 500
     assert any("clamped" in r.message for r in caplog.records)
+
+
+def test_convert_gnl_reads_tg_per_stage_like_ct(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # TG declares stages 1, 2 and 4; stage 3 inherits stage 2. A 0 MW
+    # commitment is clamped only where its own stage requires a minimum.
+    tg = pd.DataFrame(
+        [
+            _tg_row(86, "SANTA CRUZ", cvu=181.0, disp=350.0, inflex=50.0),
+            {**_tg_row(86, "SANTA CRUZ", cvu=181.0, disp=350.0), "estagio": 2},
+            {**_tg_row(86, "SANTA CRUZ", cvu=200.0, disp=400.0), "estagio": 4},
+        ]
+    )
+    model = GnlCommitmentModel(
+        tg=tg,
+        thermals=(_SANTA,),
+        commitments={
+            86: GnlCommitment(
+                86, (GnlStageCommitment(1, date(2026, 3, 14), 0.0, 168.0),)
+            )
+        },
+        weeks_per_month=_EMIT_WEEKS_PER_MONTH,
+        nl_lag_months={86: 2},
+    )
+    with caplog.at_level(
+        logging.WARNING, logger="cobre_bridge.decomp.converters.anticipated"
+    ):
+        e = convert_gnl(
+            model, first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
+        )
+
+    tiles = [p["value_mw"] for p in e.past_anticipated_commitments][:4]
+    assert tiles == [50.0, 0.0, 0.0, 0.0]
+    clamps = [r.message for r in caplog.records if "clamped" in r.message]
+    assert clamps == [
+        "GNL SANTA CRUZ: committed 0 MW (in-horizon study stage 0) outside "
+        "[50, 350]; clamped to 50"
+    ]
+    [thermal] = e.thermals
+    assert thermal["cost_per_mwh"] == 181.0
+    assert thermal["generation"] == {"min_mw": 0.0, "max_mw": 400.0}
+    assert e.post_study_stages is not None
+    assert {
+        (b["cost_per_mwh"], b["min_mw"], b["max_mw"])
+        for b in e.post_study_stages["thermal_bounds"]
+    } == {(200.0, 0.0, 400.0)}
 
 
 # --------------------------------------------------------------------------
@@ -726,7 +804,7 @@ _HORIZON_END = date.fromisoformat(_EMIT_STAGES[-1]["end_date"])
 
 def test_convert_gnl_emits_class4_past_commitments() -> None:
     e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
     )
     for tid, terminal_mw in ((94, 500.0), (95, 0.0)):
         past = [p for p in e.past_anticipated_commitments if p["thermal_id"] == tid]
@@ -740,7 +818,7 @@ def test_convert_gnl_emits_class4_past_commitments() -> None:
 
 def test_convert_gnl_past_commitments_never_straddle_horizon() -> None:
     e = convert_gnl(
-        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+        _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
     )
     for p in e.past_anticipated_commitments:
         start = date.fromisoformat(p["start_date"])
@@ -774,7 +852,10 @@ def test_convert_gnl_straddling_class4_window_raises(
 
     with pytest.raises(ValueError, match="straddle"):
         convert_gnl(
-            _emit_model(), first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+            _emit_model(),
+            first_thermal_id=94,
+            bus_id_of=_BUS_OF,
+            calendar=_EMIT_CALENDAR,
         )
 
 
@@ -783,8 +864,9 @@ def test_convert_gnl_clamps_class4_commitment_above_capability(
 ) -> None:
     # gl geracao and tg disponibilidade are independent for a class-4 week too;
     # a já-comandada commitment above max_mw is clamped the same as class-2.
-    santa = GnlThermal(86, "SANTA CRUZ", 1, 199.22, 0.0, 500.0)
+    santa = _SANTA
     model = GnlCommitmentModel(
+        tg=_TG,
         thermals=(santa,),
         commitments={
             86: GnlCommitment(
@@ -802,7 +884,7 @@ def test_convert_gnl_clamps_class4_commitment_above_capability(
         logging.WARNING, logger="cobre_bridge.decomp.converters.anticipated"
     ):
         e = convert_gnl(
-            model, first_thermal_id=94, bus_id_of=_BUS_OF, stages=_EMIT_STAGES
+            model, first_thermal_id=94, bus_id_of=_BUS_OF, calendar=_EMIT_CALENDAR
         )
 
     class4 = [

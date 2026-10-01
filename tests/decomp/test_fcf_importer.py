@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from cobre_bridge.core import diagnostics as dx
@@ -346,6 +347,7 @@ def _make_gnl_model(
         commitments={},
         weeks_per_month={},
         nl_lag_months=nl_lag_months,
+        tg=pd.DataFrame(),
     )
 
 
@@ -355,9 +357,6 @@ def _make_gnl_thermal(code: int, submarket_code: int) -> GnlThermal:
         code=code,
         name=f"GNL-{code}",
         submarket_code=submarket_code,
-        cost_per_mwh=0.0,
-        min_mw=0.0,
-        max_mw=0.0,
     )
 
 

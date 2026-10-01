@@ -249,7 +249,7 @@ Volume inicial de cada usina operada (`UH` com `volume_inicial`), em hm³; quand
 | `past_anticipated_commitments[].thermal_id` | `dadgnl.rvN` › `TG` › `codigo_usina` *(derivado; condicional: somente quando `dadgnl` declara despacho GNL comprometido (algum `GL` com `geracao` não nula))* | Id da térmica GNL criada em `system/thermals.json` (ids densos após a última térmica de `CT`, em ordem crescente de `codigo_usina` de `TG`). |
 | `past_anticipated_commitments[].start_date` | `dadgnl.rvN` › `GL` › `data_inicio`, `dadger.rvN` › `DT` › `dia, mes, ano` *(derivado; condicional: somente quando `dadgnl` declara despacho GNL comprometido (algum `GL` com `geracao` não nula))* | Janelas de classe 2 (dentro do estudo): a data de início de cada estágio do estudo coberto pelo lead global (soma das semanas `GS` dos meses do estudo × 168 h). Janelas de classe 4 (já comandadas): a `data_inicio` de cada semana `GL` a partir do fim do horizonte, com um stub a 0 MW quando a primeira começa depois dele. |
 | `past_anticipated_commitments[].end_date` | `dadgnl.rvN` › `GL` › `data_inicio`, `dadger.rvN` › `DP` › `duracao` *(derivado; condicional: somente quando `dadgnl` declara despacho GNL comprometido (algum `GL` com `geracao` não nula))* | Classe 2: a data final do estágio do estudo. Classe 4: a `data_inicio` da semana `GL` seguinte, ou uma semana operativa (168 h) após o início na última janela. Nenhuma janela pode cruzar o fim do horizonte. |
-| `past_anticipated_commitments[].value_mw` | `dadgnl.rvN` › `GL` › `geracao`, `dadgnl.rvN` › `GL` › `duracao`, `dadgnl.rvN` › `TG` › `inflexibilidade, disponibilidade` *(condicional: somente quando `dadgnl` declara despacho GNL comprometido (algum `GL` com `geracao` não nula))* | MW comprometido: média de `geracao` ponderada pelas `duracao` de patamar de cada registro `GL`; nas janelas de classe 2, as semanas `GL` que caem no estágio são refundidas por horas sobre o estágio (0 onde não há nenhuma). O valor é limitado à faixa `[min_mw, max_mw]` da usina com aviso. |
+| `past_anticipated_commitments[].value_mw` | `dadgnl.rvN` › `GL` › `geracao`, `dadgnl.rvN` › `GL` › `duracao`, `dadgnl.rvN` › `TG` › `inflexibilidade, disponibilidade` *(condicional: somente quando `dadgnl` declara despacho GNL comprometido (algum `GL` com `geracao` não nula))* | MW comprometido: média de `geracao` ponderada pelas `duracao` de patamar de cada registro `GL`; nas janelas de classe 2, as semanas `GL` que caem no estágio são refundidas por horas sobre o estágio (0 onde não há nenhuma). O valor é limitado, com aviso, à faixa de `TG` do seu estágio (inflexibilidade e disponibilidade ponderadas pelas horas de patamar, herdando o último `TG` declarado); as janelas de classe 4 usam a do último estágio do estudo. |
 
 ### `post_study_stages.json`
 
@@ -265,9 +265,9 @@ Calendário pós-estudo na grade semanal (sábados): preenche as semanas já com
 | `stages[].duration_hours` | `dadger.rvN` › `DP` › `duracao` *(derivado)* | Horas até o próximo sábado no stub; `168` nas semanas; no espelho do estágio mensal do estudo, as horas até o último dia do mês civil do próprio estágio espelhado. |
 | `thermal_bounds[].thermal_id` | `dadgnl.rvN` › `TG` › `codigo_usina` *(derivado)* | Id da térmica GNL em `system/thermals.json`. |
 | `thermal_bounds[].post_study_stage_index` | `dadgnl.rvN` › `GL` › `data_inicio` *(derivado)* | Índice 0-based do estágio pós-estudo; apenas os estágios cujo início é igual ou posterior ao corte já comandado da usina recebem uma linha. |
-| `thermal_bounds[].cost_per_mwh` | `dadgnl.rvN` › `TG` › `cvu`, `dadgnl.rvN` › `GL` › `duracao` | `cvu_1..3` de `TG` ponderados pelas `duracao` do `GL` do estágio 1 (média simples sem ele); o mesmo valor de `system/thermals.json`. |
-| `thermal_bounds[].min_mw` | `dadgnl.rvN` › `TG` › `inflexibilidade`, `dadgnl.rvN` › `GL` › `duracao` | `inflexibilidade_1..3` de `TG` com a mesma ponderação. |
-| `thermal_bounds[].max_mw` | `dadgnl.rvN` › `TG` › `disponibilidade`, `dadgnl.rvN` › `GL` › `duracao` | `disponibilidade_1..3` de `TG` com a mesma ponderação. |
+| `thermal_bounds[].cost_per_mwh` | `dadgnl.rvN` › `TG` › `cvu`, `dadger.rvN` › `DP` › `duracao` | `cvu_1..3` do `TG` vigente no último estágio do estudo (o último declarado), ponderados pelas horas de patamar desse estágio. |
+| `thermal_bounds[].min_mw` | `dadgnl.rvN` › `TG` › `inflexibilidade`, `dadger.rvN` › `DP` › `duracao` | `inflexibilidade_1..3` do mesmo `TG`, com a mesma ponderação. |
+| `thermal_bounds[].max_mw` | `dadgnl.rvN` › `TG` › `disponibilidade`, `dadger.rvN` › `DP` › `duracao` | `disponibilidade_1..3` do mesmo `TG`, com a mesma ponderação. |
 
 ### `system/buses.json`
 
@@ -317,9 +317,9 @@ Uma térmica por `codigo_usina` de `CT`, com os valores do estágio 1 ponderados
 | `thermals[].name` | `dadger.rvN` › `CT` › `nome_usina`, `dadgnl.rvN` › `TG` › `nome` | Nome da usina sem espaços laterais. |
 | `thermals[].operational_start_date` | `dadger.rvN` › `DT` › `dia, mes, ano` *(derivado)* | Data de início do estudo. |
 | `thermals[].bus_id` | `dadger.rvN` › `CT` › `codigo_submercado`, `dadgnl.rvN` › `TG` › `codigo_submercado` | Barra do submercado declarado. |
-| `thermals[].cost_per_mwh` | `dadger.rvN` › `CT` › `cvu`, `dadger.rvN` › `DP` › `duracao`, `dadgnl.rvN` › `TG` › `cvu`, `dadgnl.rvN` › `GL` › `duracao` | CVU do estágio 1 por patamar (`cvu_k`, em branco lido como 0), ponderado pelas horas de patamar de `DP`; estágios seguintes vão para `constraints/thermal_bounds.parquet`. GNL: `cvu_1..3` de `TG` ponderados pelas `duracao` do `GL` do estágio 1 (média simples sem ele). |
-| `thermals[].generation.min_mw` | `dadger.rvN` › `CT` › `inflexibilidade`, `dadger.rvN` › `DP` › `duracao`, `dadgnl.rvN` › `TG` › `inflexibilidade` | Inflexibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: `inflexibilidade_1..3` de `TG` com a mesma ponderação do custo. |
-| `thermals[].generation.max_mw` | `dadger.rvN` › `CT` › `disponibilidade`, `dadger.rvN` › `DP` › `duracao`, `dadgnl.rvN` › `TG` › `disponibilidade` | Disponibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: `disponibilidade_1..3` de `TG` com a mesma ponderação do custo. |
+| `thermals[].cost_per_mwh` | `dadger.rvN` › `CT` › `cvu`, `dadger.rvN` › `DP` › `duracao`, `dadgnl.rvN` › `TG` › `cvu` | CVU do estágio 1 por patamar (`cvu_k`, em branco lido como 0), ponderado pelas horas de patamar de `DP`; estágios seguintes vão para `constraints/thermal_bounds.parquet`. GNL: o mesmo com o `TG` do estágio 1. |
+| `thermals[].generation.min_mw` | `dadger.rvN` › `CT` › `inflexibilidade`, `dadger.rvN` › `DP` › `duracao`, `dadgnl.rvN` › `TG` › `inflexibilidade` | Inflexibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: a menor inflexibilidade de `TG` entre os estágios, cada um ponderado pelas suas horas de patamar (um estágio sem registro `TG` herda o último declarado, como em `CT`), para que todo compromisso dentro da capacidade do seu estágio seja aceito. |
+| `thermals[].generation.max_mw` | `dadger.rvN` › `CT` › `disponibilidade`, `dadger.rvN` › `DP` › `duracao`, `dadgnl.rvN` › `TG` › `disponibilidade` | Disponibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: a maior disponibilidade de `TG` entre os estágios, com a mesma ponderação e herança da inflexibilidade. |
 | `thermals[].anticipated_config.lead_time_hours` | `dadgnl.rvN` › `GL` › `data_inicio`, `dadgnl.rvN` › `GS` › `mes, semanas`, `dadger.rvN` › `DT` › `dia, mes, ano` *(derivado; condicional: somente nas térmicas GNL, quando `dadgnl` declara despacho comprometido (algum `GL` com `geracao` não nula))* | Lead físico por usina, em horas: da data de início do estudo até o fim da última semana já comandada da usina em `GL` (o corte de classe 4). Sem calendário `GS`, a duração do primeiro estágio. |
 | `thermals[].entry_stage_id` | — *(sempre nulo; condicional: somente nas térmicas GNL, quando `dadgnl` declara despacho comprometido)* | Sempre nulo: térmicas GNL estão ativas em todo o horizonte. Térmicas de `CT` omitem o campo. |
 | `thermals[].exit_stage_id` | — *(sempre nulo; condicional: somente nas térmicas GNL, quando `dadgnl` declara despacho comprometido)* | Sempre nulo: térmicas GNL não saem dentro do horizonte. Térmicas de `CT` omitem o campo. |
@@ -1073,6 +1073,9 @@ Para cada arquivo do deck (e, no DECOMP, cada registro): o que ele alimenta e o 
 - `numero_patamares` → `constraints/pumping_bounds.parquet` › `block_id`
 - `duracao` → `post_study_stages.json` › `stages[].start_date`
 - `duracao` → `post_study_stages.json` › `stages[].duration_hours`
+- `duracao` → `post_study_stages.json` › `thermal_bounds[].cost_per_mwh`
+- `duracao` → `post_study_stages.json` › `thermal_bounds[].min_mw`
+- `duracao` → `post_study_stages.json` › `thermal_bounds[].max_mw`
 - `duracao` → `system/energy_contracts.json` › `contracts[].price_per_mwh`
 - `duracao` → `system/energy_contracts.json` › `contracts[].limits.min_mw`
 - `duracao` → `system/energy_contracts.json` › `contracts[].limits.max_mw`
@@ -1836,13 +1839,9 @@ Cadastro binário das hidrelétricas, compartilhado com o NEWAVE. As colunas aba
 - `data_inicio` → `initial_conditions.json` › `past_anticipated_commitments[].end_date`
 - `geracao` → `initial_conditions.json` › `past_anticipated_commitments[].value_mw`
 - `duracao` → `initial_conditions.json` › `past_anticipated_commitments[].value_mw`
-- `duracao` → `system/thermals.json` › `thermals[].cost_per_mwh`
 - `data_inicio` → `system/thermals.json` › `thermals[].anticipated_config.lead_time_hours`
 - `data_inicio` → `post_study_stages.json` › `stages[].start_date`
 - `data_inicio` → `post_study_stages.json` › `thermal_bounds[].post_study_stage_index`
-- `duracao` → `post_study_stages.json` › `thermal_bounds[].cost_per_mwh`
-- `duracao` → `post_study_stages.json` › `thermal_bounds[].min_mw`
-- `duracao` → `post_study_stages.json` › `thermal_bounds[].max_mw`
 - `codigo_submercado` — *não lido.* Submercado repetido no registro de despacho comandado. Não lido: o submercado da térmica vem de `TG`.
 
 ### `dadgnl.rvN` › `GS`

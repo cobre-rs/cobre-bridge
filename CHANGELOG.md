@@ -75,6 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both values shown as the same number. Excesses within that rounding are no
   longer reported, and the warning's table shows values to 0.01 MW with the
   excess in its own column.
+- **DECOMP GNL plants follow their `TG` records stage by stage.** Only the
+  first `TG` record of each plant was read, so a stage-1 inflexibility bounded
+  every committed delivery and clamped commitments the deck allows. `TG` is
+  now densified like `CT` (a stage inherits the last declared record): each
+  commitment is checked against its own stage, post-study pricing uses the
+  last declared record, and `thermals.json` declares the envelope over stages.
 - **A plant with zero rated turbined flow or rated power stays on constant
   productivity** on both tracks, instead of being emitted as FPHA and making
   cobre's fit abort the run; such plants are listed in an informational

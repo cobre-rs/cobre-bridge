@@ -1001,7 +1001,7 @@ def _convert_core_entities(artifacts: DecompCaseArtifacts, writer: CaseWriter) -
             gnl_model,
             first_thermal_id=max(t["id"] for t in thermals_dict["thermals"]) + 1,
             bus_id_of=id_map.bus_id,
-            stages=stages_dict["stages"],
+            calendar=case.calendar,
         )
         thermals_dict["thermals"].extend(gnl.thermals)
         thermals_dict["thermals"].sort(key=lambda t: t["id"])
