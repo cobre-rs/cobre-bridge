@@ -903,7 +903,6 @@ class TestLoadPolicyMetadataHappyPath:
             warm_start_cuts=0,
             rng_seed=0,
             created_at="1970-01-01T00:00:00Z",
-            cobre_version="0.0.0",
         )
 
         case_dir = tmp_path / "case"

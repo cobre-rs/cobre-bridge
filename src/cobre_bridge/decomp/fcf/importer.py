@@ -750,7 +750,6 @@ def import_boundary_fcf(
     boundary_stage = int(cuts.boundary_stage)
 
     ensure_writer_binding()
-    import cobre
 
     # No explicit inflow-lag depth is supplied to the bootstrap: cobre sizes the
     # HydroInflowLag state block from the case's own PAR(p) model order (the same
@@ -825,7 +824,6 @@ def import_boundary_fcf(
         warm_start_cuts=0,
         rng_seed=0,
         created_at=datetime.now(tz=UTC).isoformat(),
-        cobre_version=cobre.__version__,
         season_manifest=manifest.season_manifest,
     )
 

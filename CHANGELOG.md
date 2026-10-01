@@ -105,7 +105,9 @@ dashboard defects.
   that writes it and refuses one written by any other version, so a case with
   an imported boundary must run under the `cobre` release that matches the
   installed `cobre-python` exactly. A mismatched cobre names both versions;
-  converting again with the matching `cobre-python` resolves it.
+  converting again with the matching `cobre-python` resolves it. The bridge no
+  longer passes a version string to the checkpoint writer, which now ignores
+  it.
 - **Dependency floors.** `inewave>=1.16.1`, the first release that reads the
   `VAZMINT` `PRE`/`POS` markers the fix above relies on, plus
   `pyarrow>=25.0.1`, `pandas>=3.0.6`, `plotly>=7.1.0`, `polars>=1.44.2` and
