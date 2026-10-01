@@ -1523,8 +1523,9 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
     { file = "hidr", item = "a0_volume_cota … a4_volume_cota" },
     { file = "modif", item = "VOLCOTA · coeficientes a0 a a4" },
     { file = "hidr", item = "produtibilidade_especifica" },
+    { file = "exph", item = "data_entrada_operacao" },
   ]
-  how = "`fpha` quando `funcao_producao_uhe = 0` e a usina tem polinômio cota-volume não nulo, produtibilidade específica positiva e engolimento e potência nominais (Σ máquinas × nominal por conjunto, após `MODIF NUMCNJ`/`NUMMAQ`) positivos; `constant_productivity` nos demais casos. Uma usina excluída só pela capacidade nula é listada em diagnóstico informativo."
+  how = "`fpha` quando `funcao_producao_uhe = 0` e a usina tem polinômio cota-volume não nulo, produtibilidade específica positiva e engolimento e potência nominais (Σ máquinas × nominal por conjunto, após `MODIF NUMCNJ`/`NUMMAQ`, na configuração declarada — a final, para usina `EE` com entrada de máquinas em `exph.dat`) positivos; `constant_productivity` nos demais casos. Uma usina excluída só pela capacidade nula é listada em diagnóstico informativo."
 
   [[output.field]]
   path = "hydros[].generation.min_turbined_m3s"
@@ -1562,8 +1563,11 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
     { file = "modif", item = "CMONT · nivel" },
     { file = "volref_saz", item = "valor" },
     { file = "dger", item = "sazonaliza_cfuga_cmont" },
+    { file = "confhd", item = "usina_existente" },
+    { file = "exph", item = "data_entrada_operacao" },
+    { file = "exph", item = "conjunto_maquina_entrada" },
   ]
-  how = "Engolimento máximo na queda de operação: soma por conjunto de `n · vazao_nominal · (h_op / queda_nominal)^k` (k = 0,5 para Francis/Pelton, 0,2 para Kaplan), limitada por `potência instalada / (ρ_esp · h_op)` e multiplicada pela disponibilidade `(1 − teif/100) · (1 − ip/100)`. `h_op` é a queda líquida média entre `volume_minimo` e 65% do volume útil (regulação `M`) ou na cota de `volume_referencia` (`D`/`S`), descontados canal de fuga e perdas. Para usina com `CFUGA`/`CMONT` ou linha em `volref_saz.dat`, o valor é elevado ao máximo dos limites por estágio emitidos em `hydro_bounds.parquet`, pois o Cobre não admite limite por estágio acima do declarado."
+  how = "Engolimento máximo na queda de operação: soma por conjunto de `n · vazao_nominal · (h_op / queda_nominal)^k` (k = 0,5 para Francis/Pelton, 0,2 para Kaplan), limitada por `potência instalada / (ρ_esp · h_op)` e multiplicada pela disponibilidade `(1 − teif/100) · (1 − ip/100)`. `h_op` é a queda líquida média entre `volume_minimo` e 65% do volume útil (regulação `M`) ou na cota de `volume_referencia` (`D`/`S`), descontados canal de fuga e perdas. Usina `EE` com entrada de máquinas em `exph.dat` declara a configuração final, com todas as máquinas em operação; a rampa até ela vai para `hydro_bounds.parquet`. Para usina com `CFUGA`/`CMONT` ou linha em `volref_saz.dat`, o valor é elevado ao máximo dos limites por estágio emitidos em `hydro_bounds.parquet`, pois o Cobre não admite limite por estágio acima do declarado."
 
   [[output.field]]
   path = "hydros[].generation.min_generation_mw"
@@ -1580,8 +1584,11 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
     { file = "modif", item = "POTEFE · potencia, conjunto" },
     { file = "modif", item = "NUMCNJ · numero" },
     { file = "modif", item = "NUMMAQ · numero_maquinas" },
+    { file = "confhd", item = "usina_existente" },
+    { file = "exph", item = "data_entrada_operacao" },
+    { file = "exph", item = "conjunto_maquina_entrada" },
   ]
-  how = "Potência instalada nominal: soma por conjunto de `maquinas_conjunto · potencia_nominal_conjunto` (potência do conjunto sobrescrita pelo registro permanente `POTEFE` de `modif.dat`), sem desconto de `teif`/`ip` (o teto GHmax da FPHA do NEWAVE)."
+  how = "Potência instalada nominal: soma por conjunto de `maquinas_conjunto · potencia_nominal_conjunto` (potência do conjunto sobrescrita pelo registro permanente `POTEFE` de `modif.dat`), sem desconto de `teif`/`ip` (o teto GHmax da FPHA do NEWAVE). Usina `EE` com entrada de máquinas em `exph.dat` declara a configuração final: a de `modif.dat` no início do estudo mais as máquinas que entram, até o total de `hidr.dat`."
 
   [[output.field]]
   path = "hydros[].unit_groups[].id"
@@ -2173,7 +2180,7 @@ summary = "Famílias de curvas de nível de jusante (polinômios por partes na v
 [[output]]
 path = "constraints/hydro_bounds.parquet"
 kind = "parquet"
-when = "somente quando ao menos uma fonte produz linhas: `dsvagua.dat` com desvios (e `outros_usos_da_agua` de `dger.dat` diferente de 0), registros temporais `VMAXT`/`VMINT`/`TURBMAXT`/`TURBMINT`/`VAZMINT` em `modif.dat`, `ghmin.dat`, usina NE com enchimento em `exph.dat`, ou usina com `CFUGA`/`CMONT`/linha em `volref_saz.dat`"
+when = "somente quando ao menos uma fonte produz linhas: `dsvagua.dat` com desvios (e `outros_usos_da_agua` de `dger.dat` diferente de 0), registros temporais `VMAXT`/`VMINT`/`TURBMAXT`/`TURBMINT`/`VAZMINT` em `modif.dat`, `ghmin.dat`, usina NE com enchimento ou usina EE com entrada de máquinas em `exph.dat`, ou usina com `CFUGA`/`CMONT`/linha em `volref_saz.dat`"
 module = "src/cobre_bridge/newave/converters/hydro/bounds.py"
 reads = [
   { file = "dsvagua" },
@@ -2185,7 +2192,7 @@ reads = [
   { file = "exph" },
   { file = "volref_saz" },
 ]
-summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`, resultado da junção externa de três tabelas: retirada de água (`dsvagua.dat`), limites temporais (`modif.dat`, `ghmin.dat`, rampa de máquinas de `exph.dat`) e turbinamento máximo corrigido pela queda por estágio (`CFUGA`/`CMONT`/`volref_saz.dat`). Colunas de máximo acima do valor declarado em `hydros.json` são limitadas ao declarado, com aviso. A coluna `max_generation_mw` só existe quando há usina NE em enchimento."
+summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`, resultado da junção externa de três tabelas: retirada de água (`dsvagua.dat`), limites temporais (`modif.dat`, `ghmin.dat`, rampa de máquinas de `exph.dat`) e turbinamento máximo corrigido pela queda por estágio (`CFUGA`/`CMONT`/`volref_saz.dat`). Colunas de máximo acima do valor declarado em `hydros.json` são limitadas ao declarado, com aviso. A coluna `max_generation_mw` só existe quando há usina NE em enchimento ou usina EE com entrada de máquinas."
 
   [[output.field]]
   path = "hydro_id"
@@ -2278,7 +2285,7 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
     { file = "exph", item = "data_inicio_enchimento" },
     { file = "exph", item = "duracao_enchimento" },
   ]
-  how = "Três origens, nesta precedência: (1) `TURBMAXT` de `modif.dat`, valor absoluto em degrau (valor maior ou igual a 99990 restaura o padrão; pós-estudo congelado); (2) para usina NE em enchimento, o engolimento corrigido pela queda com apenas as máquinas já em operação (`data_entrada_operacao` por conjunto, nunca antes do fim do enchimento), 0 antes de entrar em operação, e esta linha prevalece sobre qualquer outra no mesmo estágio; (3) onde ainda vazio, o engolimento corrigido pela queda do estágio (`h = ρ_eq / ρ_esp`, com `CFUGA`/`CMONT` e `volref_saz.dat`), pela mesma fórmula de `hydros[].generation.max_turbined_m3s`. Valores acima do declarado em `hydros.json` são reduzidos ao declarado."
+  how = "Três origens, nesta precedência: (1) `TURBMAXT` de `modif.dat`, valor absoluto em degrau (valor maior ou igual a 99990 restaura o padrão; pós-estudo congelado); (2) para usina NE em enchimento, o engolimento corrigido pela queda com apenas as máquinas já em operação (`data_entrada_operacao` por conjunto, nunca antes do fim do enchimento), 0 antes de entrar em operação, e esta linha prevalece sobre qualquer outra no mesmo estágio; (3) onde ainda vazio, o engolimento corrigido pela queda do estágio (`h = ρ_eq / ρ_esp`, com `CFUGA`/`CMONT` e `volref_saz.dat`), pela mesma fórmula de `hydros[].generation.max_turbined_m3s`, com as máquinas em operação no estágio para usina `EE`; usina `EE` sem queda por estágio recebe linha só nos estágios anteriores à entrada da última máquina de `exph.dat`, na mesma queda de referência do valor declarado. Valores acima do declarado em `hydros.json` são reduzidos ao declarado."
 
   [[output.field]]
   path = "min_outflow_m3s"
@@ -2303,17 +2310,20 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
 
   [[output.field]]
   path = "max_generation_mw"
-  when = "somente quando o caso tem usina NE com registro de enchimento em `exph.dat` (a coluna é omitida nos demais casos)"
+  when = "somente quando o caso tem usina NE com registro de enchimento ou usina EE com entrada de máquinas em `exph.dat` (a coluna é omitida nos demais casos)"
   from = [
     { file = "exph", item = "data_entrada_operacao" },
     { file = "exph", item = "conjunto_maquina_entrada" },
     { file = "exph", item = "data_inicio_enchimento" },
     { file = "exph", item = "duracao_enchimento" },
+    { file = "confhd", item = "usina_existente" },
     { file = "hidr", item = "maquinas_conjunto_1 … maquinas_conjunto_5" },
     { file = "hidr", item = "potencia_nominal_conjunto_1 … potencia_nominal_conjunto_5" },
     { file = "modif", item = "POTEFE · potencia, conjunto" },
+    { file = "modif", item = "NUMCNJ · numero" },
+    { file = "modif", item = "NUMMAQ · numero_maquinas" },
   ]
-  how = "Potência nominal (MW) das máquinas já em operação da usina NE em cada estágio anterior à entrada de todas as unidades: soma de `n_online · potencia_nominal_conjunto` por conjunto, 0 antes do fim do enchimento. Nulo nas linhas de `modif.dat`/`ghmin.dat`. Valores acima do declarado em `hydros.json` são reduzidos ao declarado."
+  how = "Potência nominal (MW) das máquinas em operação em cada estágio anterior à entrada da última máquina: soma de `n_online · potencia_nominal_conjunto` por conjunto. Para usina NE, 0 antes do fim do enchimento; para usina EE, a configuração de `modif.dat` no início do estudo mais as máquinas de `exph.dat` já entradas, na mesma linha de qualquer limite de `modif.dat`/`ghmin.dat` do estágio. Nulo nas demais linhas de `modif.dat`/`ghmin.dat`. Valores acima do declarado em `hydros.json` são reduzidos ao declarado."
 
 # ===== frag_C_nw_scenarios_constraints =====
 # Fragment C — NEWAVE: scenarios/* e constraints/generic_constraint*.
