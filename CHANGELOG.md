@@ -58,6 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scenarios/inflow_history.parquet` replaced, so the tab showed an error
   placeholder; it now reads each window's `start_date`. A case with no fitted
   AR model shows a note instead of an empty order chart.
+- **`--log-file` creates its missing parent directories**, and a path that
+  cannot be written is reported as an option error instead of a traceback.
 - **A plant with zero rated turbined flow or rated power stays on constant
   productivity** on both tracks, instead of being emitted as FPHA and making
   cobre's fit abort the run; such plants are listed in an informational

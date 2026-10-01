@@ -107,6 +107,58 @@ class TestVerbosityAndLogFile:
         # The FileHandler was removed + closed in main()'s finally.
         assert self._file_handlers() == []
 
+    def test_log_file_creates_missing_parent_directories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cobre_bridge.core.conversion import ConversionReport
+
+        src = _make_fake_newave_dir(tmp_path)
+        log_path = tmp_path / "logs" / "nested" / "run.log"
+
+        with patch(
+            "cobre_bridge.newave.pipeline.convert_newave_case",
+            return_value=ConversionReport(hydro_count=1, stage_count=12),
+        ):
+            code, _stdout, _stderr = self._invoke_main(
+                [
+                    "convert",
+                    "newave",
+                    str(src),
+                    str(tmp_path / "dst"),
+                    "--log-file",
+                    str(log_path),
+                ],
+                monkeypatch,
+            )
+
+        assert code == 0
+        assert log_path.exists()
+        assert self._file_handlers() == []
+
+    def test_unwritable_log_file_is_an_option_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A path that cannot be opened (here, an existing directory) fails as a
+        ``--log-file`` usage error, not a traceback."""
+        src = _make_fake_newave_dir(tmp_path)
+
+        code, _stdout, stderr = self._invoke_main(
+            [
+                "convert",
+                "newave",
+                str(src),
+                str(tmp_path / "dst"),
+                "--log-file",
+                str(tmp_path),
+            ],
+            monkeypatch,
+        )
+
+        assert code == 2
+        assert "--log-file" in stderr
+        assert "Traceback" not in stderr
+        assert self._file_handlers() == []
+
     def test_consecutive_log_file_runs_leave_no_handler(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
