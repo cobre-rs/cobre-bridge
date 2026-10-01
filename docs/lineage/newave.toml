@@ -2293,8 +2293,9 @@ summary = "Limites por (usina, estágio) que apertam o envelope de `hydros.json`
     { file = "dger", item = "desconsidera_vazao_minima" },
     { file = "modif", item = "VAZMINT · vazao" },
     { file = "modif", item = "VAZMINT · data_inicio" },
+    { file = "modif", item = "VAZMINT · periodo" },
   ]
-  how = "Vazão defluente mínima (m³/s) de `VAZMINT`, valor absoluto em função degrau a partir de `data_inicio`; valor maior ou igual a 99990 (família 99999) restaura o padrão. No pós-estudo congela o último estágio de estudo."
+  how = "Vazão defluente mínima (m³/s) de `VAZMINT`, valor absoluto em função degrau a partir de `data_inicio`; valor maior ou igual a 99990 (família 99999) restaura o padrão. Registros com ano `PRE` ou `POS` formam degraus sobre um ano que se repete: o valor `PRE` vigente no mês anterior ao início do estudo vale até o primeiro registro datado, e os degraus `POS` definem cada mês do pós-estudo. Sem `POS`, o pós-estudo congela o último estágio de estudo."
 
   [[output.field]]
   path = "min_generation_mw"

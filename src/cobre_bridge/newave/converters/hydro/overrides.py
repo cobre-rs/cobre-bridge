@@ -23,10 +23,17 @@ from cobre_bridge.newave.horizon import POST_STUDY_YEAR
 _LOG = logging.getLogger(__name__)
 
 
-# Temporal override types extracted from MODIF.DAT.
-_TEMPORAL_OVERRIDE_TYPES = frozenset(
-    {"VAZMINT", "VMAXT", "VMINT", "CFUGA", "CMONT", "TURBMINT", "TURBMAXT"}
-)
+# Temporal (dated) MODIF.DAT record types and the attribute holding each value.
+_TEMPORAL_VALUE_ATTR = {
+    "VAZMINT": "vazao",
+    "VMAXT": "volume",
+    "VMINT": "volume",
+    "CFUGA": "nivel",
+    "CMONT": "nivel",
+    "TURBMINT": "turbinamento",
+    "TURBMAXT": "turbinamento",
+}
+_TEMPORAL_OVERRIDE_TYPES = frozenset(_TEMPORAL_VALUE_ATTR)
 
 
 def _raw_unit(rec: object) -> str:
@@ -284,12 +291,10 @@ def _extract_temporal_overrides(
         {"type": str, "month": int, "year": int | None,
          "period": "PRE" | "POS" | None, "value": float}
 
-    The source model marks a temporal record's year field with ``PRE``
-    (pre-study period) or ``POS`` (post-study period) instead of a numeric
-    year. Those records carry ``year=None`` and ``period="PRE"``/``"POS"``;
-    a normal study record carries a numeric ``year`` and ``period=None``.
-    The step-function builder maps ``PRE`` onto the horizon entry and ``POS``
-    onto the post-study tail.
+    A VAZMINT record may mark its year field ``PRE`` (pre-study period) or
+    ``POS`` (post-study period); it then carries ``year=None`` and that
+    ``period``. A VAZMINT record with no month, or with neither a year nor a
+    marker, is skipped and reported.
 
     For CFUGA/CMONT the ``"value"`` field is the level in metres.  For
     TURBMINT/TURBMAXT it is the turbined flow in m³/s and for VAZMINT the flow
@@ -325,20 +330,8 @@ def _extract_temporal_overrides(
         return result
 
     # Loop-accumulate-then-emit-once (see _apply_permanent_overrides above).
-    unknown_temporal: list[tuple[int, str]] = []
+    undated: list[tuple[int, str]] = []
     unit_unknown: list[tuple[int, str, str]] = []
-
-    # Value attribute per record type (all temporal records share the same
-    # month + year shape; only the value field name differs).
-    _value_attr = {
-        "VAZMINT": "vazao",
-        "VMAXT": "volume",
-        "VMINT": "volume",
-        "CFUGA": "nivel",
-        "CMONT": "nivel",
-        "TURBMINT": "turbinamento",
-        "TURBMAXT": "turbinamento",
-    }
 
     for usina_rec in usina_records:
         code = int(usina_rec.codigo)
@@ -351,11 +344,6 @@ def _extract_temporal_overrides(
             if type_name not in _TEMPORAL_OVERRIDE_TYPES:
                 continue
 
-            value_attr = _value_attr.get(type_name)
-            if value_attr is None:
-                unknown_temporal.append((code, type_name))
-                continue
-
             # VMAXT/VMINT carry a unit column ('h' hm³ or '%' of useful volume);
             # a record with no recognisable unit is taken as '%' and reported.
             unit: str | None = None
@@ -365,27 +353,26 @@ def _extract_temporal_overrides(
                     unit_unknown.append((code, type_name, _raw_unit(rec)))
                     unit = "%"
 
-            # Only VAZMINT carries the ``PRE``/``POS`` period markers (the sole
-            # modif.dat record where the source model admits them); it exposes
-            # ``periodo``/``mes`` and a ``data_inicio`` that is ``None`` for a
-            # marker. Every other temporal record always carries a numeric year,
-            # read through ``data_inicio`` as before.
+            # Only VAZMINT admits the PRE/POS markers, so only it reads them.
             if type_name == "VAZMINT":
                 period = rec.periodo
-                month = rec.mes
-                year = None if period is not None else int(rec.data_inicio.year)
+                start = rec.data_inicio
+                if rec.mes is None or (period is None and start is None):
+                    undated.append((code, type_name))
+                    continue
+                month = int(rec.mes)
+                year = None if period is not None else int(start.year)
             else:
                 period = None
-                data = rec.data_inicio
-                month = int(data.month)
-                year = int(data.year)
+                month = int(rec.data_inicio.month)
+                year = int(rec.data_inicio.year)
 
             override: dict = {
                 "type": type_name,
-                "month": None if month is None else int(month),
+                "month": month,
                 "year": year,
                 "period": period,
-                "value": float(getattr(rec, value_attr)),
+                "value": float(getattr(rec, _TEMPORAL_VALUE_ATTR[type_name])),
             }
             if unit is not None:
                 override["unit"] = unit
@@ -394,20 +381,21 @@ def _extract_temporal_overrides(
         if plant_overrides:
             result[code] = plant_overrides
 
-    if unknown_temporal:
+    if undated:
         emit(
             Diagnostic(
-                code="modif-temporal-override-unknown",
+                code="modif-temporal-override-undated",
                 severity=Severity.WARNING,
                 category="Cadastro overrides",
-                title=f"Unknown temporal override type(s) ({len(unknown_temporal)})",
+                title=f"Dated override(s) without a date ({len(undated)})",
                 summary=(
-                    f"MODIF.DAT contains {len(unknown_temporal)} unknown "
-                    "temporal override record(s); skipping."
+                    f"MODIF.DAT contains {len(undated)} dated override record(s) "
+                    "with no month, or with neither a year nor a PRE/POS marker; "
+                    "skipping."
                 ),
                 table=DiagnosticTable(
                     columns=["Code", "Type"],
-                    rows=[[code, type_name] for code, type_name in unknown_temporal],
+                    rows=[[code, type_name] for code, type_name in undated],
                     justify=["right", "left"],
                 ),
             ),

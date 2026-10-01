@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -390,15 +390,11 @@ class TestExtractTemporalOverrides:
         vmaxt_rec = MagicMock()
         type(vmaxt_rec).__name__ = "VMAXT"
         vmaxt_rec.data_inicio = datetime.datetime(2025, 1, 1)
-        vmaxt_rec.periodo = None
-        vmaxt_rec.mes = 1
         vmaxt_rec.volume = 73.2
         vmaxt_rec.unidade = "'%'"
         vmint_rec = MagicMock()
         type(vmint_rec).__name__ = "VMINT"
         vmint_rec.data_inicio = datetime.datetime(2025, 2, 1)
-        vmint_rec.periodo = None
-        vmint_rec.mes = 2
         vmint_rec.volume = 1500.0
         vmint_rec.unidade = "'h'"
 
@@ -441,8 +437,6 @@ class TestExtractTemporalOverrides:
         vmaxt_rec = MagicMock()
         type(vmaxt_rec).__name__ = "VMAXT"
         vmaxt_rec.data_inicio = datetime.datetime(2025, 1, 1)
-        vmaxt_rec.periodo = None
-        vmaxt_rec.mes = 1
         vmaxt_rec.volume = 73.2
         vmaxt_rec.unidade = None
 
@@ -532,8 +526,6 @@ class TestExtractTemporalOverrides:
         cfuga_rec = MagicMock()
         type(cfuga_rec).__name__ = "CFUGA"
         cfuga_rec.data_inicio = datetime.datetime(2025, 6, 1)
-        cfuga_rec.periodo = None
-        cfuga_rec.mes = 6
         cfuga_rec.nivel = 75.4
 
         usina_rec = MagicMock()
@@ -566,15 +558,11 @@ class TestExtractTemporalOverrides:
         turbmint_rec = MagicMock()
         type(turbmint_rec).__name__ = "TURBMINT"
         turbmint_rec.data_inicio = datetime.datetime(2025, 11, 1)
-        turbmint_rec.periodo = None
-        turbmint_rec.mes = 11
         turbmint_rec.turbinamento = 330.0
 
         turbmaxt_rec = MagicMock()
         type(turbmaxt_rec).__name__ = "TURBMAXT"
         turbmaxt_rec.data_inicio = datetime.datetime(2025, 3, 1)
-        turbmaxt_rec.periodo = None
-        turbmaxt_rec.mes = 3
         turbmaxt_rec.turbinamento = 322.0
 
         usina_rec = MagicMock()
@@ -968,104 +956,61 @@ class TestApplyPermanentOverridesDiagnostics:
 
 
 class TestExtractTemporalOverridesDiagnostics:
-    """Emission-shape coverage for the unknown-temporal-type diagnostic.
+    """A VAZMINT record with no month, or with neither a year nor a PRE/POS
+    marker, is skipped and reported once."""
 
-    ``_TEMPORAL_OVERRIDE_TYPES`` gates entry to the type-dispatch chain, and
-    every one of its current members is handled there, so the ``else``
-    branch is unreachable through the real frozenset — it is defensive
-    against a future member added to the set without a matching dispatch
-    arm. These tests patch the frozenset to admit a type the chain does not
-    handle, exercising exactly that defensive path.
-    """
-
-    def _modif_case(self, tmp_path, mock_modif):
+    def _modif_case(self, tmp_path, records):
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = records
         return make_case(
             make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
             modif=mock_modif,
         )
 
-    def test_unknown_temporal_type_emits_table(self, tmp_path) -> None:
-        from cobre_bridge.newave.converters.hydro import _extract_temporal_overrides
+    @staticmethod
+    def _vazmint(mes, periodo, data_inicio) -> MagicMock:
+        rec = MagicMock()
+        type(rec).__name__ = "VAZMINT"
+        rec.mes = mes
+        rec.periodo = periodo
+        rec.data_inicio = data_inicio
+        rec.vazao = 50.0
+        return rec
 
-        unknown_rec = MagicMock()
-        type(unknown_rec).__name__ = "SOME_FUTURE_TEMPORAL_TYPE"
-
-        usina_rec = MagicMock()
-        usina_rec.codigo = 1
-
-        mock_modif = MagicMock()
-        mock_modif.usina.return_value = [usina_rec]
-        mock_modif.modificacoes_usina.return_value = [unknown_rec]
-
-        with (
-            patch(
-                "cobre_bridge.newave.converters.hydro.overrides._TEMPORAL_OVERRIDE_TYPES",
-                frozenset({"SOME_FUTURE_TEMPORAL_TYPE"}),
-            ),
-            dx.collect() as collected,
-        ):
-            result = _extract_temporal_overrides(
-                self._modif_case(tmp_path, mock_modif), [1]
-            )
-
-        assert result == {}
-        assert len(collected) == 1
-        diag = collected[0]
-        assert diag.code == "modif-temporal-override-unknown"
-        assert diag.severity is Severity.WARNING
-        assert diag.category == "Cadastro overrides"
-        assert diag.table is not None
-        assert diag.table.columns == ["Code", "Type"]
-        assert diag.table.rows == [[1, "SOME_FUTURE_TEMPORAL_TYPE"]]
-
-        _assert_no_repo_internal_leaks(collected)
-
-    def test_no_unknown_types_emits_nothing(self, tmp_path) -> None:
+    def test_undated_records_are_skipped_and_reported(self, tmp_path) -> None:
         import datetime
 
         from cobre_bridge.newave.converters.hydro import _extract_temporal_overrides
 
-        vazmint_rec = MagicMock()
-        type(vazmint_rec).__name__ = "VAZMINT"
-        vazmint_rec.data_inicio = datetime.datetime(2025, 1, 1)
-        vazmint_rec.vazao = 50.0
-
-        usina_rec = MagicMock()
-        usina_rec.codigo = 1
-
-        mock_modif = MagicMock()
-        mock_modif.usina.return_value = [usina_rec]
-        mock_modif.modificacoes_usina.return_value = [vazmint_rec]
-
+        records = [
+            self._vazmint(None, "POS", None),
+            self._vazmint(3, None, None),
+            self._vazmint(1, None, datetime.datetime(2025, 1, 1)),
+        ]
         with dx.collect() as collected:
-            _extract_temporal_overrides(self._modif_case(tmp_path, mock_modif), [1])
+            result = _extract_temporal_overrides(
+                self._modif_case(tmp_path, records), [1]
+            )
 
-        assert collected == []
+        assert [o["year"] for o in result[1]] == [2025]
+        [diag] = collected
+        assert diag.code == "modif-temporal-override-undated"
+        assert diag.severity is Severity.WARNING
+        assert diag.table is not None
+        assert diag.table.rows == [[1, "VAZMINT"], [1, "VAZMINT"]]
+        _assert_no_repo_internal_leaks(collected)
 
     def test_no_sink_fallback_logs_one_warning(self, tmp_path, caplog) -> None:
-        """With no active collect() sink, emit() degrades to a single logging
-        record — the pre-migration caplog contract keeps working."""
         import logging
 
         from cobre_bridge.newave.converters.hydro import _extract_temporal_overrides
 
-        unknown_rec = MagicMock()
-        type(unknown_rec).__name__ = "SOME_FUTURE_TEMPORAL_TYPE"
-        usina_rec = MagicMock()
-        usina_rec.codigo = 1
-
-        mock_modif = MagicMock()
-        mock_modif.usina.return_value = [usina_rec]
-        mock_modif.modificacoes_usina.return_value = [unknown_rec]
-
-        with (
-            patch(
-                "cobre_bridge.newave.converters.hydro.overrides._TEMPORAL_OVERRIDE_TYPES",
-                frozenset({"SOME_FUTURE_TEMPORAL_TYPE"}),
-            ),
-            caplog.at_level(logging.WARNING),
-        ):
-            _extract_temporal_overrides(self._modif_case(tmp_path, mock_modif), [1])
+        case = self._modif_case(tmp_path, [self._vazmint(None, "PRE", None)])
+        with caplog.at_level(logging.WARNING):
+            _extract_temporal_overrides(case, [1])
 
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 1

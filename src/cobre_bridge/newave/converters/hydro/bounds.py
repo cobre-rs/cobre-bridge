@@ -732,36 +732,21 @@ def convert_storage_bounds(
         *,
         seasonalize: bool,
     ) -> dict[int, float]:
-        """Thin adapter over :func:`cobre_bridge.newave.horizon.seasonal_step_function`.
-
-        Splits the MODIF override dicts into study change-points ``(year, month,
-        value)`` and the source model's ``PRE``/``POS`` seasonal markers
-        ``(month, value)``, then delegates the forward-fill, big-M clearing,
-        PRE seeding, POS override, and seasonalize-vs-freeze post-study logic to
-        the shared helper.
+        """Thin adapter over :func:`cobre_bridge.newave.horizon.seasonal_step_function`:
+        dated records become ``(year, month, value)`` change-points and
+        ``PRE``/``POS`` records ``(month, value)`` steps.
         """
-        study = [
-            (int(r["year"]), int(r["month"]), float(r["value"]))
-            for r in recs
-            if r.get("period") is None and r.get("year") is not None
-        ]
-        pre = [
-            (int(r["month"]), float(r["value"]))
-            for r in recs
-            if r.get("period") == "PRE"
-        ]
-        pos = [
-            (int(r["month"]), float(r["value"]))
-            for r in recs
-            if r.get("period") == "POS"
-        ]
+
+        def steps(period: str) -> list[tuple[int, float]]:
+            return [(r["month"], r["value"]) for r in recs if r["period"] == period]
+
         return seasonal_step_function(
-            study,
+            [(r["year"], r["month"], r["value"]) for r in recs if r["period"] is None],
             transform,
             seasonalize=seasonalize,
             horizon=horizon,
-            pre_recs=pre or None,
-            pos_recs=pos or None,
+            pre_recs=steps("PRE"),
+            pos_recs=steps("POS"),
         )
 
     # GHMIN.DAT per-stage minimums.  These are not MODIF.DAT overrides
