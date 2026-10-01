@@ -69,6 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unreadable or missing. Warnings name the file the deck's `arquivos` lists,
   and `compare newave` reads `sistema` and `c_adic` through it too, so decks
   that use another extension (such as `.eas`) are read in full.
+- **No GTMIN warning for a minimum the deck rounded to its capacity.** A
+  thermal GTMIN written as the available capacity rounded to 0.01 MW could
+  exceed it by a fraction of that step and was reported as a data error, with
+  both values shown as the same number. Excesses within that rounding are no
+  longer reported, and the warning's table shows values to 0.01 MW with the
+  excess in its own column.
 - **A plant with zero rated turbined flow or rated power stays on constant
   productivity** on both tracks, instead of being emitted as FPHA and making
   cobre's fit abort the run; such plants are listed in an informational

@@ -354,6 +354,12 @@ def _step5_apply_maint_reduction(
         state.potencia -= float(maint_reduction[stage_idx])
 
 
+#: Half the 0.01 MW resolution the deck writes GTMIN with: a GTMIN set to the
+#: available capacity and rounded to that resolution can exceed it by up to this
+#: much without being a data error.
+_GTMIN_ROUNDING_MW = 0.005
+
+
 def _step6_evaluate_bounds(state: _StageInputs) -> tuple[float, float, bool]:
     """Step 6: evaluate ``(min_mw, max_mw, gtmin_above_capacity)``.
 
@@ -361,11 +367,12 @@ def _step6_evaluate_bounds(state: _StageInputs) -> tuple[float, float, bool]:
     the available capacity is a data error the source model rejects; the
     inflexible minimum is honored and the maximum lifted to it to keep the LP
     feasible — clamping the minimum down instead would silently run the plant
-    below its GTMIN.
+    below its GTMIN. An excess within the deck's rounding of GTMIN
+    (:data:`_GTMIN_ROUNDING_MW`) still lifts the maximum but is not flagged.
     """
     capacity_max = _capacity_max(state)
     min_mw = max(0.0, state.gen_min)
-    gtmin_above_capacity = min_mw > capacity_max
+    gtmin_above_capacity = min_mw > capacity_max + _GTMIN_ROUNDING_MW
     max_mw = max(capacity_max, min_mw)
     return min_mw, max_mw, gtmin_above_capacity
 
@@ -656,9 +663,10 @@ def _thermal_names(case: NewaveCase) -> dict[int, str]:
 def _emit_gtmin_above_capacity(records: list[_GtminRecord], case: NewaveCase) -> None:
     """Emit the per-plant GTMIN-above-capacity diagnostic from the captured records.
 
-    One row per plant: the stages it occurred on (collapsed to ranges) and the worst
-    GTMIN vs the lowest available capacity across those stages — so the user sees the
-    plant, where, and by how much, instead of a bare code list.
+    One row per plant: the stages it occurred on (collapsed to ranges), the worst
+    GTMIN vs the lowest available capacity across those stages, and the largest
+    single-stage excess — so the user sees the plant, where, and by how much,
+    instead of a bare code list. Values keep the deck's 0.01 MW resolution.
     """
     names = _thermal_names(case)
     by_code: dict[int, list[_GtminRecord]] = {}
@@ -673,8 +681,9 @@ def _emit_gtmin_above_capacity(records: list[_GtminRecord], case: NewaveCase) ->
                 names.get(code, "?"),
                 code,
                 format_stage_ranges(r.stage_id for r in recs),
-                round(max(r.gtmin_mw for r in recs), 1),
-                round(min(r.capacity_mw for r in recs), 1),
+                round(max(r.gtmin_mw for r in recs), 2),
+                round(min(r.capacity_mw for r in recs), 2),
+                round(max(r.gtmin_mw - r.capacity_mw for r in recs), 2),
             ]
         )
 
@@ -686,16 +695,17 @@ def _emit_gtmin_above_capacity(records: list[_GtminRecord], case: NewaveCase) ->
             category="Thermal bounds",
             title=f"GTMIN exceeds available capacity ({plant_count} plant(s))",
             summary=(
-                f"GTMIN exceeds the FCMAX-derived capacity for {plant_count} thermal "
-                "plant(s) in at least one stage; honoring GTMIN to keep the LP "
-                "feasible."
+                f"GTMIN exceeds the available capacity (after FCMAX, TEIF, IP and "
+                f"maintenance) for {plant_count} thermal plant(s) in at least one "
+                "stage; honoring GTMIN to keep the LP feasible."
             ),
             table=DiagnosticTable(
-                columns=["Plant", "Code", "Stages", "GTMIN MW", "Cap MW"],
+                columns=["Plant", "Code", "Stages", "GTMIN MW", "Cap MW", "Excess MW"],
                 rows=rows,
-                justify=["left", "right", "left", "right", "right"],
+                justify=["left", "right", "left", "right", "right", "right"],
                 caption=(
-                    "GTMIN = max, Cap = min available capacity across the listed stages"
+                    "GTMIN = max, Cap = min available capacity, Excess = largest "
+                    "single-stage excess across the listed stages"
                 ),
             ),
             remediation="Check EXPT FCMAX/GTMIN and MANUTT for these plants.",

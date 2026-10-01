@@ -953,6 +953,19 @@ class TestThermalBoundStageSteps:
         assert max_mw == pytest.approx(469.62)  # cap lifted to GTMIN for feasibility
         assert exceeded is True
 
+    def test_step6_rounding_excess_lifts_the_cap_without_flagging(self) -> None:
+        """A GTMIN equal to the available capacity rounded to the deck's 0.01 MW
+        (477.9585 written as 477.96) is not a data error."""
+        from cobre_bridge.newave.converters.thermal import _step6_evaluate_bounds
+
+        state = self._state(
+            potencia=496.2193548387096, fcmax=100.0, ip=0.0, teif=3.68, gen_min=477.96
+        )
+        min_mw, max_mw, exceeded = _step6_evaluate_bounds(state)
+        assert min_mw == pytest.approx(477.96)
+        assert max_mw == pytest.approx(477.96)
+        assert exceeded is False
+
     def test_step6_clamps_negative_potencia_to_zero(self) -> None:
         from cobre_bridge.newave.converters.thermal import _step6_evaluate_bounds
 
@@ -962,6 +975,30 @@ class TestThermalBoundStageSteps:
         assert min_mw == pytest.approx(10.0)
         assert max_mw == pytest.approx(10.0)
         assert exceeded is True
+
+
+class TestGtminAboveCapacityDiagnostic:
+    def test_table_reports_the_excess_at_the_deck_resolution(self, tmp_path) -> None:
+        from cobre_bridge.core import diagnostics as dx
+        from cobre_bridge.newave.converters.thermal import (
+            _emit_gtmin_above_capacity,
+            _GtminRecord,
+        )
+
+        conft, _clast, _term = _thermal_readers()
+        case = make_case(tmp_path, conft=conft)
+        records = [
+            _GtminRecord(code=10, stage_id=2, gtmin_mw=478.03, capacity_mw=477.9585),
+            _GtminRecord(code=10, stage_id=3, gtmin_mw=478.01, capacity_mw=477.99),
+        ]
+
+        with dx.collect() as collected:
+            _emit_gtmin_above_capacity(records, case)
+
+        [diag] = collected
+        assert diag.table is not None
+        assert diag.table.columns[-1] == "Excess MW"
+        assert diag.table.rows == [["TERMO_A", 10, "2-3", 478.03, 477.96, 0.07]]
 
 
 class TestThermalGenerationBounds:
