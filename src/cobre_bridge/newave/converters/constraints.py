@@ -1288,11 +1288,7 @@ def _parse_re_dat(
         if not changepoints:
             continue
 
-        # Each row already contributed one changepoint per stage of its own
-        # window, so writing them all out covers exactly the declared stages.
-        # Sorting by stage and then patamar keeps the overlap rule: where a
-        # patamar-0 row and a patamar-specific row both cover a stage, the
-        # specific one is applied last and wins that block.
+        # Patamar 0 sorts first, so a patamar-specific row wins its block.
         changepoints.sort()
         stage_bounds: dict[tuple[int, int], float] = {}
 
@@ -1320,8 +1316,7 @@ def convert_electric_constraints(
     bounds.  Both sources register every limit with a start and an end
     period, and a bound is emitted only for the stages its own registration
     covers: a constraint declared for part of the horizon is absent from the
-    rest of it, rather than being carried or repeated into stages the deck
-    never declared.
+    rest of it.
 
     Parameters
     ----------
