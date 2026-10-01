@@ -145,28 +145,51 @@ class TestConvertHydros:
                 "max_turbined_m3s",
             }
 
-    def test_run_of_river_S_storage_collapsed_to_vmin(self, tmp_path) -> None:
-        """``tipo_regulacao='S'`` (fio-d'água) collapses storage to Vmin.
+    def test_run_of_river_S_storage_collapsed_to_volref(self, tmp_path) -> None:
+        """``tipo_regulacao='S'`` (fio-d'água) collapses storage to the
+        reference volume.
 
-        The source model treats 'S' plants as run-of-river with no usable buffer
-        (ITAIPU, the only 'S' plant, sits at VARMPUH 0% = Vmin every stage, spilling the
-        turbine-excess inflow).  The converter must pin min==max==Vmin so cobre doesn't
-        store and shift that surplus across stages.
+        The source model treats 'S' plants as run-of-river with no usable buffer:
+        they operate at ``volume_referencia`` every stage, spilling the
+        turbine-excess inflow. The converter must pin min==max==volume_referencia
+        (not volume_minimo) so cobre doesn't store and shift that surplus across
+        stages, matching the daily-regulation ('D') collapse.
         """
+        from cobre_bridge.newave.converters.hydro import convert_hydros
+
+        # USINA_A: Vmin 100, Vmax 1000, Vref 550.
+        cadastro = _make_hidr_cadastro()
+        cadastro.loc[1, "tipo_regulacao"] = "S"
+        case = _hydro_case(tmp_path, cadastro=cadastro)
+
+        result = convert_hydros(case, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        assert hydro_a["reservoir"]["min_storage_hm3"] == 550.0
+        assert hydro_a["reservoir"]["max_storage_hm3"] == 550.0
+        # 'M' plant unchanged (keeps its full range).
+        hydro_b = next(h for h in result["hydros"] if h["name"] == "USINA_B")
+        assert hydro_b["reservoir"]["min_storage_hm3"] == 50.0
+        assert hydro_b["reservoir"]["max_storage_hm3"] == 500.0
+
+    def test_run_of_river_S_without_volref_keeps_full_range(self, tmp_path) -> None:
+        """When ``volume_referencia`` is absent/NaN, an 'S' plant is NOT collapsed.
+
+        Without a reference volume there is no defined point to freeze the range
+        at, so the converter leaves ``[volume_minimo, volume_maximo]`` untouched
+        rather than guessing (e.g. pinning to Vmin)."""
+        import numpy as np
+
         from cobre_bridge.newave.converters.hydro import convert_hydros
 
         cadastro = _make_hidr_cadastro()
         cadastro.loc[1, "tipo_regulacao"] = "S"  # USINA_A: Vmin 100, Vmax 1000
+        cadastro.loc[1, "volume_referencia"] = np.nan
         case = _hydro_case(tmp_path, cadastro=cadastro)
 
         result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         assert hydro_a["reservoir"]["min_storage_hm3"] == 100.0
-        assert hydro_a["reservoir"]["max_storage_hm3"] == 100.0
-        # 'M' plant unchanged (keeps its full range).
-        hydro_b = next(h for h in result["hydros"] if h["name"] == "USINA_B")
-        assert hydro_b["reservoir"]["min_storage_hm3"] == 50.0
-        assert hydro_b["reservoir"]["max_storage_hm3"] == 500.0
+        assert hydro_a["reservoir"]["max_storage_hm3"] == 1000.0
 
     def test_cascade_downstream_linkage(self, tmp_path) -> None:
         """Plant 2 (code=2) is downstream of plant 1 (code=1)."""

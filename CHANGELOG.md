@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its remaining-years value afterwards (a blank value keeps the monthly one),
   and the per-stage table is written whenever a plant's bounds vary, even
   without `expt.dat` or `manutt.dat`.
+- **NEWAVE weekly-regulating (`S`) plants hold their reference volume.** Like
+  `D` plants, their storage range and initial storage collapse to
+  `volume_referencia` instead of `volume_minimo`; with no reference volume the
+  full range is kept. DECOMP is unchanged: there `S` plants are reservoirs.
 - **NEWAVE electric constraints stop at the end of their declared period.**
   `re.dat` limits were carried to the end of the study and
   `restricao-eletrica.csv` limits repeated by calendar month past it.

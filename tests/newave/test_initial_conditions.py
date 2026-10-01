@@ -121,20 +121,25 @@ class TestConvertInitialConditions:
         # operational base: 0.50 * (1000 − 400) + 400 = 700 (NOT the raw-min 550).
         assert storage[0] == pytest.approx(700.0)
 
-    def test_run_of_river_S_initial_anchored_to_vmin(self, tmp_path) -> None:
-        """``tipo_regulacao='S'`` initial storage is pinned to Vmin.
+    def test_run_of_river_S_initial_anchored_to_volref(self, tmp_path) -> None:
+        """``tipo_regulacao='S'`` initial storage is pinned to volume_referencia.
 
-        The bounds converter collapses 'S' (fio-d'água) storage to Vmin; the initial
-        condition must match so it stays inside the collapsed [min,max] range (the
-        source model keeps ITAIPU at VARMPUH 0% = Vmin).  The
-        ``volume_inicial_percentual`` (50% here) is ignored for 'S' plants.
+        The bounds converter collapses 'S' (fio-d'água) storage to
+        ``volume_referencia``; the initial condition must match so it stays inside
+        the collapsed [min,max] range. The ``volume_inicial_percentual`` (50% here)
+        is ignored for 'S' plants, and the anchor is the reference volume, not
+        Vmin.
         """
         from cobre_bridge.newave.converters.initial_conditions import (
             convert_initial_conditions,
         )
 
+        # USINA_A: Vmin 100, Vmax 1000. Use a Vref (700) distinct from both Vmin
+        # and the percentual formula result (0.50*(1000-100)+100 = 550) so the
+        # assertion pins down volume_referencia specifically.
         cadastro = _make_hidr_cadastro()
-        cadastro.loc[1, "tipo_regulacao"] = "S"  # USINA_A: Vmin 100, Vmax 1000
+        cadastro.loc[1, "tipo_regulacao"] = "S"
+        cadastro.loc[1, "volume_referencia"] = 700.0
         mock_hidr = MagicMock()
         mock_hidr.cadastro = cadastro
         mock_confhd = MagicMock()
@@ -143,8 +148,9 @@ class TestConvertInitialConditions:
 
         result = convert_initial_conditions(case, self._make_id_map())
         storage = {s["hydro_id"]: s["value_hm3"] for s in result["storage"]}
-        # 'S' plant anchored to Vmin (100), NOT 0.50*(1000−100)+100 = 550.
-        assert storage[0] == pytest.approx(100.0)
+        # 'S' plant anchored to volume_referencia (700), NOT Vmin (100) nor the
+        # percentual 550.
+        assert storage[0] == pytest.approx(700.0)
 
     def _ne_filling_ic_case(self, tmp_path, *, volume_morto: float = 0.0):
         """A ``NewaveCase`` with JURUENA (NE+filling) for IC routing tests.

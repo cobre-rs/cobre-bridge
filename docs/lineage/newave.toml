@@ -620,7 +620,7 @@ summary = "Armazenamento inicial por usina ativa; opcionalmente o volume morto j
     { file = "modif", item = "VOLMIN · volume" },
     { file = "modif", item = "VOLMAX · volume" },
   ]
-  how = "Percentual (limitado a [0, 100]) do volume útil `volume_maximo` − `volume_minimo`, somado ao mínimo, após VOLMIN/VOLMAX permanentes de `modif.dat`. Usinas `tipo_regulacao` D ancoram em `volume_referencia` e S em `volume_minimo`, como o colapso de fio d'água dos limites."
+  how = "Percentual (limitado a [0, 100]) do volume útil `volume_maximo` − `volume_minimo`, somado ao mínimo, após VOLMIN/VOLMAX permanentes de `modif.dat`. Usinas `tipo_regulacao` D e S ancoram em `volume_referencia`, como o colapso de fio d'água dos limites; sem `volume_referencia`, seguem o percentual."
 
   [[output.field]]
   path = "filling_storage"
@@ -1487,7 +1487,7 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
     { file = "hidr", item = "volume_referencia" },
     { file = "modif", item = "VOLMIN · volume, unidade" },
   ]
-  how = "`volume_minimo` do cadastro (sobrescrito pelo registro permanente `VOLMIN` de `modif.dat`, em hm³ com `unidade` = h ou, com `%`, como percentual do volume útil do cadastro). Usinas de regulação diária (`tipo_regulacao = D`) recebem `volume_referencia`, colapsando a faixa útil a um ponto."
+  how = "`volume_minimo` do cadastro (sobrescrito pelo registro permanente `VOLMIN` de `modif.dat`, em hm³ com `unidade` = h ou, com `%`, como percentual do volume útil do cadastro). Usinas `tipo_regulacao` D e S recebem `volume_referencia`, colapsando a faixa útil a um ponto (faixa completa se ausente)."
 
   [[output.field]]
   path = "hydros[].reservoir.max_storage_hm3"
@@ -1499,7 +1499,7 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (em operaç
     { file = "modif", item = "VOLMAX · volume, unidade" },
     { file = "modif", item = "VOLMIN · volume" },
   ]
-  how = "`volume_maximo` do cadastro (sobrescrito por `VOLMAX` de `modif.dat`, em hm³ com `unidade` = h ou, com `%`, como percentual do volume útil do cadastro). Regulação diária (`D`) recebe `volume_referencia`; fio d'água (`S`) recebe `volume_minimo`, pois o NEWAVE não acumula água entre estágios nessas usinas."
+  how = "`volume_maximo` do cadastro (sobrescrito por `VOLMAX` de `modif.dat`, em hm³ com `unidade` = h ou, com `%`, como percentual do volume útil do cadastro). Usinas `D` e `S` recebem `volume_referencia` (faixa completa se ausente), pois o NEWAVE não acumula água entre estágios nessas usinas."
 
   [[output.field]]
   path = "hydros[].outflow.min_outflow_m3s"

@@ -198,18 +198,18 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         # single point so Cobre's LP mirrors that; otherwise Cobre stores the inflow
         # excess in a phantom buffer and shifts it across stages, where the source
         # model simply spills it.
-        #   * 'D' → frozen at ``volume_referencia``.
-        #   * 'S' → pinned at ``volume_minimo`` (the source model holds ITAIPU at
-        #     VARMPUH 0% = Vmin every stage, spilling the turbine-excess inflow).
+        #
+        # Both 'D' and 'S' freeze at ``volume_referencia`` — the operating volume the
+        # source model holds these plants at every stage. When
+        # ``volume_referencia`` is absent/NaN the range is left as
+        # ``[volume_minimo, volume_maximo]`` (no collapse).
         tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
-        if tipo_reg == "D":
+        if tipo_reg in ("D", "S"):
             vol_ref_raw = hreg.get("volume_referencia")
             if vol_ref_raw is not None and not pd.isna(vol_ref_raw):
                 vol_ref = float(vol_ref_raw)
                 vol_min = vol_ref
                 vol_max = vol_ref
-        elif tipo_reg == "S":
-            vol_max = vol_min
 
         # FILLING phase: an admitted NE plant fills its dead
         # volume from its seeded storage up to ``min_storage_hm3`` over the
