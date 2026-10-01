@@ -252,21 +252,17 @@ def storage_envelope(effective: EffectiveCadastro, code: int) -> tuple[float, fl
     return (min(r[0] for r in ranges), max(r[1] for r in ranges))
 
 
-def is_stored_energy_reservoir(effective: EffectiveCadastro, code: int) -> bool:
-    """True iff plant *code* is a real (stored-energy) reservoir.
+def is_reservoir(effective: EffectiveCadastro, code: int) -> bool:
+    """True iff plant *code* is a reservoir under the DECOMP predicate.
 
-    Strictly monthly-regulating (``tipo_regulacao == "M"``) with usable
-    storage (``volume_maximo > volume_minimo``), read off the *base*
-    cadastro. Run-of-river (``"D"``) and special-regime (``"S"``) plants are
-    not reservoirs even when they carry a large operative volume range.
+    DECOMP classifies both monthly-regulating (``"M"``) and weekly-regulating
+    (``"S"``) plants as reservoirs; only ``"D"`` is run-of-river. This differs
+    from the source model's monthly predicate (``"M"`` only) and from the RHE
+    stored-energy predicate in ``decomp.converters.constraints``.
     """
     if code not in effective.base.index:
         return False
-    if str(effective.base.loc[code, "tipo_regulacao"]).strip() != "M":
-        return False
-    vol_min = float(effective.base.loc[code, "volume_minimo"])
-    vol_max = float(effective.base.loc[code, "volume_maximo"])
-    return vol_max - vol_min > 0.0
+    return str(effective.base.loc[code, "tipo_regulacao"]).strip() in ("M", "S")
 
 
 def unregulated_runofriver_codes(
@@ -276,11 +272,11 @@ def unregulated_runofriver_codes(
     """Operated run-of-river codes with no reservoir upstream in the cascade.
 
     A plant *code* (from *operated_codes*) qualifies iff it is run-of-river
-    (``tipo_regulacao == "D"``) and no reservoir
-    (:func:`is_stored_energy_reservoir`) sits **upstream** of it —
-    equivalently, it lies on the headwater side of the first reservoir in its
-    cascade. These are the plants whose minimum-outflow restriction is
-    released to avoid infeasibility on a stage/scenario with zero inflow.
+    (``tipo_regulacao == "D"``) and no reservoir (:func:`is_reservoir`) sits
+    **upstream** of it — equivalently, it lies on the headwater side of the
+    first reservoir in its cascade. These are the plants whose minimum-outflow
+    restriction is released to avoid infeasibility on a stage/scenario with
+    zero inflow.
 
     The upstream test walks *downstream* from every operated reservoir and
     marks each ``D`` plant reached as *not* unregulated; every operated ``D``
@@ -305,7 +301,7 @@ def unregulated_runofriver_codes(
     # downstream of a reservoir and must keep its floor.
     below_a_reservoir: set[int] = set()
     for code in operated:
-        if not is_stored_energy_reservoir(effective, code):
+        if not is_reservoir(effective, code):
             continue
         visited = {code}
         current = effective.downstream_plant(code, 0)

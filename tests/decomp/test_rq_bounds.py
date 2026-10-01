@@ -293,18 +293,21 @@ class TestRunOfRiverOutflowRelaxation:
         10 (D) -> 20 (D) -> 30 (M reservoir) -> 40 (D) -> 0
         50 (D) -> 0                          (headwater D, no reservoir below)
         60 (M reservoir) -> 0
+        70 (D) -> 80 (S reservoir) -> 90 (D) -> 0
 
-    Relaxed = {10, 20, 50}: 10/20 are the ``D`` run above reservoir 30; 50 is
-    a ``D`` headwater draining straight to the sink (no reservoir upstream).
-    Not relaxed: 30/60 (reservoirs, not ``D``) and 40 (``D`` but below the
-    reservoir 30).
+    Relaxed = {10, 20, 50, 70}: 10/20 are the ``D`` run above reservoir 30; 50
+    is a ``D`` headwater draining straight to the sink (no reservoir
+    upstream); 70 is the ``D`` headwater above the weekly-regulating
+    reservoir 80. Not relaxed: 30/60/80 (reservoirs, not ``D``) and 40/90
+    (``D`` but below a reservoir — an ``S`` plant is a reservoir under the
+    DECOMP predicate, so it stops the walk like an ``M`` plant).
     """
 
-    _CODES = (10, 20, 30, 40, 50, 60)
+    _CODES = (10, 20, 30, 40, 50, 60, 70, 80, 90)
     _ID_MAP = DecompIdMap(bus_codes=(1,), bus_names=("SE",), hydro_codes=_CODES)
 
     def _hidr(self) -> pd.DataFrame:
-        # tipo_regulacao per plant; reservoirs (M) carry usable storage, the
+        # tipo_regulacao per plant; reservoirs (M/S) carry usable storage, the
         # D plants a collapsed range. codigo_usina_jusante wires the cascade.
         rows = {
             10: ("D", 0.0, 0.0, 20),
@@ -313,6 +316,9 @@ class TestRunOfRiverOutflowRelaxation:
             40: ("D", 0.0, 0.0, 0),
             50: ("D", 0.0, 0.0, 0),
             60: ("M", 0.0, 100.0, 0),
+            70: ("D", 0.0, 0.0, 80),
+            80: ("S", 0.0, 100.0, 90),
+            90: ("D", 0.0, 0.0, 0),
         }
         df = pd.DataFrame(
             {
@@ -360,7 +366,7 @@ class TestRunOfRiverOutflowRelaxation:
         unregulated = unregulated_runofriver_codes(
             self._effective(), self._ID_MAP.hydro_codes
         )
-        assert unregulated == {10, 20, 50}
+        assert unregulated == {10, 20, 50, 70}
 
     def test_relaxed_plants_get_no_rq_floor(self) -> None:
         calendar = self._calendar()
@@ -382,9 +388,9 @@ class TestRunOfRiverOutflowRelaxation:
             for code in self._CODES
             if any(c.entity_id == self._ID_MAP.hydro_id(code) for c in contributions)
         }
-        # 40 (D below the reservoir) keeps its floor; 30/60 (reservoirs) keep
-        # theirs; 10/20/50 (relaxed) get none.
-        assert floored_codes == {30, 40, 60}
+        # 40/90 (D below a reservoir) keep their floor; 30/60/80 (reservoirs)
+        # keep theirs; 10/20/50/70 (relaxed) get none.
+        assert floored_codes == {30, 40, 60, 80, 90}
 
     def test_without_relaxed_set_all_plants_get_the_floor(self) -> None:
         # The default (no relaxed_codes) is unchanged behaviour: every
