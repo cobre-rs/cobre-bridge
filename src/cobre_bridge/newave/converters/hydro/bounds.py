@@ -374,11 +374,23 @@ def convert_turbined_bounds_head_corrected(
         except KeyError:
             continue
         hreg = cadastro.loc[newave_code]
+        name = str(hreg.get("nome_usina", newave_code))
+        if config is not None and not overrides and not plant_seasonal:
+            # Rated at the reference head the declared value uses, never a
+            # productivity-derived one, which rates the same machines differently.
+            for stage_id in range(min(config.full_online_stage, total_stages)):
+                hydro_ids.append(hydro_id)
+                stage_ids.append(stage_id)
+                max_turbined_vals.append(
+                    _compute_max_turbined_head_corrected(
+                        config.hreg_at(hreg, stage_id), name
+                    )[0]
+                )
+            continue
         rho_esp_raw = hreg.get("produtibilidade_especifica")
         if rho_esp_raw is None or is_na(rho_esp_raw) or float(rho_esp_raw) <= 0.0:
             continue
         rho_esp = float(rho_esp_raw)
-        name = str(hreg.get("nome_usina", newave_code))
 
         legacy_base = _compute_productivity(hreg)
         per_stage_prod = _per_stage_productivities(
@@ -389,15 +401,9 @@ def convert_turbined_bounds_head_corrected(
             total_stages,
             seasonal_volref_by_month=plant_seasonal,
         )
-        # A plant here only because it is expanding has a flat head, so its cap
-        # only moves while machines are still entering.
-        ramp_only = not overrides and not plant_seasonal
         for stage_id, prod in enumerate(per_stage_prod):
             if prod <= 0.0:
                 continue
-            if ramp_only and config is not None:
-                if stage_id >= config.full_online_stage:
-                    continue
             h_op = prod / rho_esp
             hreg_stage = hreg if config is None else config.hreg_at(hreg, stage_id)
             max_turbined = _compute_max_turbined_head_corrected(

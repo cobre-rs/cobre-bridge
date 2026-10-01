@@ -1377,3 +1377,38 @@ class TestExpansionRampBounds:
         row = df[(df.hydro_id == 1) & (df.stage_id == 2)].iloc[0]
         assert row.min_storage_hm3 == pytest.approx(60.0)
         assert row.max_generation_mw == pytest.approx(450.0)
+
+    def test_ramp_turbined_cap_is_rated_at_the_declared_head(self, tmp_path) -> None:
+        # Before the entry the cap equals what the plant declares with the
+        # entering machines absent: the same head path as the declaration, so
+        # the ramp neither diverges from it nor inflates it.
+        from cobre_bridge.newave.converters.hydro import (
+            convert_hydros,
+            convert_turbined_bounds_head_corrected,
+        )
+
+        cadastro = _head_corrected_two_plant_cadastro()
+        cadastro.loc[2, "numero_conjuntos_maquinas"] = 2
+        cadastro.loc[2, "maquinas_conjunto_2"] = 2
+        cadastro.loc[2, "potencia_nominal_conjunto_2"] = 500.0
+        cadastro.loc[2, "vazao_nominal_conjunto_2"] = 50.0
+        cadastro.loc[2, "queda_nominal_conjunto_2"] = 200.0
+        start_only = cadastro.copy()
+        start_only.loc[2, "maquinas_conjunto_2"] = 0
+
+        def declared_turbined(case) -> float:
+            hydros = convert_hydros(case, self._id_map())["hydros"]
+            return next(h for h in hydros if h["id"] == 1)["generation"][
+                "max_turbined_m3s"
+            ]
+
+        ee_case = _ee_expansion_case(tmp_path, cadastro=cadastro)
+        table = convert_turbined_bounds_head_corrected(ee_case, self._id_map())
+        assert table is not None
+        ramp = table.to_pandas().query("hydro_id == 1")
+        assert list(ramp.stage_id) == [0, 1, 2, 3, 4, 5]
+        start_cap = declared_turbined(_hydro_case(tmp_path, cadastro=start_only))
+        assert list(ramp.max_turbined_m3s) == [pytest.approx(start_cap)] * 6
+        assert declared_turbined(ee_case) == pytest.approx(
+            declared_turbined(_hydro_case(tmp_path, cadastro=cadastro))
+        )
