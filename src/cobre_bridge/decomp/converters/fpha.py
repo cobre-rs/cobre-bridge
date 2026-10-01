@@ -92,17 +92,58 @@ def convert_tailrace_curves(case: DecompCase, id_map: DecompIdMap) -> pa.Table |
     return build_tailrace_table(families, segments, id_map.hydro_id)
 
 
+def _max_generation_capacity(effective: EffectiveCadastro, code: int) -> float:
+    """Return the maximum generation capacity (MW) over all stages.
+
+    Computes the AC-adjusted rated power by summing over all conjuntos for each
+    stage, using ``effective.machine_set()`` when an override exists and falling
+    back to the base ``hidr`` values otherwise. Returns the max over all stages.
+
+    This is a lightweight equivalent of ``_rated_envelope`` from
+    ``decomp/converters/hydro/bounds.py``, kept here to avoid a cross-module
+    import that would complicate the dependency graph.
+    """
+    base = effective.base.loc[code]
+    max_gen = 0.0
+    for stage in range(effective.n_stages):
+        n_sets = effective.machine_conjunto_count(code, stage)
+        if n_sets is None:
+            n_sets = int(base["numero_conjuntos_maquinas"])
+        stage_gen = 0.0
+        for i in range(1, n_sets + 1):
+            ms = effective.machine_set(code, i, stage)
+            if ms is not None:
+                stage_gen += ms.numero_maquinas * ms.potencia
+            else:
+                n_machines = int(base[f"maquinas_conjunto_{i}"])
+                p_nom = float(base[f"potencia_nominal_conjunto_{i}"])
+                stage_gen += n_machines * p_nom
+        max_gen = max(max_gen, stage_gen)
+    return max_gen
+
+
 def is_fpha_eligible(effective: EffectiveCadastro, code: int) -> bool:
     """Whether plant *code* can be fit by cobre's computed FPHA.
 
-    Requires a non-degenerate (post-``AC COTVOL``) volume→cota polynomial and a
-    positive ``produtibilidade_especifica`` at the initial stage. Storage swing
-    is not required — a run-of-river plant fits through the single-volume path.
+    Requires:
+      1. A non-degenerate (post-``AC COTVOL``) volume→cota polynomial;
+      2. A positive ``produtibilidade_especifica`` at the initial stage;
+      3. A positive effective generation capacity (considers ``AC POTEFE``
+         overrides that may zero out the plant's power).
+
+    Storage swing is not required — a run-of-river plant fits through the
+    single-volume path. A plant with zero effective generation capacity (e.g.,
+    due to ``AC POTEFE 0.0``) is ineligible because cobre cannot fit valid
+    production hyperplanes for a non-generating plant.
     """
     coeffs = effective.cota_polynomial(code, 0)
     if all(c == 0.0 for c in coeffs):
         return False
-    return effective.value(code, "produtibilidade_especifica", 0) > 0.0
+    if effective.value(code, "produtibilidade_especifica", 0) <= 0.0:
+        return False
+    if _max_generation_capacity(effective, code) <= 0.0:
+        return False
+    return True
 
 
 def fpha_eligible_codes(effective: EffectiveCadastro, id_map: DecompIdMap) -> set[int]:
