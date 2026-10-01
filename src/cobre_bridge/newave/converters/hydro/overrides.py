@@ -281,7 +281,15 @@ def _extract_temporal_overrides(
     Reads ``MODIF.DAT`` and returns a dict keyed by plant code.  Each value
     is a list of override dicts in file order::
 
-        {"type": str, "month": int, "year": int, "value": float}
+        {"type": str, "month": int, "year": int | None,
+         "period": "PRE" | "POS" | None, "value": float}
+
+    The source model marks a temporal record's year field with ``PRE``
+    (pre-study period) or ``POS`` (post-study period) instead of a numeric
+    year. Those records carry ``year=None`` and ``period="PRE"``/``"POS"``;
+    a normal study record carries a numeric ``year`` and ``period=None``.
+    The step-function builder maps ``PRE`` onto the horizon entry and ``POS``
+    onto the post-study tail.
 
     For CFUGA/CMONT the ``"value"`` field is the level in metres.  For
     TURBMINT/TURBMAXT it is the turbined flow in m³/s and for VAZMINT the flow
@@ -320,6 +328,18 @@ def _extract_temporal_overrides(
     unknown_temporal: list[tuple[int, str]] = []
     unit_unknown: list[tuple[int, str, str]] = []
 
+    # Value attribute per record type (all temporal records share the same
+    # month + year shape; only the value field name differs).
+    _value_attr = {
+        "VAZMINT": "vazao",
+        "VMAXT": "volume",
+        "VMINT": "volume",
+        "CFUGA": "nivel",
+        "CMONT": "nivel",
+        "TURBMINT": "turbinamento",
+        "TURBMAXT": "turbinamento",
+    }
+
     for usina_rec in usina_records:
         code = int(usina_rec.codigo)
         if code not in confhd_set:
@@ -331,32 +351,41 @@ def _extract_temporal_overrides(
             if type_name not in _TEMPORAL_OVERRIDE_TYPES:
                 continue
 
-            data = rec.data_inicio
-            month = int(data.month)
-            year = int(data.year)
+            value_attr = _value_attr.get(type_name)
+            if value_attr is None:
+                unknown_temporal.append((code, type_name))
+                continue
 
+            # VMAXT/VMINT carry a unit column ('h' hm³ or '%' of useful volume);
+            # a record with no recognisable unit is taken as '%' and reported.
             unit: str | None = None
-            if type_name in ("VAZMINT",):
-                value = float(rec.vazao)
-            elif type_name in ("VMAXT", "VMINT"):
-                value = float(rec.volume)
+            if type_name in ("VMAXT", "VMINT"):
                 unit = _volume_unit(rec)
                 if unit is None:
                     unit_unknown.append((code, type_name, _raw_unit(rec)))
                     unit = "%"
-            elif type_name in ("CFUGA", "CMONT"):
-                value = float(rec.nivel)
-            elif type_name in ("TURBMINT", "TURBMAXT"):
-                value = float(rec.turbinamento)
+
+            # Only VAZMINT carries the ``PRE``/``POS`` period markers (the sole
+            # modif.dat record where the source model admits them); it exposes
+            # ``periodo``/``mes`` and a ``data_inicio`` that is ``None`` for a
+            # marker. Every other temporal record always carries a numeric year,
+            # read through ``data_inicio`` as before.
+            if type_name == "VAZMINT":
+                period = rec.periodo
+                month = rec.mes
+                year = None if period is not None else int(rec.data_inicio.year)
             else:
-                unknown_temporal.append((code, type_name))
-                continue
+                period = None
+                data = rec.data_inicio
+                month = int(data.month)
+                year = int(data.year)
 
             override: dict = {
                 "type": type_name,
-                "month": month,
+                "month": None if month is None else int(month),
                 "year": year,
-                "value": value,
+                "period": period,
+                "value": float(getattr(rec, value_attr)),
             }
             if unit is not None:
                 override["unit"] = unit

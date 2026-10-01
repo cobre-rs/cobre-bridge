@@ -734,15 +734,34 @@ def convert_storage_bounds(
     ) -> dict[int, float]:
         """Thin adapter over :func:`cobre_bridge.newave.horizon.seasonal_step_function`.
 
-        Maps MODIF override dicts to ``(year, month, value)`` change-points. The
-        forward-fill, big-M clearing, and seasonalize-vs-freeze post-study logic
-        live in the shared helper.
+        Splits the MODIF override dicts into study change-points ``(year, month,
+        value)`` and the source model's ``PRE``/``POS`` seasonal markers
+        ``(month, value)``, then delegates the forward-fill, big-M clearing,
+        PRE seeding, POS override, and seasonalize-vs-freeze post-study logic to
+        the shared helper.
         """
+        study = [
+            (int(r["year"]), int(r["month"]), float(r["value"]))
+            for r in recs
+            if r.get("period") is None and r.get("year") is not None
+        ]
+        pre = [
+            (int(r["month"]), float(r["value"]))
+            for r in recs
+            if r.get("period") == "PRE"
+        ]
+        pos = [
+            (int(r["month"]), float(r["value"]))
+            for r in recs
+            if r.get("period") == "POS"
+        ]
         return seasonal_step_function(
-            [(int(r["year"]), int(r["month"]), float(r["value"])) for r in recs],
+            study,
             transform,
             seasonalize=seasonalize,
             horizon=horizon,
+            pre_recs=pre or None,
+            pos_recs=pos or None,
         )
 
     # GHMIN.DAT per-stage minimums.  These are not MODIF.DAT overrides

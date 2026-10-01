@@ -354,6 +354,8 @@ class TestExtractTemporalOverrides:
         vazmint_rec = MagicMock()
         type(vazmint_rec).__name__ = "VAZMINT"
         vazmint_rec.data_inicio = datetime.datetime(2025, 1, 1)
+        vazmint_rec.periodo = None
+        vazmint_rec.mes = 1
         vazmint_rec.vazao = 50.0
 
         usina_rec = MagicMock()
@@ -369,7 +371,13 @@ class TestExtractTemporalOverrides:
 
         assert 1 in result
         assert result[1] == [
-            {"type": "VAZMINT", "month": 1, "year": 2025, "value": 50.0}
+            {
+                "type": "VAZMINT",
+                "month": 1,
+                "year": 2025,
+                "period": None,
+                "value": 50.0,
+            }
         ]
 
     def test_vmaxt_and_vmint_carry_their_unit(self, tmp_path) -> None:
@@ -382,11 +390,15 @@ class TestExtractTemporalOverrides:
         vmaxt_rec = MagicMock()
         type(vmaxt_rec).__name__ = "VMAXT"
         vmaxt_rec.data_inicio = datetime.datetime(2025, 1, 1)
+        vmaxt_rec.periodo = None
+        vmaxt_rec.mes = 1
         vmaxt_rec.volume = 73.2
         vmaxt_rec.unidade = "'%'"
         vmint_rec = MagicMock()
         type(vmint_rec).__name__ = "VMINT"
         vmint_rec.data_inicio = datetime.datetime(2025, 2, 1)
+        vmint_rec.periodo = None
+        vmint_rec.mes = 2
         vmint_rec.volume = 1500.0
         vmint_rec.unidade = "'h'"
 
@@ -403,8 +415,22 @@ class TestExtractTemporalOverrides:
 
         assert collected == []
         assert result[1] == [
-            {"type": "VMAXT", "month": 1, "year": 2025, "value": 73.2, "unit": "%"},
-            {"type": "VMINT", "month": 2, "year": 2025, "value": 1500.0, "unit": "h"},
+            {
+                "type": "VMAXT",
+                "month": 1,
+                "year": 2025,
+                "period": None,
+                "value": 73.2,
+                "unit": "%",
+            },
+            {
+                "type": "VMINT",
+                "month": 2,
+                "year": 2025,
+                "period": None,
+                "value": 1500.0,
+                "unit": "h",
+            },
         ]
 
     def test_dated_volume_without_unit_is_percent_and_reported(self, tmp_path) -> None:
@@ -415,6 +441,8 @@ class TestExtractTemporalOverrides:
         vmaxt_rec = MagicMock()
         type(vmaxt_rec).__name__ = "VMAXT"
         vmaxt_rec.data_inicio = datetime.datetime(2025, 1, 1)
+        vmaxt_rec.periodo = None
+        vmaxt_rec.mes = 1
         vmaxt_rec.volume = 73.2
         vmaxt_rec.unidade = None
 
@@ -444,6 +472,8 @@ class TestExtractTemporalOverrides:
         vazmint_rec = MagicMock()
         type(vazmint_rec).__name__ = "VAZMINT"
         vazmint_rec.data_inicio = datetime.datetime(2025, 3, 1)
+        vazmint_rec.periodo = None
+        vazmint_rec.mes = 3
         vazmint_rec.vazao = 40.0
 
         # Plant 99 is NOT in confhd_codes [1, 2].
@@ -470,6 +500,8 @@ class TestExtractTemporalOverrides:
             r = MagicMock()
             type(r).__name__ = "VAZMINT"
             r.data_inicio = datetime.datetime(2025, month, 1)
+            r.periodo = None
+            r.mes = month
             r.vazao = vazao
             return r
 
@@ -500,6 +532,8 @@ class TestExtractTemporalOverrides:
         cfuga_rec = MagicMock()
         type(cfuga_rec).__name__ = "CFUGA"
         cfuga_rec.data_inicio = datetime.datetime(2025, 6, 1)
+        cfuga_rec.periodo = None
+        cfuga_rec.mes = 6
         cfuga_rec.nivel = 75.4
 
         usina_rec = MagicMock()
@@ -514,7 +548,13 @@ class TestExtractTemporalOverrides:
         )
 
         assert result[2] == [
-            {"type": "CFUGA", "month": 6, "year": 2025, "value": pytest.approx(75.4)}
+            {
+                "type": "CFUGA",
+                "month": 6,
+                "year": 2025,
+                "period": None,
+                "value": pytest.approx(75.4),
+            }
         ]
 
     def test_extracts_turbmint_turbmaxt_records(self, tmp_path) -> None:
@@ -526,11 +566,15 @@ class TestExtractTemporalOverrides:
         turbmint_rec = MagicMock()
         type(turbmint_rec).__name__ = "TURBMINT"
         turbmint_rec.data_inicio = datetime.datetime(2025, 11, 1)
+        turbmint_rec.periodo = None
+        turbmint_rec.mes = 11
         turbmint_rec.turbinamento = 330.0
 
         turbmaxt_rec = MagicMock()
         type(turbmaxt_rec).__name__ = "TURBMAXT"
         turbmaxt_rec.data_inicio = datetime.datetime(2025, 3, 1)
+        turbmaxt_rec.periodo = None
+        turbmaxt_rec.mes = 3
         turbmaxt_rec.turbinamento = 322.0
 
         usina_rec = MagicMock()
@@ -548,14 +592,80 @@ class TestExtractTemporalOverrides:
             "type": "TURBMINT",
             "month": 11,
             "year": 2025,
+            "period": None,
             "value": pytest.approx(330.0),
         }
         assert result[1][1] == {
             "type": "TURBMAXT",
             "month": 3,
             "year": 2025,
+            "period": None,
             "value": pytest.approx(322.0),
         }
+
+    def test_extracts_pre_pos_markers(self, tmp_path) -> None:
+        """PRE/POS year markers are carried through with ``year=None`` and the
+        ``period`` field set, so the step-function builder can map them onto the
+        horizon entry (PRE) and the post-study tail (POS)."""
+        import datetime
+
+        from cobre_bridge.newave.converters.hydro import _extract_temporal_overrides
+
+        pre_rec = MagicMock()
+        type(pre_rec).__name__ = "VAZMINT"
+        pre_rec.data_inicio = None
+        pre_rec.periodo = "PRE"
+        pre_rec.mes = 1
+        pre_rec.vazao = 100.0
+
+        study_rec = MagicMock()
+        type(study_rec).__name__ = "VAZMINT"
+        study_rec.data_inicio = datetime.datetime(2030, 6, 1)
+        study_rec.periodo = None
+        study_rec.mes = 6
+        study_rec.vazao = 300.0
+
+        pos_rec = MagicMock()
+        type(pos_rec).__name__ = "VAZMINT"
+        pos_rec.data_inicio = None
+        pos_rec.periodo = "POS"
+        pos_rec.mes = 6
+        pos_rec.vazao = 300.0
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [pre_rec, study_rec, pos_rec]
+
+        result = _extract_temporal_overrides(
+            self._modif_case(tmp_path, mock_modif), [1]
+        )
+
+        assert result[1] == [
+            {
+                "type": "VAZMINT",
+                "month": 1,
+                "year": None,
+                "period": "PRE",
+                "value": 100.0,
+            },
+            {
+                "type": "VAZMINT",
+                "month": 6,
+                "year": 2030,
+                "period": None,
+                "value": 300.0,
+            },
+            {
+                "type": "VAZMINT",
+                "month": 6,
+                "year": None,
+                "period": "POS",
+                "value": 300.0,
+            },
+        ]
 
 
 # ---------------------------------------------------------------------------

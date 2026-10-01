@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `D` plants, their storage range and initial storage collapse to
   `volume_referencia` instead of `volume_minimo`; with no reference volume the
   full range is kept. DECOMP is unchanged: there `S` plants are reservoirs.
+- **NEWAVE `VAZMINT` records marked `PRE` or `POS` are converted.** They
+  aborted the conversion. Each set is read as a step over one repeating year:
+  `PRE` sets the minimum outflow in force when the study starts, until the
+  first dated record, and `POS` sets the post-study months instead of
+  repeating the last study value.
 - **NEWAVE electric constraints stop at the end of their declared period.**
   `re.dat` limits were carried to the end of the study and
   `restricao-eletrica.csv` limits repeated by calendar month past it.
