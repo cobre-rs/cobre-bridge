@@ -135,6 +135,11 @@ class TestDashboardNoSimulationPlain:
         assert result.returncode == 1
         assert result.stdout == ""
         assert "no simulation output found" in result.stderr
+        assert "Dashboard notes: 1 error(s)" in result.stderr
+        assert "Conversion notes" not in result.stderr
+        assert "Dashboard failure" in result.stderr
+        assert "Comparison failure" not in result.stderr
+        assert "→ → " not in result.stderr
 
 
 class TestDashboardQuiet:

@@ -85,41 +85,33 @@ class CobrePartitionMissingError(BridgeError):
         self.path = path
 
 
-# Per-type mapping: exception type → (code, category, remediation). Looked up by
-# walking ``type(exc).__mro__`` so a subclass still resolves to its base's entry.
-# An exception not present here falls back to ``_FALLBACK`` ("unexpected-error").
-_TYPE_MAP: dict[type[BaseException], tuple[str, str, str | None]] = {
+# Per-type mapping: exception type → (code, remediation). Looked up by walking
+# ``type(exc).__mro__`` so a subclass still resolves to its base's entry. An
+# exception not present here falls back to ``_FALLBACK`` ("unexpected-error").
+_TYPE_MAP: dict[type[BaseException], tuple[str, str | None]] = {
     SourceFileError: (
         "source-file-missing",
-        "Conversion failure",
-        "→ Check the named file exists in the case directory.",
+        "Check the named file exists in the case directory.",
     ),
     FieldParseError: (
         "source-field-parse",
-        "Conversion failure",
-        "→ Check the named field in the source file for a malformed value.",
+        "Check the named field in the source file for a malformed value.",
     ),
     CobreOutputError: (
         "cobre-output-unreadable",
-        "Comparison failure",
-        "→ Re-run cobre with --output to regenerate the output directory.",
+        "Re-run cobre with --output to regenerate the output directory.",
     ),
     CobrePartitionMissingError: (
         "cobre-partition-missing",
-        "Comparison failure",
-        "→ Re-run cobre at the required version to produce this partition.",
+        "Re-run cobre at the required version to produce this partition.",
     ),
     # Base-class fallback (last, for readability — a concrete subclass above
     # always wins the MRO walk regardless of dict order). No remediation: an
     # unmapped BridgeError has no knowable specific fix.
-    BridgeError: ("conversion-error", "Conversion failure", None),
+    BridgeError: ("conversion-error", None),
 }
 
-_FALLBACK: tuple[str, str, str | None] = (
-    "unexpected-error",
-    "Conversion failure",
-    None,
-)
+_FALLBACK: tuple[str, str | None] = ("unexpected-error", None)
 
 # Location attributes mapped to their note label, in note-rendering order.
 _LOCATION_LABELS: tuple[tuple[str, str], ...] = (
@@ -129,8 +121,8 @@ _LOCATION_LABELS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _resolve(exc: Exception) -> tuple[str, str, str | None]:
-    """Return ``(code, category, remediation)`` for *exc*, walking its MRO."""
+def _resolve(exc: Exception) -> tuple[str, str | None]:
+    """Return ``(code, remediation)`` for *exc*, walking its MRO."""
     for ancestor in type(exc).__mro__:
         entry = _TYPE_MAP.get(ancestor)
         if entry is not None:
@@ -151,17 +143,19 @@ def _location_notes(exc: Exception) -> list[str]:
 def diagnostic_from_exception(exc: Exception, *, context: str) -> Diagnostic:
     """Map a caught exception to an ``ERROR``-severity :class:`Diagnostic`.
 
-    The ``code``, ``category`` and ``remediation`` are chosen per exception type
-    (a subclass resolves to its base's entry); an unrecognised exception falls
-    back to ``"unexpected-error"`` with no remediation. ``title`` is derived from
-    *context*, ``summary`` is ``str(exc)``, and ``notes`` lists any present
+    The ``code`` and ``remediation`` are chosen per exception type (a subclass
+    resolves to its base's entry); an unrecognised exception falls back to
+    ``"unexpected-error"`` with no remediation. *context* names the operation
+    that failed (``"Conversion"``, ``"Dashboard"``, …) and drives both the
+    ``category`` and the ``title``, so the same exception reads correctly under
+    every command. ``summary`` is ``str(exc)``, and ``notes`` lists any present
     location attributes (``path``, ``field``, ``row``) as ``"<label>: <value>"``.
     """
-    code, category, remediation = _resolve(exc)
+    code, remediation = _resolve(exc)
     return Diagnostic(
         code=code,
         severity=Severity.ERROR,
-        category=category,
+        category=f"{context} failure",
         title=f"{context} failed",
         summary=str(exc),
         notes=_location_notes(exc),

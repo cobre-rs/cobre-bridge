@@ -109,7 +109,8 @@ class Diagnostic:
     notes:
         Extra free-form lines shown under the table.
     remediation:
-        Optional ``→`` hint telling the user what to check or change.
+        Optional hint telling the user what to check or change, as a plain
+        sentence; the renderer adds the ``→`` marker.
     """
 
     code: str

@@ -69,12 +69,12 @@ class TestRenderDiagnostics:
 
     def test_empty_renders_nothing(self) -> None:
         console, buf = _console()
-        render_diagnostics([], console=console)
+        render_diagnostics([], heading="Conversion notes", console=console)
         assert buf.getvalue() == ""
 
     def test_renders_title_table_cells_and_remediation(self) -> None:
         console, buf = _console()
-        render_diagnostics([self._gtmin()], console=console)
+        render_diagnostics([self._gtmin()], heading="Conversion notes", console=console)
         text = buf.getvalue()
         assert "GTMIN exceeds capacity" in text
         assert "ANGRA 2" in text  # resolved plant name, not just the code
@@ -82,6 +82,7 @@ class TestRenderDiagnostics:
         assert "481.3" in text  # GTMIN value
         assert "423.4" in text  # capacity value
         assert "Check EXPT FCMAX/GTMIN" in text  # remediation hint
+        assert "→ Check EXPT" in text and "→ →" not in text  # one arrow
         assert "Thermal bounds" in text  # category header
 
     def test_rollup_counts_warnings_and_notes(self) -> None:
@@ -93,8 +94,11 @@ class TestRenderDiagnostics:
             title="Note",
             summary="a note",
         )
-        render_diagnostics([self._gtmin(), note], console=console)
+        render_diagnostics(
+            [self._gtmin(), note], heading="Dashboard notes", console=console
+        )
         text = buf.getvalue()
+        assert "Dashboard notes: 1 warning(s) · 1 note(s)" in text
         assert "1 warning(s)" in text
         assert "1 note(s)" in text
 
@@ -107,7 +111,12 @@ class TestRenderDiagnostics:
             title="Fictitious note",
             summary="excluded plants",
         )
-        render_diagnostics([self._gtmin(), note], console=console, quiet=True)
+        render_diagnostics(
+            [self._gtmin(), note],
+            heading="Conversion notes",
+            console=console,
+            quiet=True,
+        )
         text = buf.getvalue()
         assert "GTMIN exceeds capacity" in text
         assert "Fictitious note" not in text
@@ -123,7 +132,7 @@ class TestRenderDiagnostics:
             summary="lots",
             table=DiagnosticTable(columns=["Plant", "Code"], rows=rows),
         )
-        render_diagnostics([diag], console=console)
+        render_diagnostics([diag], heading="Conversion notes", console=console)
         text = buf.getvalue()
         assert "5 more" in text  # overflow summarised
         assert "P0" in text

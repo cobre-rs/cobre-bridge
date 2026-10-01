@@ -53,7 +53,10 @@ def _run_dashboard(args: DashboardArgs) -> None:
                 console=args.out_console(),
             )
         render_diagnostics(
-            dash_diags, console=get_console(stderr=True), quiet=args.quiet
+            dash_diags,
+            heading="Dashboard notes",
+            console=get_console(stderr=True),
+            quiet=args.quiet,
         )
 
     if args.json_output:

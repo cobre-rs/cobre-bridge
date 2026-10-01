@@ -83,6 +83,12 @@ class TestDiagnosticFromException:
         assert diag.category == "Comparison failure"
         assert "file: /out/bounds.parquet" in diag.notes
 
+    def test_category_and_title_follow_the_failing_operation(self) -> None:
+        exc = CobreOutputError("no simulation output found")
+        diag = diagnostic_from_exception(exc, context="Dashboard")
+        assert diag.category == "Dashboard failure"
+        assert diag.title == "Dashboard failed"
+
     def test_cobre_partition_missing_error_category(self) -> None:
         exc = CobrePartitionMissingError(
             "Cobre output partition not found: /out/simulation/hydro_bus_generation. "
@@ -93,3 +99,24 @@ class TestDiagnosticFromException:
         assert diag.code == "cobre-partition-missing"
         assert diag.category == "Comparison failure"
         assert "file: /out/simulation/hydro_bus_generation" in diag.notes
+
+
+def test_no_source_string_carries_the_remediation_arrow() -> None:
+    """Remediation hints are plain sentences: the console adds the ``→``
+    marker, so a literal starting with it renders as ``→ →``."""
+    import ast
+    from pathlib import Path
+
+    import cobre_bridge
+
+    package = Path(cobre_bridge.__file__).parent
+    offenders = [
+        f"{path.relative_to(package)}:{node.lineno}"
+        for path in sorted(package.rglob("*.py"))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.startswith("→")
+        and path.name != "console.py"
+    ]
+    assert offenders == []

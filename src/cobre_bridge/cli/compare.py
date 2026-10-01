@@ -260,7 +260,10 @@ def _run_newave_comparison(args: CompareArgs) -> None:
                 console=args.out_console(),
             )
         render_diagnostics(
-            compare_diagnostics, console=args.err_console(), quiet=args.quiet
+            compare_diagnostics,
+            heading="Comparison notes",
+            console=args.err_console(),
+            quiet=args.quiet,
         )
 
     formats, out_dir = _export_compare_artifacts(
@@ -349,7 +352,10 @@ def _run_decomp_comparison(args: CompareArgs) -> None:
                 console=args.out_console(),
             )
         render_diagnostics(
-            compare_diagnostics, console=args.err_console(), quiet=args.quiet
+            compare_diagnostics,
+            heading="Comparison notes",
+            console=args.err_console(),
+            quiet=args.quiet,
         )
 
     decomp_case = DecompCase.from_directory(args.source_dir)

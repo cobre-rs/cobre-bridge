@@ -115,7 +115,7 @@ def optional_input_advisory(  # noqa: UP047
                 ),
                 notes=[f"field: {name}"],
                 remediation=(
-                    "→ Provide the file if this case relies on it; "
+                    "Provide the file if this case relies on it; "
                     "otherwise this is informational."
                 ),
             )

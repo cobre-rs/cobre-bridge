@@ -60,6 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AR model shows a note instead of an empty order chart.
 - **`--log-file` creates its missing parent directories**, and a path that
   cannot be written is reported as an option error instead of a traceback.
+- **Failure and diagnostics output names the command that ran.** `dashboard`
+  and `compare` failures were headed "Conversion notes" and "Comparison
+  failure" whatever the command, and several hints printed a doubled `→`.
 - **A plant with zero rated turbined flow or rated power stays on constant
   productivity** on both tracks, instead of being emitted as FPHA and making
   cobre's fit abort the run; such plants are listed in an informational

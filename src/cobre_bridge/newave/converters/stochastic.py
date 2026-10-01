@@ -117,7 +117,7 @@ def _posto_count(path: Path, *, hist_start_year: int, study_start_year: int) -> 
                 "that anything is wrong."
             ),
             remediation=(
-                "→ Check the deck's posto count if the historical inflow "
+                "Check the deck's posto count if the historical inflow "
                 "series look implausible."
             ),
         ),
