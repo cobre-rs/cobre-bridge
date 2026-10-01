@@ -215,104 +215,59 @@ class TestApplyPermanentOverrides:
         assert result.loc[2, "potencia_nominal_conjunto_1"] == 150.0
         assert collected == []
 
-    def test_volcota_override_replaces_the_whole_polynomial(self, tmp_path) -> None:
-        """VOLCOTA replaces all five volume-to-height coefficients."""
-        from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
-
-        volcota_rec = MagicMock()
-        type(volcota_rec).__name__ = "VOLCOTA"
-        volcota_rec.polinomio_volume_cota = [400.0, 0.2, 0.0, 0.0, 0.0]
-
-        usina_rec = MagicMock()
-        usina_rec.codigo = 1
-
-        mock_modif = MagicMock()
-        mock_modif.usina.return_value = [usina_rec]
-        mock_modif.modificacoes_usina.return_value = [volcota_rec]
-
-        with dx.collect() as collected:
-            result = _apply_permanent_overrides(
-                self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
-            )
-
-        assert [result.loc[1, f"a{i}_volume_cota"] for i in range(5)] == [
-            400.0,
-            0.2,
-            0.0,
-            0.0,
-            0.0,
-        ]
-        # The untouched plant keeps the registry polynomial.
-        assert result.loc[2, "a0_volume_cota"] == 300.0
-        assert collected == []
-
-    def test_cotarea_override_replaces_the_whole_polynomial(self, tmp_path) -> None:
-        """COTAREA replaces all five height-to-area coefficients.
-
-        The deck writes these with a Fortran exponent (``-1.0D7``); the
-        reader hands over plain floats.
-        """
-        from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
-
-        cotarea_rec = MagicMock()
-        type(cotarea_rec).__name__ = "COTAREA"
-        cotarea_rec.polinomio_cota_area = [
-            -1.0e7,
-            9.0e4,
-            -2.5e2,
-            3.0e-1,
-            0.0,
-        ]
-
-        usina_rec = MagicMock()
-        usina_rec.codigo = 1
-
-        mock_modif = MagicMock()
-        mock_modif.usina.return_value = [usina_rec]
-        mock_modif.modificacoes_usina.return_value = [cotarea_rec]
-
-        with dx.collect() as collected:
-            result = _apply_permanent_overrides(
-                self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
-            )
-
-        assert [result.loc[1, f"a{i}_cota_area"] for i in range(5)] == [
-            -1.0e7,
-            9.0e4,
-            -2.5e2,
-            3.0e-1,
-            0.0,
-        ]
-        assert collected == []
-
-    def test_polynomial_with_blank_coefficients_reads_them_as_zero(
-        self, tmp_path
+    @pytest.mark.parametrize(
+        ("type_name", "attr", "prefix", "raw", "expected"),
+        [
+            (
+                "VOLCOTA",
+                "polinomio_volume_cota",
+                "volume_cota",
+                [400.0, 0.2, 0.0, 0.0, 0.0],
+                [400.0, 0.2, 0.0, 0.0, 0.0],
+            ),
+            (
+                "COTAREA",
+                "polinomio_cota_area",
+                "cota_area",
+                [-1.0e7, 9.0e4, -2.5e2, 3.0e-1, 0.0],
+                [-1.0e7, 9.0e4, -2.5e2, 3.0e-1, 0.0],
+            ),
+            # A record that truncates its tail leaves the high-order terms at zero.
+            (
+                "VOLCOTA",
+                "polinomio_volume_cota",
+                "volume_cota",
+                [400.0, None, None, None, None],
+                [400.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+        ],
+    )
+    def test_polynomial_override_replaces_the_whole_polynomial(
+        self, tmp_path, type_name, attr, prefix, raw, expected
     ) -> None:
-        """A record that truncates its tail leaves the high-order terms at zero."""
         from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
 
-        volcota_rec = MagicMock()
-        type(volcota_rec).__name__ = "VOLCOTA"
-        volcota_rec.polinomio_volume_cota = [400.0, None, None, None, None]
+        poly_rec = MagicMock()
+        type(poly_rec).__name__ = type_name
+        setattr(poly_rec, attr, raw)
 
         usina_rec = MagicMock()
         usina_rec.codigo = 1
 
         mock_modif = MagicMock()
         mock_modif.usina.return_value = [usina_rec]
-        mock_modif.modificacoes_usina.return_value = [volcota_rec]
+        mock_modif.modificacoes_usina.return_value = [poly_rec]
 
-        result = _apply_permanent_overrides(
-            self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
-        )
+        base = self._base_cadastro()
+        columns = [f"a{i}_{prefix}" for i in range(5)]
+        with dx.collect() as collected:
+            result = _apply_permanent_overrides(
+                base, self._modif_case(tmp_path, mock_modif)
+            )
 
-        assert [result.loc[1, f"a{i}_volume_cota"] for i in range(5)] == [
-            400.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ]
+        assert result.loc[1, columns].tolist() == expected
+        assert result.loc[2, columns].tolist() == base.loc[2, columns].tolist()
+        assert collected == []
 
     def test_unknown_plant_code_skipped(self, tmp_path) -> None:
         """Plant code not in cadastro: diagnostic emitted, no crash."""

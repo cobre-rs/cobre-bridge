@@ -47,17 +47,12 @@ def _volume_unit(rec: object) -> str | None:
 
 
 def _polynomial_coefficients(raw: list[float | None]) -> list[float]:
-    """The five coefficients of a MODIF.DAT polynomial record, a0 first.
+    """The coefficients of a MODIF.DAT polynomial record, a0 first.
 
-    A field the record leaves blank is a zero coefficient, not a missing one --
-    a low-order polynomial truncates its tail instead of spelling out ``0.``
-    five times, and ``float(None)`` would abort the whole conversion.
+    A blank field is a zero coefficient, not a missing one: a low-order
+    polynomial leaves its tail blank instead of spelling out ``0.``.
     """
-    coefficients = [0.0] * 5
-    for index, value in enumerate(raw[:5]):
-        if value is not None and not pd.isna(value):
-            coefficients[index] = float(value)
-    return coefficients
+    return [0.0 if pd.isna(value) else float(value) for value in raw]
 
 
 def percent_of_useful_volume(percent: float, vol_min: float, vol_max: float) -> float:
@@ -98,10 +93,9 @@ def _apply_permanent_overrides(
 ) -> pd.DataFrame:
     """Apply MODIF.DAT permanent overrides to the hidr.dat cadastro.
 
-    Reads ``MODIF.DAT`` from *case* and
-    applies permanent override records — VAZMIN, VOLMAX, VOLMIN, NUMCNJ,
-    NUMMAQ — to a *copy* of *cadastro*.  The original DataFrame is not
-    mutated.
+    Reads ``MODIF.DAT`` from *case* and applies its permanent (undated)
+    override records to a *copy* of *cadastro*.  The original DataFrame is
+    not mutated.
 
     Parameters
     ----------
@@ -185,9 +179,7 @@ def _apply_permanent_overrides(
                 result.loc[code, f"maquinas_conjunto_{set_num}"] = n_maq
 
             elif type_name == "POTEFE":
-                # The registry's ``potencia_nominal_conjunto_*`` IS the conjunto's
-                # POTEF (the reader names the hidr.dat field ``potef_conjunto``), so
-                # this override replaces it — there is no second power column.
+                # ``potencia_nominal_conjunto_*`` is the conjunto's POTEF.
                 set_num = int(rec.conjunto)
                 result.loc[code, f"potencia_nominal_conjunto_{set_num}"] = float(
                     rec.potencia
@@ -204,9 +196,9 @@ def _apply_permanent_overrides(
                 )
 
             elif type_name == "DefaultRegister":
-                # inewave emits DefaultRegister for records it does not model
-                # (e.g. COTAREA). These are benign for the conversion, so log at
-                # debug level only — no user-facing warning.
+                # inewave emits DefaultRegister for records it does not model.
+                # These are benign for the conversion, so log at debug level
+                # only — no user-facing warning.
                 _LOG.debug(
                     "MODIF.DAT contains an unmodeled record (DefaultRegister)"
                     " for plant %d; skipping.",
@@ -275,8 +267,7 @@ def read_cadastro(case: NewaveCase) -> pd.DataFrame:
     -------
     pd.DataFrame
         The ``Hidr.cadastro`` DataFrame indexed by ``codigo_usina`` with all
-        permanent MODIF.DAT overrides (VAZMIN, VOLMAX, VOLMIN, NUMCNJ,
-        NUMMAQ) already applied.
+        permanent MODIF.DAT overrides already applied.
     """
     cadastro = case.hidr.cadastro
     return _apply_permanent_overrides(cadastro, case)
