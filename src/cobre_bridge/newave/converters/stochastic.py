@@ -36,33 +36,41 @@ _POSTO_COUNTS: tuple[int, int] = (320, 600)
 _DEFAULT_POSTO_COUNT = 320
 
 
-def _posto_count(path: Path) -> int:
+def _posto_count(path: Path, *, hist_start_year: int, study_start_year: int) -> int:
     """Return the number of postos in ``vazoes.dat``, derived from its size.
 
-    A width qualifies when it divides the matrix into whole months *and* whole
-    years, since the historical record always ends in December.  Both widths
-    qualify whenever the value count is a common multiple, which is no corner
-    of the domain -- a 320-posto deck with 90 years of history is one -- so an
-    ambiguous size resolves to the far more common width and says so, because
-    reading a deck at the wrong width silently reinterprets the whole series.
-    A size neither width divides cannot be reshaped at all; failing here names
-    the file, where reading on surfaces as an opaque reshape error from inside
-    the reader.
+    A width qualifies when it divides the matrix into whole years, since the
+    historical record always ends in December, and when the record it implies
+    ends no later than the study start year, the last year the history spans.
+    Every 600-posto history whose length is a multiple of 8 years is also a
+    whole number of years at 320, so the year bound is what tells the two
+    apart; reading a deck at the wrong width silently reinterprets the whole
+    series. Should both widths still qualify, the size resolves to the far
+    more common width and says so. A size no width fits fails here, naming
+    the file, where reading on surfaces as an opaque reshape error from
+    inside the reader.
     """
-    num_values = path.stat().st_size // 4
+    size = path.stat().st_size
+    if size % 4:
+        raise FieldParseError(
+            f"vazoes.dat is {size} bytes, which is not a whole number of "
+            "4-byte values -- the file is truncated, or it is not a "
+            "historical inflow record.",
+            path=str(path),
+            field="vazoes.dat",
+        )
+    num_values = size // 4
     if num_values == 0:
         # An empty file implies nothing about its width, and the callers below
         # already report the emptiness itself.
         return _DEFAULT_POSTO_COUNT
 
-    candidates = [
-        count
+    years_by_count = {
+        count: num_values // (12 * count)
         for count in _POSTO_COUNTS
-        if num_values % count == 0 and (num_values // count) % 12 == 0
-    ]
-    if len(candidates) == 1:
-        return candidates[0]
-    if not candidates:
+        if num_values % (12 * count) == 0
+    }
+    if not years_by_count:
         raise FieldParseError(
             f"vazoes.dat holds {num_values} values, which is not a whole "
             f"number of years at {' or '.join(str(c) for c in _POSTO_COUNTS)} "
@@ -72,6 +80,27 @@ def _posto_count(path: Path) -> int:
             field="vazoes.dat",
         )
 
+    candidates = [
+        count
+        for count, years in years_by_count.items()
+        if hist_start_year + years - 1 <= study_start_year
+    ]
+    if not candidates:
+        overruns = " and ".join(
+            f"to {hist_start_year + years - 1} at {count} postos"
+            for count, years in years_by_count.items()
+        )
+        raise FieldParseError(
+            f"vazoes.dat holds {num_values} values, a history from "
+            f"{hist_start_year} running {overruns} -- past {study_start_year}, "
+            "the study start year. The file does not match the deck's "
+            "historical period, or it is not a historical inflow record.",
+            path=str(path),
+            field="vazoes.dat",
+        )
+    if len(candidates) == 1:
+        return candidates[0]
+
     emit(
         Diagnostic(
             code="vazoes-posto-count-ambiguous",
@@ -80,11 +109,12 @@ def _posto_count(path: Path) -> int:
             title="Ambiguous vazoes.dat width",
             summary=(
                 f"vazoes.dat holds {num_values} values, a whole number of "
-                f"years at {' and at '.join(str(c) for c in candidates)} "
-                f"postos; it is read at {_DEFAULT_POSTO_COUNT}, the width "
-                "almost every deck uses. A deck written at the other width is "
-                "read as a different number of months of history, with no "
-                "further sign that anything is wrong."
+                f"years ending by {study_start_year} at "
+                f"{' and at '.join(str(c) for c in candidates)} postos; it is "
+                f"read at {_DEFAULT_POSTO_COUNT}, the width almost every deck "
+                "uses. A deck written at the other width is read as a "
+                "different number of months of history, with no further sign "
+                "that anything is wrong."
             ),
             remediation=(
                 "→ Check the deck's posto count if the historical inflow "
@@ -96,16 +126,13 @@ def _posto_count(path: Path) -> int:
     return _DEFAULT_POSTO_COUNT
 
 
-def _read_vazoes(path: Path) -> Vazoes:
-    """Read ``vazoes.dat`` at the width its size implies.
-
-    The count reaches the reader only when it differs from the reader's own
-    default, so a 320-posto deck still reads on an ``inewave`` that predates
-    the ``postos`` parameter.
-    """
-    count = _posto_count(path)
-    if count == _DEFAULT_POSTO_COUNT:
-        return Vazoes.read(path)
+def _read_vazoes(path: Path, dger: Dger) -> Vazoes:
+    """Read ``vazoes.dat`` at the width its size and the deck's years imply."""
+    count = _posto_count(
+        path,
+        hist_start_year=int(dger.ano_inicial_historico),
+        study_start_year=int(dger.ano_inicio_estudo),
+    )
     return Vazoes.read(path, postos=count)
 
 
@@ -329,12 +356,12 @@ def _incremental_history(
         If the vazoes.dat DataFrame is absent or empty.
     """
     # vazoes.dat is large and read only here, so it stays uncached on case.files.
-    vazoes_obj = _read_vazoes(case.files.vazoes)
+    dger = case.dger
+    vazoes_obj = _read_vazoes(case.files.vazoes, dger)
     df_vazoes: pd.DataFrame | None = vazoes_obj.vazoes
     if df_vazoes is None or df_vazoes.empty:
         raise FileNotFoundError("vazoes.dat not found or empty")
 
-    dger = case.dger
     hist_start_year: int = dger.ano_inicial_historico
     study_start_year: int = dger.ano_inicio_estudo
     study_start_month: int = dger.mes_inicio_estudo
@@ -414,15 +441,14 @@ def convert_inflow_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
     FileNotFoundError
         If ``vazoes.dat`` DataFrame is empty.
     """
-    vazoes_obj = _read_vazoes(case.files.vazoes)
+    dger = case.dger
+    vazoes_obj = _read_vazoes(case.files.vazoes, dger)
     df_vazoes: pd.DataFrame | None = vazoes_obj.vazoes
 
     if df_vazoes is None or df_vazoes.empty:
         raise FileNotFoundError("vazoes.dat not found or empty")
 
     confhd_df: pd.DataFrame = case.confhd.usinas
-
-    dger = case.dger
 
     # Truncate to months before the study start (same window as inflow_history).
     hist_start_year: int = dger.ano_inicial_historico

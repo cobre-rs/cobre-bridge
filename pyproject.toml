@@ -11,10 +11,7 @@ license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
 dependencies = [
     "idecomp>=1.14.2",
-    # 1.16.0 is the first release to model the `modif.dat` POTEFE/VOLCOTA/COTAREA
-    # records, which the hydro registry overrides apply; older readers hand them
-    # over unnamed and the deck's values are silently lost. It also keeps 1.15.1's
-    # hybrid production cortes decode (`Cortes.from_cortesh(por_estagio=True)`).
+    # 1.16.0: first to read modif.dat POTEFE/VOLCOTA/COTAREA and vazoes.dat at 600 postos.
     "inewave>=1.16.0",
     "pyarrow>=24.0.0",
     "pandas>=3.0.3",

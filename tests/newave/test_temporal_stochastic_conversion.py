@@ -2,8 +2,9 @@
 
 All inewave I/O is mocked via ``unittest.mock.patch`` so no real the source model files
 are required.  Synthetic DataFrames exercise the core logic of each converter.
-``TestReadVazoes`` is the one exception: the width derivation has to prove the
-reader lays a 600-posto matrix out as declared, which a mock cannot show.
+``test_six_hundred_posto_matrix_is_laid_out_at_full_width`` is the one
+exception: it has to prove the reader lays a 600-posto matrix out as declared,
+which a mock cannot show.
 """
 
 from __future__ import annotations
@@ -1283,7 +1284,7 @@ class TestConvertInflowStats:
         mock_obj = MagicMock()
         mock_obj.vazoes = pd.DataFrame()
         mock_vazoes_cls.read.return_value = mock_obj
-        case = make_case(tmp_path, confhd=_make_confhd_mock({}))
+        case = make_case(tmp_path, confhd=_make_confhd_mock({}), dger=_make_dger_mock())
 
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
 
@@ -1912,31 +1913,40 @@ class TestBuildUpstreamPostosFillingAdmission:
 # ---------------------------------------------------------------------------
 
 
-def _write_vazoes(tmp_path: Path, num_values: int) -> Path:
-    """A vazoes.dat of the given int32 value count; only its size matters."""
+def _write_vazoes(tmp_path: Path, num_bytes: int) -> Path:
+    """A vazoes.dat of the given byte size; only its size matters."""
     path = tmp_path / "vazoes.dat"
-    path.write_bytes(b"\x00" * (num_values * 4))
+    path.write_bytes(b"\x00" * num_bytes)
     return path
 
 
+def _count(path: Path) -> int:
+    return _posto_count(path, hist_start_year=1931, study_start_year=2026)
+
+
 class TestPostoCount:
-    def test_width_that_alone_yields_whole_years_is_used(self, tmp_path) -> None:
-        # One year at 320 postos; the same size is not even a whole number of
-        # months at 600.
-        assert _posto_count(_write_vazoes(tmp_path, 320 * 12)) == 320
-
-    def test_six_hundred_posto_deck_is_detected(self, tmp_path) -> None:
-        assert _posto_count(_write_vazoes(tmp_path, 600 * 12)) == 600
-
-    def test_unambiguous_size_emits_nothing(self, tmp_path) -> None:
+    @pytest.mark.parametrize(
+        ("num_values", "expected"),
+        [
+            # One year at 320; not even a whole number of months at 600.
+            (320 * 12, 320),
+            (600 * 12, 600),
+            # 1931-2026 at 600 is also a whole number of years at 320, but
+            # one that would run to 2110.
+            (600 * 12 * 96, 600),
+        ],
+    )
+    def test_the_only_fitting_width_is_used_silently(
+        self, tmp_path, num_values, expected
+    ) -> None:
         with dx.collect() as collected:
-            _posto_count(_write_vazoes(tmp_path, 600 * 12))
+            assert _count(_write_vazoes(tmp_path, 4 * num_values)) == expected
         assert collected == []
 
     def test_ambiguous_size_assumes_320_and_warns(self, tmp_path) -> None:
-        # 15 years at 320 postos is also 8 years at 600.
+        # 15 years at 320 postos is also 8 years at 600, both ending by 2026.
         with dx.collect() as collected:
-            count = _posto_count(_write_vazoes(tmp_path, 320 * 12 * 15))
+            count = _count(_write_vazoes(tmp_path, 4 * 320 * 12 * 15))
 
         assert count == 320
         assert len(collected) == 1
@@ -1947,53 +1957,43 @@ class TestPostoCount:
         assert "320" in diag.summary
         assert "600" in diag.summary
 
-    def test_size_that_fits_no_width_is_rejected(self, tmp_path) -> None:
-        with pytest.raises(FieldParseError) as excinfo:
-            _posto_count(_write_vazoes(tmp_path, 1000))
-        assert "320 or 600" in str(excinfo.value)
-
-    def test_whole_months_but_partial_year_is_rejected(self, tmp_path) -> None:
-        # 13 months at 320 postos: the historical record ends in December.
-        with pytest.raises(FieldParseError):
-            _posto_count(_write_vazoes(tmp_path, 320 * 13))
+    @pytest.mark.parametrize(
+        ("num_bytes", "message"),
+        [
+            (4 * 320 * 12 + 2, "4-byte values"),
+            (4 * 1000, "320 or 600"),
+            # 13 months at 320 postos: the historical record ends in December.
+            (4 * 320 * 13, "320 or 600"),
+            # 100 years at 320 postos from 1931 runs to 2030.
+            (4 * 320 * 12 * 100, "to 2030 at 320 postos"),
+        ],
+    )
+    def test_size_that_fits_no_width_is_rejected(
+        self, tmp_path, num_bytes, message
+    ) -> None:
+        with pytest.raises(FieldParseError, match=message):
+            _count(_write_vazoes(tmp_path, num_bytes))
 
     def test_empty_file_falls_back_to_the_default(self, tmp_path) -> None:
         # Emptiness is the callers' finding, not the width derivation's.
-        path = tmp_path / "vazoes.dat"
-        path.touch()
         with dx.collect() as collected:
-            assert _posto_count(path) == 320
+            assert _count(_write_vazoes(tmp_path, 0)) == 320
         assert collected == []
 
 
-class TestReadVazoes:
-    @patch("cobre_bridge.newave.converters.stochastic.Vazoes")
-    def test_default_width_is_not_passed(self, mock_vazoes_cls, tmp_path) -> None:
-        path = _write_vazoes(tmp_path, 320 * 12)
-        _read_vazoes(path)
-        mock_vazoes_cls.read.assert_called_once_with(path)
+def test_six_hundred_posto_matrix_is_laid_out_at_full_width(tmp_path) -> None:
+    """Through the real reader: a width it ignores, rejects or lays out
+    transposed would mis-assign every posto's series. The 320-posto default is
+    covered end to end by the mini deck.
+    """
+    path = tmp_path / "vazoes.dat"
+    # Sequential values, unlike ``_write_vazoes``' zeros: the row-major
+    # assertions below are what pin the width.
+    path.write_bytes(b"".join(struct.pack("<i", v) for v in range(600 * 12)))
 
-    @patch("cobre_bridge.newave.converters.stochastic.Vazoes")
-    def test_other_width_reaches_the_reader(self, mock_vazoes_cls, tmp_path) -> None:
-        path = _write_vazoes(tmp_path, 600 * 12)
-        _read_vazoes(path)
-        mock_vazoes_cls.read.assert_called_once_with(path, postos=600)
+    df = _read_vazoes(path, _make_dger_mock(ano_inicio=2026)).vazoes
 
-    def test_six_hundred_posto_matrix_is_laid_out_at_full_width(self, tmp_path) -> None:
-        """Through the real reader, which the two mocked cases above cannot reach.
-
-        A width the reader ignores, rejects or lays out transposed passes both of
-        them and still mis-assigns every posto's series. The 320-posto default is
-        covered end to end by the mini deck.
-        """
-        path = tmp_path / "vazoes.dat"
-        # Sequential values, unlike ``_write_vazoes``' zeros: the row-major
-        # assertions below are what pin the width.
-        path.write_bytes(b"".join(struct.pack("<i", v) for v in range(600 * 12)))
-
-        df = _read_vazoes(path).vazoes
-
-        assert df.shape == (12, 600)
-        assert df.iloc[0, 0] == 0
-        assert df.iloc[0, -1] == 599
-        assert df.iloc[1, 0] == 600
+    assert df.shape == (12, 600)
+    assert df.iloc[0, 0] == 0
+    assert df.iloc[0, -1] == 599
+    assert df.iloc[1, 0] == 600
