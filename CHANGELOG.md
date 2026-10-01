@@ -9,97 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`modif.dat` now corrects effective power and both cota polynomials.**
-  `POTEFE` (a conjunto's effective power), `VOLCOTA` (the volume-to-height
-  polynomial) and `COTAREA` (the height-to-area polynomial) join the permanent
-  records applied to the `hidr.dat` registry, so they reach the generation caps
-  in `hydros.json`, the curves in `system/hydro_geometry.parquet`, the per-stage
-  productivities, and the head-corrected turbined caps in
-  `constraints/hydro_bounds.parquet`. The three were previously skipped with a
-  debug log, and a deck that redeclared them converted with the registry values
-  and no warning. Reading them needs the `inewave` release that models the
-  records, which the dependency floor now requires.
+- **`modif.dat` `POTEFE`, `VOLCOTA` and `COTAREA` are applied to the
+  `hidr.dat` registry**, so a conjunto's effective power and both cota
+  polynomials reach the generation caps, the hydro geometry, the
+  productivities and the head-corrected turbined caps. They were previously
+  skipped without a warning. Requires `inewave>=1.16.0`.
 
 ### Fixed
 
-- **Whether a thermal plant's registry values are discarded now follows
-  `conft.dat`, not `expt.dat`.** The model discards `term.dat`'s effective power
-  and minimum generation for a plant whose status is `EE` or `NE`, leaving
-  `expt.dat` as its whole timeline; the converter instead keyed that on the
-  plant merely appearing in `expt.dat`. An `EX` plant with an `expt.dat` window
-  was therefore held out of service outside it rather than falling back to its
-  registry capacity, and an `EE`/`NE` plant absent from `expt.dat` kept a
-  capacity the model gives it none of. Both criteria coincide on a deck that
-  configures every thermal through `expt.dat`, which is why no deck at hand
-  changes.
-
-- **A thermal plant's minimum generation stops repeating the maintenance
-  years' monthly profile over the whole horizon.** `term.dat` carries twelve
-  minimum-generation columns that describe the maintenance years and a
-  thirteenth for the years after them; the converter dropped the thirteenth and
-  applied the monthly profile to every year, so a plant declaring no minimum in
-  January carried none in January of any year. The per-stage minimum now
-  follows both regimes: the calendar-month column inside the maintenance years,
-  the remaining-years value from their end onward, for a plant that declares
-  one. `expt.dat`'s GTMIN windows keep overriding it, so this surfaces only for
-  a plant the deck configures outside `expt.dat`.
-
-- **A thermal plant's published generation limits are the envelope of its
-  per-stage limits, not its `term.dat` registry row.** The pair in
-  `system/thermals.json` is now the smallest minimum and the largest maximum the
-  plant reaches over the horizon, so it can never be tighter than the stage
-  cobre enforces it at. Read from the registry row alone it ignored `expt.dat`'s
-  windows, `manutt.dat`'s outages and the maintenance-year availability rule,
-  which reach the plant only through those stages: a deck whose registry minimum
-  exceeds its registry `potencia_instalada` × `fator_capacidade_maximo` product
-  published an inverted interval — 161.38 MW minimum against a 149.73 MW maximum
-  — that cobre rejects outright, so the converted case would not load. The same
-  read also took the minimum from the January column whatever month the study
-  started in, understating the published minimum of a plant whose must-run is
-  seasonal. Two consequences of the wider pair: the maximum now carries TEIF, IP
-  and maintenance, and a plant that is out of service or without a declared
-  minimum in any stage of the horizon publishes a minimum of 0 (24 of 107
-  plants on the deck at hand, against 75 before). Thermal cost and the per-stage
-  bounds in `constraints/thermal_bounds.parquet` are unchanged.
-
-- **Electric constraints no longer outlive the period they are declared for.**
-  Every limit in `re.dat` and in `restricao-eletrica.csv` is registered with a
-  start and an end period, and both were being ignored at the end: a `re.dat`
-  limit was carried forward to the last stage of the study, and a
-  `restricao-eletrica.csv` limit was repeated by calendar month across every
-  stage past the individualised period. A constraint the deck declared for a
-  couple of months — the usual shape, since the limits track dated grid work —
-  was therefore enforced over the whole horizon. Bounds now cover only the
-  stages their own registration spans; where two registrations overlap, the
-  existing precedence is unchanged, so a patamar-specific limit still wins its
-  own block inside a broader all-patamar one.
-
-- **A 600-posto `vazoes.dat` is no longer read as a 320-posto one.** The
-  historical inflow record is a headerless matrix of months by gauging
-  stations, and the deck declares its width nowhere, so the reader assumed the
-  320 postos that almost every deck uses. A 600-posto deck was therefore
-  reshaped into the wrong number of months: it either aborted the conversion
-  with an opaque cast error from inside the reader or, when the value count
-  happened to divide, silently produced a different history. The width is now
-  derived from the file size, which has to yield whole months and whole years;
-  a size that fits both widths is read as 320 with a warning naming the
-  ambiguity, and a size that fits neither fails naming the file instead of the
-  reader's internals. Reading a 600-posto deck needs the `inewave` release that
-  accepts the station count; the dependency floor moves with it.
-
-- **Hydros under expansion (`EE`) are no longer dropped.** `confhd.dat` marks a
-  plant already in operation but with machines still to enter as `EE`
-  ("existente em expansão"). The converter admitted only `EX`, so every `EE`
-  plant was treated as not yet built: it became a Cobre entity in neither the
-  id map nor `hydros.json`, its reservoir left the water balance, and the
-  cascade was rewired around it. Its inflow gauge was also skipped in posto
-  space, so the plant below it absorbed the whole natural inflow of the bypassed
-  reach as its own incremental series. `EE` plants now enter the case at their
-  declared capacity, carry their own inflow, and keep their cascade links; the
-  plant's capacity grows as its `exph.dat` machines enter service: it operates
-  from the first stage at the configuration `modif.dat` declares for the study
-  start and reaches the `hidr.dat` configuration on the entry date, with the
-  capacity before each entry written as a per-stage bound.
+- **NEWAVE hydros under expansion (`EE`) are converted.** They were dropped as
+  if not yet built, taking their reservoir out of the water balance and their
+  inflow into the plant below. An `EE` plant now starts at the configuration
+  `modif.dat` declares for the study start and gains capacity as its
+  `exph.dat` machines enter, through per-stage bounds; `hydros.json` and FPHA
+  eligibility use its final configuration.
+- **NEWAVE thermal limits.** The `thermals.json` pair is the envelope of the
+  plant's per-stage bounds, so it can no longer publish an inverted interval
+  that cobre rejects or a maximum below a stage's bound. Registry values are
+  discarded for `EE`/`NE` plants per `conft.dat`, not per presence in
+  `expt.dat`. `term.dat`'s monthly minimum applies to the first study year and
+  its remaining-years value afterwards (a blank value keeps the monthly one),
+  and the per-stage table is written whenever a plant's bounds vary, even
+  without `expt.dat` or `manutt.dat`.
+- **NEWAVE electric constraints stop at the end of their declared period.**
+  `re.dat` limits were carried to the end of the study and
+  `restricao-eletrica.csv` limits repeated by calendar month past it.
+- **A 600-posto `vazoes.dat` is read at its width.** The width comes from the
+  file size and the deck's history and study years; a 600-posto deck was read
+  as 320 postos and either failed or silently produced a different history.
+- **DECOMP `RQ` minimum outflow is read per stage**, not per block, and the
+  `RQ`/`UH` floor is released for run-of-river plants from a cascade headwater
+  down to the first reservoir, as DECOMP does. An explicit `RHQ` window is
+  kept.
+- **DECOMP weekly-regulating (`S`) plants count as reservoirs** for that
+  release and in `RHE` stored-energy constraints, which also evaluate them
+  with the volume-integrated productivity.
+- **A plant with zero rated turbined flow or rated power stays on constant
+  productivity** on both tracks, instead of being emitted as FPHA and making
+  cobre's fit abort the run; such plants are listed in an informational
+  diagnostic.
 
 ## [0.16.0] - 2026-09-22
 
