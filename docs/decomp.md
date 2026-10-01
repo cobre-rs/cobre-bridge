@@ -76,6 +76,13 @@ cobre run <case_dir>
 `convert decomp` confirms the imported boundary and this command after a
 successful import.
 
+The checkpoint records the version of the `cobre-python` that wrote it, and
+cobre loads it only when that version equals its own. Run the case with the
+`cobre` release whose version matches the installed `cobre-python`
+(`pip show cobre-python`); a different cobre refuses the boundary and names
+both versions. To use another cobre version, install the matching
+`cobre-python` and convert the deck again.
+
 ## Comparing results
 
 `compare decomp DECOMP_DIR COBRE_OUTPUT_DIR` reads the deck plus the

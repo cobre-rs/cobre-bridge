@@ -5,7 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.17.0] - 2026-10-01
+
+Pairs the bridge with the **cobre 0.17.0** release: the `cobre-python` pin and
+`MIN_COBRE_VERSION` floor move to `0.17.0` (bridge `X.Y.Z` pairs cobre `X.Y.Z`,
+guarded by `tests/test_packaging.py`). cobre 0.17.0 loads a policy checkpoint
+only in the version that wrote it, which ties the boundary `convert decomp`
+imports to that exact cobre release. The release also converts NEWAVE hydros
+under expansion, applies the `modif.dat` `POTEFE`, `VOLCOTA` and `COTAREA`
+records, and fixes NEWAVE thermal limits, minimum outflows and electric
+constraints, DECOMP minimum outflow and GNL commitments, and several CLI and
+dashboard defects.
 
 ### Added
 
@@ -13,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hidr.dat` registry**, so a conjunto's effective power and both cota
   polynomials reach the generation caps, the hydro geometry, the
   productivities and the head-corrected turbined caps. They were previously
-  skipped without a warning. Requires `inewave>=1.16.0`.
+  skipped without a warning.
 
 ### Fixed
 
@@ -85,6 +95,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   productivity** on both tracks, instead of being emitted as FPHA and making
   cobre's fit abort the run; such plants are listed in an informational
   diagnostic.
+
+### Changed
+
+- **cobre pairing.** `cobre-python>=0.17.0,<0.18` and `MIN_COBRE_VERSION =
+  "0.17.0"`; the conversion manifest records the `0.17.0` floor.
+- **The DECOMP boundary loads only in the cobre version that wrote it.**
+  cobre 0.17.0 stamps each policy checkpoint with the version of the build
+  that writes it and refuses one written by any other version, so a case with
+  an imported boundary must run under the `cobre` release that matches the
+  installed `cobre-python` exactly. A mismatched cobre names both versions;
+  converting again with the matching `cobre-python` resolves it.
+- **Dependency floors.** `inewave>=1.16.1`, the first release that reads the
+  `VAZMINT` `PRE`/`POS` markers the fix above relies on, plus
+  `pyarrow>=25.0.1`, `pandas>=3.0.6`, `plotly>=7.1.0`, `polars>=1.44.2` and
+  `typer>=0.27.2`.
 
 ## [0.16.0] - 2026-09-22
 
