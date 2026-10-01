@@ -93,7 +93,7 @@ def _compute_max_turbined_rated_ac_adjusted(
     """Return ``(max_turbined, max_generation)`` — the AC-adjusted rated
     nameplate capacity at *stage_index* — the DECOMP-only counterpart to the
     shared, un-derated, stage-invariant
-    ``newave.converters.hydro.bounds._compute_max_turbined_rated``.
+    ``core.hydro_units.rated_capacity``.
 
     Sums :func:`_conjunto_rated_ac_adjusted` over every conjunto effective
     at *stage_index* (``effective.machine_conjunto_count(code,

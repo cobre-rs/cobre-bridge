@@ -17,6 +17,7 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.hydro_units import rated_capacity
 from cobre_bridge.core.pandas_utils import is_na
 from cobre_bridge.core.productivity import (
     KTURB_BY_TIPO_TURBINA,
@@ -112,29 +113,6 @@ def _compute_max_turbined_simple(hreg: pd.Series, name: str) -> tuple[float, flo
     return max_turbined * availability, max_generation * availability
 
 
-def _compute_max_turbined_rated(hreg: pd.Series) -> tuple[float, float]:
-    """Return ``(max_turbined, max_generation)`` as the rated nameplate capacity:
-    ``Σ_c (n_c · q_nom_c)`` for flow and ``Σ_c (n_c · p_nom_c)`` for power, with
-    **no** TEIF/IP availability derating and no head correction.
-
-    ``convert_hydros`` emits the power value ``[1]`` as every plant's ``max_generation``
-    (independent of the production function): it equals the source model's
-    installed-capacity ceiling / FPHA ``GHmax`` exactly (verified TUCURUI 7445, QUEBRA
-    QUEIX 120). The flow value ``[0]`` (``Σ n·q_nom``) is the source model's
-    fitting-grid ``Qmax``, **not** the operational turbined cap — the emitted
-    ``max_turbined`` comes from :func:`_compute_max_turbined_head_corrected` instead
-    (the head-corrected engolimento that actually binds in dispatch).
-    """
-    n_sets = int(hreg["numero_conjuntos_maquinas"])
-    max_turbined = 0.0
-    max_generation = 0.0
-    for i in range(1, n_sets + 1):
-        n_machines = int(hreg[f"maquinas_conjunto_{i}"])
-        max_turbined += float(hreg[f"vazao_nominal_conjunto_{i}"]) * n_machines
-        max_generation += float(hreg[f"potencia_nominal_conjunto_{i}"]) * n_machines
-    return max_turbined, max_generation
-
-
 def _compute_max_turbined_head_corrected(
     hreg: pd.Series, name: str, *, h_op_override: float | None = None
 ) -> tuple[float, float]:
@@ -156,7 +134,7 @@ def _compute_max_turbined_head_corrected(
     n·q_nom`` = 117.0 overshoots it by 3.5%). ``convert_hydros`` emits the flow value
     ``[0]`` as ``max_turbined``; the ``[1]`` it returns is the availability-derated
     power and is no longer used for the emitted ``max_generation`` (that comes from
-    :func:`_compute_max_turbined_rated`).
+    :func:`~cobre_bridge.core.hydro_units.rated_capacity`).
 
     For each machine set *c* with nominal head ``h_nom_c``, nominal flow
     ``q_nom_c`` and number of units ``n_c``, the effective rated flow at
@@ -329,7 +307,7 @@ def _reduced_caps(
     for c in range(1, n_sets + 1):
         hreg_copy[f"maquinas_conjunto_{c}"] = int(online.get(c, 0))
     max_turbined = _compute_max_turbined_head_corrected(hreg_copy, name)[0]
-    max_generation = _compute_max_turbined_rated(hreg_copy)[1]
+    max_generation = rated_capacity(hreg_copy)[1]
     return max_turbined, max_generation
 
 

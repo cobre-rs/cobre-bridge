@@ -10,8 +10,9 @@ their shared cores (:func:`~cobre_bridge.core.tailrace.build_tailrace_table`,
 :func:`~cobre_bridge.core.productivity.fpha_efficiency`).
 
 Eligibility mirrors the source-model rule: a plant with a non-degenerate
-volume→cota polynomial (the forebay curve) and a positive ``ρ_esp``. Ineligible
-plants keep the constant-productivity path.
+volume→cota polynomial (the forebay curve), a positive ``ρ_esp``, and a positive
+``AC``-adjusted rated turbined flow and power. Ineligible plants keep the
+constant-productivity path.
 
 **Fitting window (a cobre-bridge modelling parameter).** The source model fits
 each plant's FPHA locally, around its initial state. cobre-bridge opens a volume
@@ -23,13 +24,17 @@ volume for a run-of-river plant (useful volume 0).
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
 
+from cobre_bridge.core.diagnostics import emit
+from cobre_bridge.core.hydro_units import fpha_zero_capacity_diagnostic
 from cobre_bridge.core.productivity import evaluate_cota, fpha_efficiency
 from cobre_bridge.core.tailrace import build_tailrace_table
 from cobre_bridge.decomp.converters.cadastro import effective_storage_range
+from cobre_bridge.decomp.converters.hydro.bounds import _rated_envelope
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -37,6 +42,8 @@ if TYPE_CHECKING:
     from cobre_bridge.decomp.case import DecompCase
     from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
     from cobre_bridge.decomp.id_map import DecompIdMap
+
+_LOG = logging.getLogger(__name__)
 
 #: Half-width of the FPHA volume fitting window as a fraction of a plant's
 #: useful volume (``volume_maximo − volume_minimo``): the window spans
@@ -92,58 +99,36 @@ def convert_tailrace_curves(case: DecompCase, id_map: DecompIdMap) -> pa.Table |
     return build_tailrace_table(families, segments, id_map.hydro_id)
 
 
-def _max_generation_capacity(effective: EffectiveCadastro, code: int) -> float:
-    """Return the maximum generation capacity (MW) over all stages.
-
-    Computes the AC-adjusted rated power by summing over all conjuntos for each
-    stage, using ``effective.machine_set()`` when an override exists and falling
-    back to the base ``hidr`` values otherwise. Returns the max over all stages.
-
-    This is a lightweight equivalent of ``_rated_envelope`` from
-    ``decomp/converters/hydro/bounds.py``, kept here to avoid a cross-module
-    import that would complicate the dependency graph.
-    """
-    base = effective.base.loc[code]
-    max_gen = 0.0
-    for stage in range(effective.n_stages):
-        n_sets = effective.machine_conjunto_count(code, stage)
-        if n_sets is None:
-            n_sets = int(base["numero_conjuntos_maquinas"])
-        stage_gen = 0.0
-        for i in range(1, n_sets + 1):
-            ms = effective.machine_set(code, i, stage)
-            if ms is not None:
-                stage_gen += ms.numero_maquinas * ms.potencia
-            else:
-                n_machines = int(base[f"maquinas_conjunto_{i}"])
-                p_nom = float(base[f"potencia_nominal_conjunto_{i}"])
-                stage_gen += n_machines * p_nom
-        max_gen = max(max_gen, stage_gen)
-    return max_gen
-
-
 def is_fpha_eligible(effective: EffectiveCadastro, code: int) -> bool:
     """Whether plant *code* can be fit by cobre's computed FPHA.
 
-    Requires:
-      1. A non-degenerate (post-``AC COTVOL``) volume→cota polynomial;
-      2. A positive ``produtibilidade_especifica`` at the initial stage;
-      3. A positive effective generation capacity (considers ``AC POTEFE``
-         overrides that may zero out the plant's power).
-
-    Storage swing is not required — a run-of-river plant fits through the
-    single-volume path. A plant with zero effective generation capacity (e.g.,
-    due to ``AC POTEFE 0.0``) is ineligible because cobre cannot fit valid
-    production hyperplanes for a non-generating plant.
+    Requires a non-degenerate (post-``AC COTVOL``) volume→cota polynomial, a
+    positive ``produtibilidade_especifica`` at the initial stage, and a
+    positive rated turbined flow **and** rated power
+    (:func:`~cobre_bridge.decomp.converters.hydro.bounds._rated_envelope`,
+    the ``AC NUMCON``/``NUMMAQ``/``POTEFE``/``VAZEFE``-adjusted envelope
+    ``hydros.json`` emits). cobre samples the fit on ``[0, max_turbined]`` and
+    clamps it at ``max_generation``, so a zero on either side collapses the
+    production cloud and aborts the fit. Storage swing is not required — a
+    run-of-river plant fits through the single-volume path.
     """
+    return _has_fpha_curve_inputs(effective, code) and _has_rated_capacity(
+        effective, code
+    )
+
+
+def _has_fpha_curve_inputs(effective: EffectiveCadastro, code: int) -> bool:
     coeffs = effective.cota_polynomial(code, 0)
     if all(c == 0.0 for c in coeffs):
         return False
-    if effective.value(code, "produtibilidade_especifica", 0) <= 0.0:
-        return False
-    if _max_generation_capacity(effective, code) <= 0.0:
-        return False
-    return True
+    return effective.value(code, "produtibilidade_especifica", 0) > 0.0
+
+
+def _has_rated_capacity(effective: EffectiveCadastro, code: int) -> bool:
+    max_turbined, max_generation = _rated_envelope(
+        effective.base.loc[code], code, effective
+    )
+    return max_turbined > 0.0 and max_generation > 0.0
 
 
 def fpha_eligible_codes(effective: EffectiveCadastro, id_map: DecompIdMap) -> set[int]:
@@ -151,13 +136,31 @@ def fpha_eligible_codes(effective: EffectiveCadastro, id_map: DecompIdMap) -> se
 
     Single source of truth shared by the ``hydros.json`` generation model, the
     production-model doc, and the energy-productivity parquet exclusion, so the
-    three agree on which plants are FPHA.
+    three agree on which plants are FPHA. A plant passing every check but
+    rated capacity is reported through
+    :func:`~cobre_bridge.core.hydro_units.fpha_zero_capacity_diagnostic`.
     """
-    return {
-        code
-        for code in id_map.hydro_codes
-        if code in effective.base.index and is_fpha_eligible(effective, code)
-    }
+    eligible: set[int] = set()
+    zero_capacity: list[tuple[str, int, float, float]] = []
+    for code in id_map.hydro_codes:
+        if code not in effective.base.index:
+            continue
+        if not _has_fpha_curve_inputs(effective, code):
+            continue
+        if _has_rated_capacity(effective, code):
+            eligible.add(code)
+        else:
+            hreg = effective.base.loc[code]
+            zero_capacity.append(
+                (
+                    str(hreg["nome_usina"]).strip(),
+                    code,
+                    *_rated_envelope(hreg, code, effective),
+                )
+            )
+    if zero_capacity:
+        emit(fpha_zero_capacity_diagnostic(zero_capacity), logger=_LOG)
+    return eligible
 
 
 def fitting_window(

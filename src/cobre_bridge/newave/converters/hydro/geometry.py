@@ -1,5 +1,6 @@
 """Hydro geometry: the VHA volume->height->area table, seasonal reference-volume
-reads, and FPHA eligibility (a property of the volume->cota polynomial).
+reads, and FPHA eligibility (the volume->cota polynomial, the specific
+productivity, and the rated capacity).
 
 Depends only on :mod:`.overrides` within the package.
 """
@@ -14,6 +15,7 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
+from cobre_bridge.core.hydro_units import fpha_zero_capacity_diagnostic, rated_capacity
 from cobre_bridge.newave.case import NewaveCase
 from cobre_bridge.newave.converters.hydro.overrides import _apply_permanent_overrides
 from cobre_bridge.newave.id_map import NewaveIdMap
@@ -24,13 +26,22 @@ _LOG = logging.getLogger(__name__)
 def _is_fpha_eligible(hreg: pd.Series) -> bool:
     """Whether a hydro plant can be fit by cobre's *computed* FPHA.
 
-    Requires a non-degenerate volume→cota polynomial (the forebay curve) and a
+    Requires a non-degenerate volume→cota polynomial (the forebay curve), a
     positive specific productivity ``rho_esp`` (needed to derive the
-    dimensionless turbine efficiency). Storage swing is **not** required:
-    run-of-river / zero-storage plants (``vmax == vmin``) emit a single VHA geometry row
-    and cobre fits them through the single-volume FPHA path (γ_V = 0), matching the
-    source model, which fits these plants with ``Npt_V = 1``.
+    dimensionless turbine efficiency), and a positive rated turbined flow
+    **and** rated power (:func:`~cobre_bridge.core.hydro_units.rated_capacity`
+    over the MODIF-adjusted machine sets). cobre samples the fit on
+    ``[0, max_turbined]`` and clamps it at ``max_generation``, so a zero on
+    either side collapses the production cloud and aborts the fit. Storage
+    swing is **not** required: run-of-river / zero-storage plants
+    (``vmax == vmin``) emit a single VHA geometry row and cobre fits them
+    through the single-volume FPHA path (γ_V = 0), matching the source model,
+    which fits these plants with ``Npt_V = 1``.
     """
+    return _has_fpha_curve_inputs(hreg) and _has_rated_capacity(hreg)
+
+
+def _has_fpha_curve_inputs(hreg: pd.Series) -> bool:
     coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
     if all(c == 0.0 for c in coeffs):
         return False
@@ -41,6 +52,11 @@ def _is_fpha_eligible(hreg: pd.Series) -> bool:
     return not math.isnan(rho_esp) and rho_esp > 0.0
 
 
+def _has_rated_capacity(hreg: pd.Series) -> bool:
+    max_turbined, max_generation = rated_capacity(hreg)
+    return max_turbined > 0.0 and max_generation > 0.0
+
+
 def fpha_eligible_codes(case: NewaveCase) -> set[int]:
     """The source model plant codes emitted as ``model: "fpha"`` for this case.
 
@@ -49,15 +65,29 @@ def fpha_eligible_codes(case: NewaveCase) -> set[int]:
     :func:`convert_production_models`, and :func:`convert_hydro_energy_productivity`
     so the three files agree on which plants are FPHA. Uses the same
     permanent-override cadastro the converters use, so eligibility is consistent.
+    A plant passing every check but rated capacity is reported through
+    :func:`~cobre_bridge.core.hydro_units.fpha_zero_capacity_diagnostic`.
     """
     if not case.fpha_enabled:
         return set()
     cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
     eligible: set[int] = set()
+    zero_capacity: list[tuple[str, int, float, float]] = []
     for _, row in case.active_hydros.iterrows():
         code = int(row["codigo_usina"])
-        if code in cadastro.index and _is_fpha_eligible(cadastro.loc[code]):
+        if code not in cadastro.index:
+            continue
+        hreg = cadastro.loc[code]
+        if not _has_fpha_curve_inputs(hreg):
+            continue
+        if _has_rated_capacity(hreg):
             eligible.add(code)
+        else:
+            zero_capacity.append(
+                (str(hreg["nome_usina"]).strip(), code, *rated_capacity(hreg))
+            )
+    if zero_capacity:
+        emit(fpha_zero_capacity_diagnostic(zero_capacity), logger=_LOG)
     return eligible
 
 

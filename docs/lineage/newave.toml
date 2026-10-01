@@ -1498,7 +1498,7 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (existentes
     { file = "hidr", item = "a0_volume_cota … a4_volume_cota" },
     { file = "hidr", item = "produtibilidade_especifica" },
   ]
-  how = "`fpha` quando `funcao_producao_uhe = 0` e a usina tem polinômio cota-volume não nulo e produtibilidade específica positiva; `constant_productivity` nos demais casos."
+  how = "`fpha` quando `funcao_producao_uhe = 0` e a usina tem polinômio cota-volume não nulo, produtibilidade específica positiva e engolimento e potência nominais (Σ máquinas × nominal por conjunto, após `MODIF NUMCNJ`/`NUMMAQ`) positivos; `constant_productivity` nos demais casos. Uma usina excluída só pela capacidade nula é listada em diagnóstico informativo."
 
   [[output.field]]
   path = "hydros[].generation.min_turbined_m3s"
@@ -1701,7 +1701,7 @@ summary = "Uma entrada por usina hidrelétrica ativa de `confhd.dat` (existentes
     { file = "hidr", item = "produtibilidade_especifica" },
     { file = "hidr", item = "a0_volume_cota … a4_volume_cota" },
   ]
-  how = "Nulo para usinas fora da FPHA (caso linear ou usina sem polinômio cota-volume / produtibilidade específica); para usinas `fpha`, o bloco com `type` e `value`."
+  how = "Nulo para usinas fora da FPHA (caso linear ou usina sem polinômio cota-volume / produtibilidade específica / capacidade nominal); para usinas `fpha`, o bloco com `type` e `value`."
 
   [[output.field]]
   path = "hydros[].efficiency.type"

@@ -1213,7 +1213,7 @@ summary = "Uma entrada por usina hidráulica operada (registro `UH` com `volume_
     { file = "dadger", register = "AC", item = "PROESP" },
   ]
   status = "derived"
-  how = "`fpha` quando o polinômio cota-volume efetivo (pós `AC COTVOL`) do estágio inicial não é identicamente nulo e a produtibilidade específica efetiva (pós `AC PROESP`) é positiva; caso contrário `constant_productivity`, com o ρ_eq em `system/hydro_energy_productivity.parquet`."
+  how = "`fpha` quando o polinômio cota-volume efetivo (pós `AC COTVOL`) do estágio inicial não é identicamente nulo, a produtibilidade específica efetiva (pós `AC PROESP`) é positiva e o engolimento e a potência nominais efetivos (maior valor ao longo dos estágios, pós `AC NUMCON`/`NUMMAQ`/`POTEFE`/`VAZEFE`) são positivos; caso contrário `constant_productivity`, e a usina excluída só pela capacidade nula é listada em diagnóstico informativo, com o ρ_eq em `system/hydro_energy_productivity.parquet`."
 
   [[output.field]]
   path = "hydros[].generation.min_turbined_m3s"
@@ -1495,7 +1495,7 @@ summary = "Uma entrada por usina operada com um único intervalo de estágios co
     { file = "dadger", register = "AC", item = "PROESP" },
   ]
   status = "derived"
-  how = "`fpha` para as usinas com polinômio cota-volume efetivo não nulo e produtibilidade específica positiva no estágio inicial; `constant_productivity` para as demais. É o mesmo critério de `generation.model` em `system/hydros.json`."
+  how = "`fpha` para as usinas com polinômio cota-volume efetivo não nulo e produtibilidade específica positiva no estágio inicial e engolimento e potência nominais efetivos positivos; `constant_productivity` para as demais. É o mesmo critério de `generation.model` em `system/hydros.json`."
 
   [[output.field]]
   path = "production_models[].stage_ranges[].fpha_config.source"

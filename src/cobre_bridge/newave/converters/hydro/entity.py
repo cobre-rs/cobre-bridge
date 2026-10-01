@@ -12,13 +12,12 @@ import pandas as pd
 
 from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
-from cobre_bridge.core.hydro_units import build_mirror_unit_group
+from cobre_bridge.core.hydro_units import build_mirror_unit_group, rated_capacity
 from cobre_bridge.core.pandas_utils import is_na
 from cobre_bridge.core.productivity import fpha_efficiency
 from cobre_bridge.newave.case import NewaveCase
 from cobre_bridge.newave.converters.hydro.bounds import (
     _compute_max_turbined_head_corrected,
-    _compute_max_turbined_rated,
     _per_stage_turbined_envelope,
 )
 from cobre_bridge.newave.converters.hydro.geometry import (
@@ -332,7 +331,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             if envelope_value is None
             else max(max_turbined_reference, envelope_value)
         )
-        max_generation = _compute_max_turbined_rated(hreg)[1]
+        max_generation = rated_capacity(hreg)[1]
 
         # Minimum outflow from historical minimum (may have been overridden by MODIF).
         vazao_min_hist = hreg.get("vazao_minima_historica")

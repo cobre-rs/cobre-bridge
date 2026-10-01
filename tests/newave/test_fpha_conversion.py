@@ -14,6 +14,8 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity
 from cobre_bridge.core.productivity import fpha_efficiency
 from cobre_bridge.newave.converters.hydro import (
     _fpha_computed_config,
@@ -45,6 +47,9 @@ def _reservoir_row(
     vmax: float = 1000.0,
     rho_esp: float = _REALISTIC_RHO_ESP,
     a1: float = 0.1,
+    maquinas: int = 2,
+    potencia: float = 50.0,
+    vazao: float = 100.0,
 ) -> pd.Series:
     return pd.Series(
         {
@@ -56,6 +61,10 @@ def _reservoir_row(
             "a3_volume_cota": 0.0,
             "a4_volume_cota": 0.0,
             "produtibilidade_especifica": rho_esp,
+            "numero_conjuntos_maquinas": 1,
+            "maquinas_conjunto_1": maquinas,
+            "potencia_nominal_conjunto_1": potencia,
+            "vazao_nominal_conjunto_1": vazao,
         }
     )
 
@@ -78,6 +87,15 @@ class TestIsFphaEligible:
 
     def test_zero_rho_esp_not_eligible(self) -> None:
         assert _is_fpha_eligible(_reservoir_row(rho_esp=0.0)) is False
+
+    def test_zero_machines_not_eligible(self) -> None:
+        assert _is_fpha_eligible(_reservoir_row(maquinas=0)) is False
+
+    def test_zero_rated_power_not_eligible(self) -> None:
+        assert _is_fpha_eligible(_reservoir_row(potencia=0.0)) is False
+
+    def test_zero_rated_flow_not_eligible(self) -> None:
+        assert _is_fpha_eligible(_reservoir_row(vazao=0.0)) is False
 
 
 class TestFphaEfficiency:
@@ -186,6 +204,7 @@ class TestFphaConverters:
         fpha: bool = True,
         tratamento: str | None = None,
         volref: dict[int, dict[int, float]] | None = None,
+        modif: MagicMock | None = None,
     ):
         cadastro = _make_hidr_cadastro().copy()
         # Plant 1: realistic specific productivity -> FPHA.
@@ -210,6 +229,8 @@ class TestFphaConverters:
             path = tmp_path / "tratamento-fpha.csv"
             path.write_text(tratamento, encoding="utf-8")
             overrides["tratamento_fpha"] = path
+        if modif is not None:
+            overrides["modif"] = tmp_path / "modif.dat"
 
         parsed: dict = {
             "hidr": mock_hidr,
@@ -217,6 +238,8 @@ class TestFphaConverters:
             "ree": mock_ree,
             "dger": dger,
         }
+        if modif is not None:
+            parsed["modif"] = modif
         if volref is not None:
             rows = [
                 {"codigo_usina": code, "mes": month, "valor": value}
@@ -234,6 +257,26 @@ class TestFphaConverters:
 
     def test_eligible_codes_empty_when_fpha_off(self, tmp_path: Path) -> None:
         assert fpha_eligible_codes(self._case(tmp_path, fpha=False)) == set()
+
+    def test_modif_nummaq_zero_excludes_and_reports(self, tmp_path: Path) -> None:
+        nummaq_rec = MagicMock()
+        type(nummaq_rec).__name__ = "NUMMAQ"
+        nummaq_rec.conjunto = 1
+        nummaq_rec.numero_maquinas = 0
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+        modif = MagicMock()
+        modif.usina.return_value = [usina_rec]
+        modif.modificacoes_usina.return_value = [nummaq_rec]
+
+        with dx.collect() as collected:
+            codes = fpha_eligible_codes(self._case(tmp_path, modif=modif))
+
+        assert codes == set()
+        [diagnostic] = [d for d in collected if d.code == "fpha-zero-capacity"]
+        assert diagnostic.severity is Severity.INFO
+        assert diagnostic.table is not None
+        assert [row[:2] for row in diagnostic.table.rows] == [["USINA_A", 1]]
 
     def test_hydros_reservoir_is_fpha_with_efficiency(self, tmp_path: Path) -> None:
         hydros = convert_hydros(self._case(tmp_path), self._id_map())["hydros"]
