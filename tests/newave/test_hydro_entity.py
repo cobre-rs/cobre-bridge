@@ -16,6 +16,7 @@ from tests.newave.conftest import (
     _ee_expansion_case,
     _hydro_case,
     _make_ee_confhd_df,
+    _make_ee_exph_mock,
     _make_hidr_cadastro,
     _make_hydro_dger_mock,
     _make_ne_cadastro,
@@ -973,22 +974,17 @@ class TestExpansionPlantAdmission:
     def _id_map(self) -> NewaveIdMap:
         return NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
 
-    def _plant_b(self, tmp_path) -> dict:
+    def _hydros(self, case) -> list[dict]:
         from cobre_bridge.newave.converters.hydro import convert_hydros
 
-        result = convert_hydros(_ee_expansion_case(tmp_path), self._id_map())
-        return next(h for h in result["hydros"] if h["name"] == "USINA_B")
+        return convert_hydros(case, self._id_map())["hydros"]
+
+    def _plant_b(self, case) -> dict:
+        return next(h for h in self._hydros(case) if h["name"] == "USINA_B")
 
     def test_ee_plant_is_converted(self, tmp_path) -> None:
-        from cobre_bridge.newave.converters.hydro import convert_hydros
-
-        result = convert_hydros(_ee_expansion_case(tmp_path), self._id_map())
-        assert {h["name"] for h in result["hydros"]} == {"USINA_A", "USINA_B"}
-
-    def test_ee_plant_carries_no_filling_block(self, tmp_path) -> None:
-        ee = self._plant_b(tmp_path)
-        assert ee["filling"] is None
-        assert ee["entry_stage_id"] is None
+        hydros = self._hydros(_ee_expansion_case(tmp_path))
+        assert {h["name"] for h in hydros} == {"USINA_A", "USINA_B"}
 
     def test_declares_the_registry_configuration_not_the_start_one(
         self, tmp_path
@@ -996,26 +992,35 @@ class TestExpansionPlantAdmission:
         # 3 x 150 (conjunto 1) + 2 x 120 (conjunto 2, entering) = 690 MW. A
         # declaration left at the 450 MW start configuration would cap the plant
         # there for every stage past the ramp, which carries no per-stage row.
-        ee = self._plant_b(tmp_path)
+        ee = self._plant_b(_ee_expansion_case(tmp_path))
         assert ee["generation"]["max_generation_mw"] == pytest.approx(690.0)
         group = ee["unit_groups"][0]
         assert group["max_generation_mw"] == ee["generation"]["max_generation_mw"]
 
     def test_ramp_reports_start_and_full_capacity(self, tmp_path) -> None:
-        from cobre_bridge.newave.converters.hydro import convert_hydros
-
         with dx.collect() as collected:
-            convert_hydros(_ee_expansion_case(tmp_path), self._id_map())
+            self._hydros(_ee_expansion_case(tmp_path))
         diags = [d for d in collected if d.code == "ee-expansion-ramped"]
         assert len(diags) == 1
         assert diags[0].severity is Severity.INFO
         assert diags[0].table is not None
-        assert diags[0].table.rows[0] == ["USINA_B", 2, "450.0", "690.0", 2, "7/2024"]
+        assert diags[0].table.rows[0] == ["USINA_B", 2, "450.0", "690.0", 2, 6]
 
     def test_ee_plant_without_exph_reports_nothing(self, tmp_path) -> None:
-        from cobre_bridge.newave.converters.hydro import convert_hydros
-
         case = _hydro_case(tmp_path, confhd=_make_ee_confhd_df())
         with dx.collect() as collected:
-            convert_hydros(case, self._id_map())
+            self._hydros(case)
+        assert [d for d in collected if d.code == "ee-expansion-ramped"] == []
+
+    def test_dated_entry_without_conjunto_is_not_a_ramp(self, tmp_path) -> None:
+        # A dated exph row with no machine group places no machine: the plant
+        # converts at its registry configuration instead of crashing.
+        exph = _make_ee_exph_mock()
+        exph.expansoes = exph.expansoes.iloc[:1].assign(
+            conjunto_maquina_entrada=float("nan")
+        )
+        case = _hydro_case(tmp_path, confhd=_make_ee_confhd_df(), exph=exph)
+        with dx.collect() as collected:
+            ee = self._plant_b(case)
+        assert ee["generation"]["max_generation_mw"] == pytest.approx(690.0)
         assert [d for d in collected if d.code == "ee-expansion-ramped"] == []

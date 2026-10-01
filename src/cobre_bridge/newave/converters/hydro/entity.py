@@ -18,25 +18,24 @@ from cobre_bridge.core.productivity import fpha_efficiency
 from cobre_bridge.newave.case import NewaveCase
 from cobre_bridge.newave.converters.hydro.bounds import (
     _compute_max_turbined_head_corrected,
-    _expansion_configs,
-    _hreg_with_machines,
     _per_stage_turbined_envelope,
 )
 from cobre_bridge.newave.converters.hydro.geometry import (
     _EVAP_MONTHS,
+    _expansion_configs,
     _read_volref_saz,
     fpha_eligible_codes,
 )
 from cobre_bridge.newave.converters.hydro.overrides import _apply_permanent_overrides
 from cobre_bridge.newave.filling import (
+    exph_unit_rows,
     filling_completion_date,
     filling_min_rate_m3s,
     filling_schedule,
 )
-from cobre_bridge.newave.filling import stage_id as filling_stage_id
 from cobre_bridge.newave.horizon import build_stage_dates, historical_start_date
 from cobre_bridge.newave.id_map import NewaveIdMap
-from cobre_bridge.newave.plants import expansion_hydro_codes, filling_hydro_codes
+from cobre_bridge.newave.plants import filling_hydro_codes
 from cobre_bridge.newave.switches import switch_off_diagnostic
 
 _LOG = logging.getLogger(__name__)
@@ -50,28 +49,15 @@ def _unit_ramp_summary(
 ) -> str:
     """One-line summary of the units coming online for a filling plant.
 
-    Reads the plant's exph unit rows — a unit row is defined by its
-    ``data_entrada_operacao`` (the online date), with
-    ``conjunto_maquina_entrada`` naming the machine group — maps each online
-    date to a stage via :func:`filling_stage_id`, groups by ``conjunto``,
-    counts the units, and renders ``"conj <c>: <n> unit(s) @ stage <s>"`` parts
-    (``<s>`` = the stage at which the conjunto is fully online) joined by
-    ``"; "``. Returns ``"—"`` when the plant has no parsable unit rows.
-
-    The field-independence guards (``data_entrada_operacao.notna()`` +
-    a ``pd.isna(conjunto)`` skip) keep a malformed exph row — a set conjunto
-    with a ``NaT`` date, or the inverse — from crashing the cast.
+    Renders ``"conj <c>: <n> unit(s) @ stage <s>"`` per conjunto (``<s>`` = the
+    stage at which the conjunto is fully online) joined by ``"; "``, or ``"—"``
+    when the plant has no parsable unit row.
     """
-    rows = exph_df.loc[exph_df["codigo_usina"] == newave_code]
-    unit_df = rows.loc[rows["data_entrada_operacao"].notna()]
     by_conjunto: dict[int, list[int]] = {}
-    for _, ur in unit_df.iterrows():
-        conjunto = ur["conjunto_maquina_entrada"]
-        if pd.isna(conjunto):
-            continue
-        ud = ur["data_entrada_operacao"]
-        usid = filling_stage_id(ud.year, ud.month, start_year, start_month)
-        by_conjunto.setdefault(int(conjunto), []).append(usid)
+    for conjunto, stage in exph_unit_rows(
+        exph_df, newave_code, start_year, start_month
+    ):
+        by_conjunto.setdefault(conjunto, []).append(stage)
     if not by_conjunto:
         return "—"
     parts = [
@@ -80,21 +66,6 @@ def _unit_ramp_summary(
         for c, stages in sorted(by_conjunto.items())
     ]
     return "; ".join(parts)
-
-
-def _pending_expansion(exph_df: pd.DataFrame, newave_code: int) -> tuple[int, str]:
-    """Machines still to enter for an ``EE`` plant and the earliest entry month.
-
-    Counts the plant's ``exph`` unit rows (those carrying a
-    ``data_entrada_operacao``) and renders the earliest of those dates as
-    ``"M/YYYY"``. Returns ``(0, "—")`` when the plant has no parsable unit row.
-    """
-    rows = exph_df.loc[exph_df["codigo_usina"] == newave_code]
-    unit_df = rows.loc[rows["data_entrada_operacao"].notna()]
-    if unit_df.empty:
-        return 0, "—"
-    first = min(unit_df["data_entrada_operacao"])
-    return len(unit_df), f"{first.month}/{first.year}"
 
 
 def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
@@ -148,12 +119,9 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # plants resolve to the filling plant; it also drives each filling plant's
     # FILLING contract below. Empty (byte-identical to the no-arg call) when the
     # case has no exph or no NE-with-filling plant.
-    exph_df_or_none = case.exph.expansoes if case.exph is not None else None
-    filling_codes = filling_hydro_codes(confhd_df, exph_df_or_none)
-    # ``EE`` plants operate from stage 0 at the capacity hidr.dat and modif.dat
-    # declare; their exph machine-entry ramp is not converted, so the set drives
-    # the divergence report below rather than any emitted value.
-    expansion_codes = expansion_hydro_codes(confhd_df, exph_df_or_none)
+    filling_codes = filling_hydro_codes(
+        confhd_df, case.exph.expansoes if case.exph is not None else None
+    )
 
     # Resolve the FICT-cascade for every real plant.  Provides the effective
     # next-real-plant downstream and the sum of any FICT-chain ρ_eq that must
@@ -172,17 +140,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # value unchanged.
     turbined_envelope = _per_stage_turbined_envelope(case, id_map)
 
-    # An expanding plant declares the configuration it reaches by the end of its
-    # ramp, not the one it starts with: cobre rule 43 forbids a per-stage row
-    # from exceeding the declaration, and the stages past the ramp carry no row
-    # at all, so a declaration left at the start configuration would cap the
-    # plant there for the rest of the horizon.
-    expansion_configs = _expansion_configs(
-        case,
-        cadastro,
-        start_year=case.horizon.start_year,
-        start_month=case.horizon.start_month,
-    )
+    expansion_configs = _expansion_configs(case, cadastro)
 
     existing = case.active_hydros
 
@@ -358,11 +316,7 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         # ``turbined_envelope`` and keeps its reference-head value unchanged.
         cobre_hydro_id = id_map.hydro_id(newave_code)
         config = expansion_configs.get(newave_code)
-        hreg_declared = (
-            hreg
-            if config is None
-            else _hreg_with_machines(hreg, config.counts_at(config.full_online_stage))
-        )
+        hreg_declared = hreg if config is None else config.declared_hreg(hreg)
         max_turbined_reference = _compute_max_turbined_head_corrected(
             hreg_declared, name
         )[0]
@@ -374,22 +328,16 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         )
         max_generation = rated_capacity(hreg_declared)[1]
 
-        if newave_code in expansion_codes:
-            # expansion_codes is non-empty here ⇒ case.exph is not None (the
-            # predicate required exph), so .expansoes is safe.
-            assert exph_df_or_none is not None
-            pending, first_entry = _pending_expansion(exph_df_or_none, newave_code)
-            start_generation = rated_capacity(
-                _hreg_with_machines(hreg, config.counts_at(0))
-            )[1]
+        if config is not None:
+            start_generation = rated_capacity(config.hreg_at(hreg, 0))[1]
             expansion_diag_rows.append(
                 [
                     name,
                     newave_code,
                     f"{start_generation:.1f}",
                     f"{max_generation:.1f}",
-                    pending,
-                    first_entry,
+                    len(config.unit_rows),
+                    min(stage for _conjunto, stage in config.unit_rows),
                 ]
             )
 
@@ -572,13 +520,10 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
 
     hydros.sort(key=lambda h: h["id"])
 
-    # Surface the admitted dead-volume filling plants as a single INFO
-    # Diagnostic with one table row per plant (the thermal-bounds diagnostic
-    # shape). Emitted only when at least one filling plant was seen, so a case
-    # with no filling plant
-    # cases add nothing. The de-dup in ``finalize_diagnostics`` keys on
-    # ``(code, summary)``, so the per-plant detail must ride on the table, not on
-    # N separate diagnostics.
+    # One INFO Diagnostic per plant kind (filling, expanding), each emitted only
+    # when such a plant was seen. The de-dup in ``finalize_diagnostics`` keys on
+    # ``(code, summary)``, so the per-plant detail rides on the table, not on N
+    # separate diagnostics.
     if filling_diag_rows:
         emit(
             Diagnostic(
@@ -634,10 +579,11 @@ def convert_hydros(case: NewaveCase, id_map: NewaveIdMap) -> dict:
                         "MW at start",
                         "MW when full",
                         "Machines entering",
-                        "First entry",
+                        "First entry stage",
                     ],
                     rows=expansion_diag_rows,
                     justify=["left", "right", "right", "right", "right", "right"],
+                    caption="Stage ids are 0-based.",
                 ),
             ),
             logger=_LOG,

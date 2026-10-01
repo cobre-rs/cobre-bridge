@@ -85,7 +85,7 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # separate ``filling_storage`` list, never ``storage`` — cobre's IC reader
     # rejects a hydro that appears in both arrays.  Computed once here from the same
     # admission predicate ``case.active_hydros`` uses; ``set()`` when there is no
-    # exph (no filling plant), so the in-loop guard below never fires.
+    # filling plant, so the in-loop guard below never fires.
     exph_df = case.exph.expansoes if case.exph is not None else None
     filling = filling_hydro_codes(case.confhd.usinas, exph_df)
 

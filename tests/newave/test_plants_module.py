@@ -12,7 +12,6 @@ from cobre_bridge.newave.plants import (
     active_hydro_codes,
     active_hydros,
     existing_hydros,
-    expansion_hydro_codes,
     fictitious_codes,
     filling_hydro_codes,
 )
@@ -277,16 +276,6 @@ _EE_CASE = _confhd(
 _EE_CAD = _cadastro({10: 0.01, 5: 0.01, 7: 0.01})
 
 
-def _exph_units(rows: list[dict]) -> pd.DataFrame:
-    """Build an exph-like frame carrying both schedule date columns."""
-    df = pd.DataFrame(rows)
-    for col in ("data_inicio_enchimento", "data_entrada_operacao"):
-        if col not in df.columns:
-            df[col] = pd.NaT
-        df[col] = pd.to_datetime(df[col])
-    return df
-
-
 def test_existing_hydros_includes_ee() -> None:
     assert sorted(existing_hydros(_EE_CASE)["codigo_usina"]) == [5, 7, 10]
 
@@ -298,38 +287,8 @@ def test_existing_hydros_tolerates_padded_status() -> None:
     assert list(existing_hydros(padded)["codigo_usina"]) == [1]
 
 
-def test_active_hydros_admits_ee_without_exph() -> None:
+def test_active_hydros_admits_ee_at_declaration_position_without_exph() -> None:
     # EE admission reads confhd alone, so a path-only caller (the comparators'
     # ``build_id_map``, which passes exph=None) enumerates the pipeline's set.
     assert active_hydro_codes(_EE_CASE, _EE_CAD) == [10, 5, 7]
-    assert active_hydro_codes(_EE_CASE, _EE_CAD, None) == [10, 5, 7]
-
-
-def test_active_hydros_keeps_ee_at_declaration_position() -> None:
-    assert list(active_hydros(_EE_CASE, _EE_CAD)["codigo_usina"]) == [10, 5, 7]
-
-
-def test_expansion_hydro_codes_needs_an_ee_machine_row() -> None:
-    confhd_df = _confhd(
-        [
-            {"codigo_usina": 1, "nome_usina": "EE_UNITS", "usina_existente": "EE"},
-            {"codigo_usina": 2, "nome_usina": "EE_BARE", "usina_existente": "EE"},
-            {"codigo_usina": 3, "nome_usina": "NE_FILL", "usina_existente": "NE"},
-        ]
-    )
-    exph_df = _exph_units(
-        [
-            {"codigo_usina": 1, "data_entrada_operacao": "2030-08-01"},
-            {"codigo_usina": 3, "data_inicio_enchimento": "2027-10-01"},
-        ]
-    )
-    # 2 carries no machine row; 3 is a NE filling plant, not an expansion.
-    assert expansion_hydro_codes(confhd_df, exph_df) == {1}
-
-
-def test_expansion_hydro_codes_none_exph() -> None:
-    confhd_df = _confhd(
-        [{"codigo_usina": 1, "nome_usina": "EE", "usina_existente": "EE"}]
-    )
-    assert expansion_hydro_codes(confhd_df, None) == set()
-    assert expansion_hydro_codes(confhd_df, pd.DataFrame()) == set()
+    assert list(active_hydros(_EE_CASE, _EE_CAD, None)["codigo_usina"]) == [10, 5, 7]

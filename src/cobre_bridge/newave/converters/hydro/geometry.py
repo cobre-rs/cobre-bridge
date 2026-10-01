@@ -1,6 +1,7 @@
 """Hydro geometry: the VHA volume->height->area table, seasonal reference-volume
-reads, and FPHA eligibility (the volume->cota polynomial, the specific
-productivity, and the rated capacity).
+reads, the machine configuration an expanding plant declares, and FPHA
+eligibility (the volume->cota polynomial, the specific productivity, and the
+rated capacity).
 
 Depends only on :mod:`.overrides` within the package.
 """
@@ -18,6 +19,7 @@ from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity,
 from cobre_bridge.core.hydro_units import fpha_zero_capacity_diagnostic, rated_capacity
 from cobre_bridge.newave.case import NewaveCase
 from cobre_bridge.newave.converters.hydro.overrides import _apply_permanent_overrides
+from cobre_bridge.newave.filling import ExpansionConfig, exph_unit_rows
 from cobre_bridge.newave.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
@@ -55,6 +57,46 @@ def _has_fpha_curve_inputs(hreg: pd.Series) -> bool:
 def _has_rated_capacity(hreg: pd.Series) -> bool:
     max_turbined, max_generation = rated_capacity(hreg)
     return max_turbined > 0.0 and max_generation > 0.0
+
+
+def _expansion_configs(
+    case: NewaveCase, cadastro: pd.DataFrame
+) -> dict[int, ExpansionConfig]:
+    """``{code: config}`` for every active ``EE`` plant with a machine still to enter.
+
+    *cadastro* is the permanent-override-corrected registry (the study-start
+    configuration); the uncorrected ``case.hidr.cadastro`` holds the final one.
+    """
+    exph_df = case.exph.expansoes if case.exph is not None else None
+    if exph_df is None or exph_df.empty:
+        return {}
+    registry = case.hidr.cadastro
+    horizon = case.horizon
+    configs: dict[int, ExpansionConfig] = {}
+    for _, row in case.active_hydros.iterrows():
+        code = int(row["codigo_usina"])
+        if str(row["usina_existente"]).strip() != "EE" or code not in cadastro.index:
+            continue
+        unit_rows = exph_unit_rows(
+            exph_df, code, horizon.start_year, horizon.start_month
+        )
+        if not unit_rows:
+            continue
+        final = registry.loc[code]
+        start = cadastro.loc[code]
+        n_final = int(final["numero_conjuntos_maquinas"])
+        n_start = int(start["numero_conjuntos_maquinas"])
+        configs[code] = ExpansionConfig(
+            registry_counts={
+                c: int(final[f"maquinas_conjunto_{c}"]) for c in range(1, n_final + 1)
+            },
+            start_counts={
+                c: int(start[f"maquinas_conjunto_{c}"]) if c <= n_start else 0
+                for c in range(1, n_final + 1)
+            },
+            unit_rows=unit_rows,
+        )
+    return configs
 
 
 def fpha_eligible_codes(case: NewaveCase) -> set[int]:

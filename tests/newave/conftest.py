@@ -244,8 +244,7 @@ def _make_intercambio_df() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# NE-with-filling fixtures: a JURUENA-shaped run-of-river ('S')
-# plant (code 309) admitted into the active set by its exph dead-volume row.
+# EE fixtures: plant 2 in service with machines still to enter (exph.dat).
 # ---------------------------------------------------------------------------
 
 
@@ -256,23 +255,25 @@ def _make_ee_confhd_df() -> pd.DataFrame:
     return df
 
 
-def _make_ee_exph_mock(*, entry: str = "2024-07-01") -> MagicMock:
-    """An ``exph`` reader whose ``expansoes`` carries plant 2's machine entries.
+def _make_ee_exph_mock(
+    *, entry: str = "2024-07-01", code: int = 2, conjunto: int = 2
+) -> MagicMock:
+    """An ``exph`` reader whose ``expansoes`` carries two machine entries of *code*.
 
     Mirrors the ``EE`` layout of a real ``exph.dat``: **no** filling row
     (``data_inicio_enchimento`` is ``NaT`` throughout, which is what keeps
     ``filling_hydro_codes`` from claiming the plant) and one row per entering
-    machine, all in the expansion's own machine group.
+    machine, both in *conjunto*.
     """
     expansoes = pd.DataFrame(
         {
-            "codigo_usina": [2, 2],
-            "nome_usina": ["USINA_B", "USINA_B"],
+            "codigo_usina": [code, code],
+            "nome_usina": ["", ""],
             "data_inicio_enchimento": [pd.NaT, pd.NaT],
             "duracao_enchimento": [0, 0],
             "volume_morto": [0.0, 0.0],
             "data_entrada_operacao": [pd.Timestamp(entry), pd.Timestamp(entry)],
-            "conjunto_maquina_entrada": [2, 2],
+            "conjunto_maquina_entrada": [conjunto, conjunto],
             "maquina_entrada": [1, 2],
         }
     )
@@ -281,7 +282,7 @@ def _make_ee_exph_mock(*, entry: str = "2024-07-01") -> MagicMock:
     return exph
 
 
-def _ee_expansion_case(tmp_path, *, entry: str = "2024-07-01"):
+def _ee_expansion_case(tmp_path, *, entry: str = "2024-07-01", **hydro_case_kwargs):
     """A ``NewaveCase`` whose plant 2 is ``EE`` with two machines still to enter.
 
     Under the default Jan-2024 one-year horizon (12 stages), the Jul-2024 entry
@@ -294,7 +295,14 @@ def _ee_expansion_case(tmp_path, *, entry: str = "2024-07-01"):
         tmp_path,
         confhd=_make_ee_confhd_df(),
         exph=_make_ee_exph_mock(entry=entry),
+        **hydro_case_kwargs,
     )
+
+
+# ---------------------------------------------------------------------------
+# NE-with-filling fixtures: a JURUENA-shaped run-of-river ('S')
+# plant (code 309) admitted into the active set by its exph dead-volume row.
+# ---------------------------------------------------------------------------
 
 
 def _make_ne_confhd_df() -> pd.DataFrame:

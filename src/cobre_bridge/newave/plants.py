@@ -119,40 +119,6 @@ def filling_hydro_codes(
     return ne_codes & filling
 
 
-def expansion_hydro_codes(
-    confhd_df: pd.DataFrame, exph_df: pd.DataFrame | None
-) -> set[int]:
-    """Return codes of ``EE`` plants that carry an ``exph`` machine-entry row.
-
-    An ``EE`` plant operates from stage 0 and gains machines during the horizon;
-    the entry schedule lives on the ``exph`` rows carrying a
-    ``data_entrada_operacao`` (the filling rows carry ``NaT`` there). These are
-    the plants whose capacity the converted case holds flat while the source
-    model grows it, so the caller reports them.
-
-    Returns an empty set when *exph_df* is ``None``/empty or when the columns
-    needed for the test are unavailable — never raises, mirroring
-    :func:`filling_hydro_codes`.
-    """
-    if (
-        exph_df is None
-        or exph_df.empty
-        or "usina_existente" not in confhd_df.columns
-        or "codigo_usina" not in exph_df.columns
-        or "data_entrada_operacao" not in exph_df.columns
-    ):
-        return set()
-    statuses = confhd_df["usina_existente"].astype(str).str.strip()
-    ee_codes = {int(code) for code in confhd_df.loc[statuses == "EE", "codigo_usina"]}
-    entering = {
-        int(code)
-        for code in exph_df.loc[
-            exph_df["data_entrada_operacao"].notna(), "codigo_usina"
-        ]
-    }
-    return ee_codes & entering
-
-
 def active_hydros(
     confhd_df: pd.DataFrame,
     cadastro: pd.DataFrame,

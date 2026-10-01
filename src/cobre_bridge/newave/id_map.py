@@ -123,9 +123,8 @@ def build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
     forwards ``exph=None`` to :func:`build_id_map_from_readers`: the comparators and
     any other caller that only holds paths keep the in-service-only enumeration
     (they run against cases whose plants are already in service). The conversion
-    pipeline admits
-    ``NE``-with-filling plants through :attr:`NewaveCase.id_map`, which passes the
-    case's ``exph`` reader.
+    pipeline admits ``NE``-with-filling plants through :attr:`NewaveCase.id_map`,
+    which passes the case's ``exph`` reader.
     """
     from inewave.newave import Confhd, Conft, Hidr, Ree, Sistema
 

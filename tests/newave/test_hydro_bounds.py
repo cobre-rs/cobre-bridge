@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1335,30 +1336,44 @@ class TestExpansionRampBounds:
     onto the same ``(hydro, stage)`` row as any MODIF/GHMIN bound — never as a
     competing row that the de-dup pass would have to choose against."""
 
+    # Both plants carry a VMINT from Mar-2024 (stage 2), inside plant 2's ramp.
+    _VMINT = [{"type": "VMINT", "year": 2024, "month": 3, "value": 60.0, "unit": "h"}]
+
     def _id_map(self) -> NewaveIdMap:
         return NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
 
-    def _run(self, tmp_path) -> pa.Table:
+    def _run(self, tmp_path) -> pd.DataFrame:
         from cobre_bridge.newave.converters.hydro import convert_storage_bounds
 
-        tbl = convert_storage_bounds(_ee_expansion_case(tmp_path), self._id_map())
+        modif = MagicMock()
+        modif.usina.return_value = []
+        case = _ee_expansion_case(tmp_path, modif=modif)
+        case.files = dataclasses.replace(case.files, modif=tmp_path / "modif.dat")
+        with patch(
+            "cobre_bridge.newave.converters.hydro.bounds._extract_temporal_overrides",
+            return_value={1: self._VMINT, 2: self._VMINT},
+        ):
+            tbl = convert_storage_bounds(case, self._id_map())
         assert tbl is not None
-        return tbl
+        return tbl.to_pandas()
 
     def test_reduced_capacity_covers_only_the_pre_entry_stages(self, tmp_path) -> None:
         # Jul-2024 entry under a Jan-2024 horizon is stage 6, so stages 0-5 carry
-        # conjunto 1 alone (3 x 150 = 450 MW) and stage 6 onward carries no row:
+        # conjunto 1 alone (3 x 150 = 450 MW) and stage 6 onward carries no cap:
         # the plant's declared 690 MW applies there.
-        df = self._run(tmp_path).to_pandas()
+        df = self._run(tmp_path)
         ramp = df[(df.hydro_id == 1) & df.max_generation_mw.notna()]
         assert sorted(ramp.stage_id) == [0, 1, 2, 3, 4, 5]
         assert list(ramp.max_generation_mw) == [pytest.approx(450.0)] * 6
 
     def test_non_expanding_plant_gets_no_generation_cap(self, tmp_path) -> None:
-        df = self._run(tmp_path).to_pandas()
-        other = df[df.hydro_id == 0]
+        other = self._run(tmp_path).query("hydro_id == 0")
+        assert not other.empty
         assert other.max_generation_mw.isna().all()
 
-    def test_ramp_emits_no_extra_rows_per_stage(self, tmp_path) -> None:
-        df = self._run(tmp_path).to_pandas()
+    def test_ramp_cap_and_modif_bound_share_one_row(self, tmp_path) -> None:
+        df = self._run(tmp_path)
         assert not df.duplicated(subset=["hydro_id", "stage_id"]).any()
+        row = df[(df.hydro_id == 1) & (df.stage_id == 2)].iloc[0]
+        assert row.min_storage_hm3 == pytest.approx(60.0)
+        assert row.max_generation_mw == pytest.approx(450.0)
