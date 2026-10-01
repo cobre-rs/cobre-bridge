@@ -30,6 +30,7 @@ from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 from tests.newave.conftest import (
     _make_confhd_df,
+    _make_ee_exph_mock,
     _make_hidr_cadastro,
     _make_prod_model_dger_mock,
     _make_ree_df,
@@ -205,6 +206,8 @@ class TestFphaConverters:
         tratamento: str | None = None,
         volref: dict[int, dict[int, float]] | None = None,
         modif: MagicMock | None = None,
+        confhd: pd.DataFrame | None = None,
+        exph: MagicMock | None = None,
     ):
         cadastro = _make_hidr_cadastro().copy()
         # Plant 1: realistic specific productivity -> FPHA.
@@ -217,7 +220,7 @@ class TestFphaConverters:
         mock_hidr = MagicMock()
         mock_hidr.cadastro = cadastro
         mock_confhd = MagicMock()
-        mock_confhd.usinas = _make_confhd_df()
+        mock_confhd.usinas = _make_confhd_df() if confhd is None else confhd
         mock_ree = MagicMock()
         mock_ree.rees = _make_ree_df()
         dger = _make_prod_model_dger_mock()
@@ -237,6 +240,7 @@ class TestFphaConverters:
             "confhd": mock_confhd,
             "ree": mock_ree,
             "dger": dger,
+            "exph": exph,
         }
         if modif is not None:
             parsed["modif"] = modif
@@ -277,6 +281,37 @@ class TestFphaConverters:
         assert diagnostic.severity is Severity.INFO
         assert diagnostic.table is not None
         assert [row[:2] for row in diagnostic.table.rows] == [["USINA_A", 1]]
+
+    def test_expanding_plant_is_eligible_on_its_declared_configuration(
+        self, tmp_path: Path
+    ) -> None:
+        # MODIF leaves plant 1 with no machine at the study start; the two exph
+        # entries give it the 400 MW hydros.json declares, so it stays FPHA.
+        nummaq_rec = MagicMock()
+        type(nummaq_rec).__name__ = "NUMMAQ"
+        nummaq_rec.conjunto = 1
+        nummaq_rec.numero_maquinas = 0
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+        modif = MagicMock()
+        modif.usina.return_value = [usina_rec]
+        modif.modificacoes_usina.return_value = [nummaq_rec]
+        confhd = _make_confhd_df()
+        confhd["usina_existente"] = ["EE", "EX"]
+        case = self._case(
+            tmp_path,
+            modif=modif,
+            confhd=confhd,
+            exph=_make_ee_exph_mock(entry="2025-07-01", code=1, conjunto=1),
+        )
+
+        with dx.collect() as collected:
+            codes = fpha_eligible_codes(case)
+
+        assert codes == {1}
+        assert [d for d in collected if d.code == "fpha-zero-capacity"] == []
+        hydros = convert_hydros(case, self._id_map())["hydros"]
+        assert hydros[0]["generation"]["max_generation_mw"] == pytest.approx(400.0)
 
     def test_hydros_reservoir_is_fpha_with_efficiency(self, tmp_path: Path) -> None:
         hydros = convert_hydros(self._case(tmp_path), self._id_map())["hydros"]
