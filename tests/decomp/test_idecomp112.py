@@ -217,15 +217,13 @@ class TestConvertHydroBounds:
             _ID_MAP,
             effective=self._effective(calendar),
         )
-        # The RQ percentages (100, 100, 0) are non-uniform on every stage, so
-        # plant 1 contributes per-block only (block_id = 0..2), no base
-        # contribution (covered in depth by tests/decomp/test_rq_bounds.py).
-        plant1_stage0 = {
-            c.block_id: c.lower
-            for c in contributions
-            if c.entity_id == 0 and c.stage_id == 0
-        }
-        assert plant1_stage0 == {0: 40.0, 1: 40.0, 2: 0.0}
+        # The RQ percentages (100, 100, 0) are per stage: with plant 1's
+        # vazao_minima_historica = 40, stage 0 -> 40, stage 1 -> 40, stage 2
+        # -> 0 (gated out). Each RQ floor is stage-level (block_id = None) —
+        # covered in depth by tests/decomp/test_rq_bounds.py.
+        plant1 = [c for c in contributions if c.entity_id == 0]
+        assert all(c.block_id is None and c.axis == "outflow" for c in plant1)
+        assert {c.stage_id: c.lower for c in plant1} == {0: 40.0, 1: 40.0}
         # UH-declared value has priority, fixed for all stages.
         plant2 = [c.lower for c in contributions if c.entity_id == 1]
         assert set(plant2) == {25.0}
