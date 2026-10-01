@@ -516,13 +516,19 @@ class _StageBoundsModel:
         }
 
         manutt_by_code: dict[int, pd.DataFrame] = {}
+        manutt_df: pd.DataFrame | None = None
         if case.files.manutt is not None:
             try:
                 manutt_df = case.manutt.manutencoes
-                for code, grp in manutt_df.groupby("codigo_usina"):
-                    manutt_by_code[int(code)] = grp.reset_index(drop=True)
             except Exception:  # noqa: BLE001
-                _LOG.warning("manutt.dat could not be parsed; maintenance skipped.")
+                _LOG.warning(
+                    "%s could not be parsed; maintenance skipped.",
+                    case.files.manutt.name,
+                )
+        # A file with no maintenance record reads as None: no maintenance.
+        if manutt_df is not None:
+            for code, grp in manutt_df.groupby("codigo_usina"):
+                manutt_by_code[int(code)] = grp.reset_index(drop=True)
 
         return cls(
             stage_dates=stage_dates,

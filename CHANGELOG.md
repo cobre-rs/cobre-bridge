@@ -63,6 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Failure and diagnostics output names the command that ran.** `dashboard`
   and `compare` failures were headed "Conversion notes" and "Comparison
   failure" whatever the command, and several hints printed a doubled `→`.
+- **NEWAVE decks with empty or single-block files convert without false
+  warnings.** A maintenance file with no record means no maintenance, and a
+  single-block `patamar` file needs no load factors; both were reported as
+  unreadable or missing. Warnings name the file the deck's `arquivos` lists,
+  and `compare newave` reads `sistema` and `c_adic` through it too, so decks
+  that use another extension (such as `.eas`) are read in full.
 - **A plant with zero rated turbined flow or rated power stays on constant
   productivity** on both tracks, instead of being emitted as FPHA and making
   cobre's fit abort the run; such plants are listed in an informational

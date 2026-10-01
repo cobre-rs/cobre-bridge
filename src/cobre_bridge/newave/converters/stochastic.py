@@ -580,9 +580,16 @@ def convert_load_factors(
     study_end_month = ((start_month - 1 + study_months) % 12) + 1
 
     if df_carga is None or df_carga.empty:
-        logger.warning(
-            "patamar.dat has no carga_patamares data; load_factors.json will be empty."
-        )
+        # A single block's load factor is 1 by definition, which an empty list
+        # already gives; only a multi-block deck is missing data.
+        num_blocks = patamar.numero_patamares or 1
+        if num_blocks > 1:
+            logger.warning(
+                "%s declares %d load blocks but no block load factors; "
+                "load_factors.json will be empty.",
+                case.files.patamar.name,
+                num_blocks,
+            )
         return {
             "$schema": cobre_schemas.schema_url_for("scenarios/load_factors.json"),
             "load_factors": [],

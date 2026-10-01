@@ -1997,3 +1997,42 @@ def test_six_hundred_posto_matrix_is_laid_out_at_full_width(tmp_path) -> None:
     assert df.iloc[0, 0] == 0
     assert df.iloc[0, -1] == 599
     assert df.iloc[1, 0] == 600
+
+
+class TestLoadFactorsWithoutBlockFactors:
+    """A deck whose patamar file carries no block load factors."""
+
+    _ID_MAP = NewaveIdMap(subsystem_ids=[1], hydro_codes=[], thermal_codes=[])
+
+    def _convert(self, tmp_path, num_blocks: int) -> dict:
+        from cobre_bridge.newave.converters.stochastic import convert_load_factors
+
+        patamar = MagicMock(numero_patamares=num_blocks, carga_patamares=None)
+        case = make_case(
+            make_nw_files(tmp_path, patamar=tmp_path / "patamar.eas"),
+            patamar=patamar,
+            dger=_make_dger_mock(),
+        )
+        return convert_load_factors(case, self._ID_MAP)
+
+    def test_single_block_needs_no_factors_and_is_not_reported(
+        self, tmp_path, caplog
+    ) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge"):
+            result = self._convert(tmp_path, 1)
+
+        assert result["load_factors"] == []
+        assert caplog.text == ""
+
+    def test_multi_block_without_factors_names_the_deck_file(
+        self, tmp_path, caplog
+    ) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge"):
+            result = self._convert(tmp_path, 3)
+
+        assert result["load_factors"] == []
+        assert "patamar.eas declares 3 load blocks" in caplog.text

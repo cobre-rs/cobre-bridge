@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import logging
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -651,6 +652,53 @@ class TestThermalBoundsRemainingYearsMinimum:
         )
 
         assert convert_thermal_bounds(case, id_map) is None
+
+
+class TestMaintenanceFileReading:
+    """The maintenance file is reached through ``arquivos`` under whatever name
+    the deck gives it; a file with no record means no maintenance."""
+
+    _ID_MAP = NewaveIdMap(subsystem_ids=[1, 2], hydro_codes=[], thermal_codes=[10, 20])
+
+    def _case(self, files, **parsed):
+        conft, clast, term = _thermal_readers()
+        term.usinas = _remaining_years_term(44.0)
+        return make_case(
+            files,
+            conft=conft,
+            clast=clast,
+            term=term,
+            dger=_make_thermal_dger(),
+            **parsed,
+        )
+
+    def test_file_without_records_is_no_maintenance(self, tmp_path, caplog) -> None:
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
+
+        files = make_nw_files(tmp_path, manutt=tmp_path / "manutt.eas")
+        empty = self._case(files, manutt=MagicMock(manutencoes=None))
+        absent = self._case(tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge"):
+            got = convert_thermal_bounds(empty, self._ID_MAP)
+
+        assert got.equals(convert_thermal_bounds(absent, self._ID_MAP))
+        assert "could not be parsed" not in caplog.text
+
+    def test_unreadable_file_is_reported_by_its_deck_name(
+        self, tmp_path, caplog
+    ) -> None:
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
+
+        case = self._case(make_nw_files(tmp_path, manutt=tmp_path / "manutt.eas"))
+
+        with (
+            patch("cobre_bridge.newave.case.Manutt.read", side_effect=ValueError),
+            caplog.at_level(logging.WARNING, logger="cobre_bridge"),
+        ):
+            convert_thermal_bounds(case, self._ID_MAP)
+
+        assert "manutt.eas could not be parsed" in caplog.text
 
 
 class TestThermalBoundStageSteps:
