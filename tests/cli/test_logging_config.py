@@ -136,7 +136,7 @@ class TestVerbosityAndLogFile:
         assert self._file_handlers() == []
 
     def test_unwritable_log_file_is_an_option_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dumb_terminal: None
     ) -> None:
         """A path that cannot be opened (here, an existing directory) fails as a
         ``--log-file`` usage error, not a traceback."""
