@@ -267,3 +267,26 @@ class TestMixedFictAndAbsent:
         res = resolve_cascade(confhd, empty_cadastro, fictitious={99})
         assert res[1].downstream_code == 3
         assert res[1].fict_chain == (99,)
+
+
+class TestExpansionPlantIsRealNode:
+    """An ``EE`` plant is in service, so the cascade stops at it instead of
+    rewiring its upstream to the plant below — which would drop it from the
+    water balance while the source model still routes through it."""
+
+    def test_ee_plant_between_two_real_is_not_bypassed(
+        self,
+        empty_cadastro: pd.DataFrame,
+    ) -> None:
+        # A (EX) -> B (EE) -> C (EX); A keeps B, B keeps C.
+        confhd = _make_confhd(
+            [
+                _confhd_row(1, "A", 2, "EX"),
+                _confhd_row(2, "B", 3, "EE"),
+                _confhd_row(3, "C", 0, "EX"),
+            ]
+        )
+        res = resolve_cascade(confhd, empty_cadastro)
+        assert res[1].downstream_code == 2
+        assert res[2].downstream_code == 3
+        assert res[3].downstream_code is None

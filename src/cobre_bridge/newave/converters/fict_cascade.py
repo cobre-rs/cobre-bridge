@@ -31,6 +31,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from cobre_bridge.core.productivity import compute_productivity
+from cobre_bridge.newave.plants import IN_SERVICE_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,7 @@ def resolve_cascade(
         admitted as real cobre nodes: the walker stops at them and upstream
         plants resolve their ``downstream_code`` to them.  Defaults to ``None``
         (treated as the empty set), which preserves byte-identical output for
-        ``EX``-only cases.
+        cases with no filling plant.
 
     Returns
     -------
@@ -141,7 +142,7 @@ def resolve_cascade(
             # They are neither absent (topological pass-through) nor fictitious.
             real_codes.add(code)
             continue
-        if status != "EX":
+        if status not in IN_SERVICE_STATUSES:
             absent_codes.add(code)
             continue
         if code in fictitious:
@@ -211,7 +212,7 @@ def resolve_cascade(
                 )
                 continue
             # Rule 2 — confhd points to a fictitious or NE/NC plant.  Walk the
-            # chain to find the next real (EX) plant downstream.
+            # chain to find the next real plant downstream.
             real_ds, fict_codes, rho_sum = _walk_chain(ds_code)
             result[code] = FictCascadeResolution(
                 downstream_code=real_ds,
@@ -253,7 +254,7 @@ def resolve_cascade(
         if ds_seed == 0 or ds_seed not in absent_codes:
             continue
         # The original confhd link landed on an NE/NC plant; the walker
-        # found the next EX downstream (possibly through more NE/NC or
+        # found the next in-service downstream (possibly through more NE/NC or
         # fictitious hops).  Attribute every NE/NC along that path to this
         # upstream so a single log entry summarizes who got rewired.
         cur: int = ds_seed

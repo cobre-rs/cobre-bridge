@@ -46,6 +46,20 @@ def _volume_unit(rec: object) -> str | None:
     return None
 
 
+def _polynomial_coefficients(raw: list[float | None]) -> list[float]:
+    """The five coefficients of a MODIF.DAT polynomial record, a0 first.
+
+    A field the record leaves blank is a zero coefficient, not a missing one --
+    a low-order polynomial truncates its tail instead of spelling out ``0.``
+    five times, and ``float(None)`` would abort the whole conversion.
+    """
+    coefficients = [0.0] * 5
+    for index, value in enumerate(raw[:5]):
+        if value is not None and not pd.isna(value):
+            coefficients[index] = float(value)
+    return coefficients
+
+
 def percent_of_useful_volume(percent: float, vol_min: float, vol_max: float) -> float:
     """hm³ for a MODIF.DAT volume given as a percentage of the useful volume."""
     return vol_min + (percent / 100.0) * (vol_max - vol_min)
@@ -170,11 +184,24 @@ def _apply_permanent_overrides(
                 n_maq = int(rec.numero_maquinas)
                 result.loc[code, f"maquinas_conjunto_{set_num}"] = n_maq
 
-            elif type_name in ("VOLCOTA", "COTARE"):
-                # VOLCOTA/COTARE are not present in the example case; the spec
-                # mentions them but the inewave API does not expose them as
-                # separate methods in the tested version.
-                unsupported_perm.append((code, type_name))
+            elif type_name == "POTEFE":
+                # The registry's ``potencia_nominal_conjunto_*`` IS the conjunto's
+                # POTEF (the reader names the hidr.dat field ``potef_conjunto``), so
+                # this override replaces it — there is no second power column.
+                set_num = int(rec.conjunto)
+                result.loc[code, f"potencia_nominal_conjunto_{set_num}"] = float(
+                    rec.potencia
+                )
+
+            elif type_name == "VOLCOTA":
+                result.loc[code, [f"a{i}_volume_cota" for i in range(5)]] = (
+                    _polynomial_coefficients(rec.polinomio_volume_cota)
+                )
+
+            elif type_name == "COTAREA":
+                result.loc[code, [f"a{i}_cota_area" for i in range(5)]] = (
+                    _polynomial_coefficients(rec.polinomio_cota_area)
+                )
 
             elif type_name == "DefaultRegister":
                 # inewave emits DefaultRegister for records it does not model

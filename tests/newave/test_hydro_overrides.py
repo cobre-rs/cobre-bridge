@@ -190,12 +190,38 @@ class TestApplyPermanentOverrides:
         assert int(result.loc[1, "numero_conjuntos_maquinas"]) == 2
         assert int(result.loc[1, "maquinas_conjunto_2"]) == 3
 
-    def test_volcota_override_warns_and_skips(self, tmp_path) -> None:
-        """VOLCOTA records produce a diagnostic and are skipped gracefully."""
+    def test_potefe_override(self, tmp_path) -> None:
+        """POTEFE replaces the conjunto's nominal power, leaving the others."""
+        from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
+
+        potefe_rec = MagicMock()
+        type(potefe_rec).__name__ = "POTEFE"
+        potefe_rec.potencia = 500.0
+        potefe_rec.conjunto = 2
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 2
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [potefe_rec]
+
+        with dx.collect() as collected:
+            result = _apply_permanent_overrides(
+                self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+            )
+
+        assert result.loc[2, "potencia_nominal_conjunto_2"] == 500.0
+        assert result.loc[2, "potencia_nominal_conjunto_1"] == 150.0
+        assert collected == []
+
+    def test_volcota_override_replaces_the_whole_polynomial(self, tmp_path) -> None:
+        """VOLCOTA replaces all five volume-to-height coefficients."""
         from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
 
         volcota_rec = MagicMock()
         type(volcota_rec).__name__ = "VOLCOTA"
+        volcota_rec.polinomio_volume_cota = [400.0, 0.2, 0.0, 0.0, 0.0]
 
         usina_rec = MagicMock()
         usina_rec.codigo = 1
@@ -209,13 +235,84 @@ class TestApplyPermanentOverrides:
                 self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
             )
 
-        # Values must be unchanged (dtype may differ due to float cast for safety).
-        pd.testing.assert_frame_equal(result, self._base_cadastro(), check_dtype=False)
-        assert len(collected) == 1
-        diag = collected[0]
-        assert diag.code == "modif-permanent-override-unsupported"
-        assert diag.table is not None
-        assert diag.table.rows == [[1, "VOLCOTA"]]
+        assert [result.loc[1, f"a{i}_volume_cota"] for i in range(5)] == [
+            400.0,
+            0.2,
+            0.0,
+            0.0,
+            0.0,
+        ]
+        # The untouched plant keeps the registry polynomial.
+        assert result.loc[2, "a0_volume_cota"] == 300.0
+        assert collected == []
+
+    def test_cotarea_override_replaces_the_whole_polynomial(self, tmp_path) -> None:
+        """COTAREA replaces all five height-to-area coefficients.
+
+        The deck writes these with a Fortran exponent (``-1.0D7``); the
+        reader hands over plain floats.
+        """
+        from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
+
+        cotarea_rec = MagicMock()
+        type(cotarea_rec).__name__ = "COTAREA"
+        cotarea_rec.polinomio_cota_area = [
+            -1.0e7,
+            9.0e4,
+            -2.5e2,
+            3.0e-1,
+            0.0,
+        ]
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [cotarea_rec]
+
+        with dx.collect() as collected:
+            result = _apply_permanent_overrides(
+                self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+            )
+
+        assert [result.loc[1, f"a{i}_cota_area"] for i in range(5)] == [
+            -1.0e7,
+            9.0e4,
+            -2.5e2,
+            3.0e-1,
+            0.0,
+        ]
+        assert collected == []
+
+    def test_polynomial_with_blank_coefficients_reads_them_as_zero(
+        self, tmp_path
+    ) -> None:
+        """A record that truncates its tail leaves the high-order terms at zero."""
+        from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
+
+        volcota_rec = MagicMock()
+        type(volcota_rec).__name__ = "VOLCOTA"
+        volcota_rec.polinomio_volume_cota = [400.0, None, None, None, None]
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [volcota_rec]
+
+        result = _apply_permanent_overrides(
+            self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
+        )
+
+        assert [result.loc[1, f"a{i}_volume_cota"] for i in range(5)] == [
+            400.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
 
     def test_unknown_plant_code_skipped(self, tmp_path) -> None:
         """Plant code not in cadastro: diagnostic emitted, no crash."""
@@ -664,16 +761,14 @@ class TestApplyPermanentOverridesDiagnostics:
             modif=mock_modif,
         )
 
-    def test_unknown_permanent_type_folds_into_same_code_as_volcota(
-        self, tmp_path
-    ) -> None:
-        """VOLCOTA and a genuinely unknown type both land in
-        ``modif-permanent-override-unsupported`` — the Type column is what
+    def test_unsupported_types_fold_into_the_same_code(self, tmp_path) -> None:
+        """A modelled-but-unconsumed type and a genuinely unknown one both land
+        in ``modif-permanent-override-unsupported`` — the Type column is what
         distinguishes them, not the code."""
         from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
 
         volcota_rec = MagicMock()
-        type(volcota_rec).__name__ = "VOLCOTA"
+        type(volcota_rec).__name__ = "VMINP"
         unknown_rec = MagicMock()
         type(unknown_rec).__name__ = "SOME_FUTURE_TYPE"
 
@@ -700,7 +795,7 @@ class TestApplyPermanentOverridesDiagnostics:
         assert diag.category == "Cadastro overrides"
         assert diag.table is not None
         assert diag.table.columns == ["Code", "Type"]
-        assert diag.table.rows == [[1, "VOLCOTA"], [2, "SOME_FUTURE_TYPE"]]
+        assert diag.table.rows == [[1, "VMINP"], [2, "SOME_FUTURE_TYPE"]]
 
         _assert_no_repo_internal_leaks(collected)
 

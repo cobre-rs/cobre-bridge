@@ -44,13 +44,23 @@ the same output.
   the source codes and assigns 0-based ids in that order, consistently across
   every output file. `compare newave` rebuilds the same mapping from the
   source case, so results trace back to the source codes.
-- **Which plants exist.** Only hydros marked as existing in `confhd.dat`
-  become Cobre entities. NEWAVE's fictitious accounting plants are removed.
-  They are identified structurally, as a zero-productivity plant sharing its
-  inflow gauge with a generating plant, rather than by the `FICT.` name
-  prefix, so a cascade reduced to a subset of plants still classifies
+- **Which plants exist.** A hydro becomes a Cobre entity when `confhd.dat`
+  marks it in service — either already operating (`EX`) or operating with an
+  expansion still to come (`EE`). Plants that do not yet exist are left out,
+  except a future plant whose `exph.dat` schedule has it filling its dead
+  volume during the horizon. NEWAVE's fictitious accounting plants are also
+  removed. They are identified structurally, as a zero-productivity plant
+  sharing its inflow gauge with a generating plant, rather than by the `FICT.`
+  name prefix, so a cascade reduced to a subset of plants still classifies
   correctly. Cascade links that ran through a removed plant are rewired to the
   next real plant downstream, preserving the water-balance topology.
+- **Plants under expansion.** An `EE` plant operates from the first stage at
+  the machine configuration `modif.dat` declares for the study start, and
+  reaches the `hidr.dat` configuration as the machines listed in `exph.dat`
+  enter service. The capacity before each entry is written as a per-stage
+  bound, and the plant declares the configuration it ends with. When the deck
+  declares no study-start configuration, the converter takes the registry minus
+  the machines still to enter rather than crediting them twice.
 - **Horizon.** The study horizon comes from `dger.dat`: start month and year,
   study years, post-study years. Every per-stage table is sized to it. Data
   NEWAVE provides only for the study years (loads, block factors, some bounds)

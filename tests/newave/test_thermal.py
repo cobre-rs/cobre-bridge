@@ -9,7 +9,10 @@ import pytest
 
 from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
-from tests.newave.conftest import _make_term_df, _thermal_readers
+from tests.newave.conftest import (
+    _make_thermal_dger,
+    _thermal_readers,
+)
 
 # ---------------------------------------------------------------------------
 # Thermal conversion
@@ -26,9 +29,9 @@ class TestConvertThermals:
 
     def test_returns_thermals_key(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
@@ -36,9 +39,9 @@ class TestConvertThermals:
 
     def test_thermal_count(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
@@ -46,9 +49,9 @@ class TestConvertThermals:
 
     def test_thermal_ids_are_zero_based_sorted(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
@@ -58,9 +61,9 @@ class TestConvertThermals:
 
     def test_cost_per_mwh_scalar(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
@@ -74,9 +77,9 @@ class TestConvertThermals:
 
     def test_bus_id_assignment(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
@@ -89,15 +92,15 @@ class TestConvertThermals:
 
     def test_capacity_uses_factor(self, tmp_path) -> None:
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
-        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
         from cobre_bridge.newave.converters.thermal import convert_thermals
 
         result = convert_thermals(case, self._make_id_map())
-        # TERMO_A: potencia=100, factor=0.9 -> max_mw=90.
+        # TERMO_A: potencia=100, factor=0.9, teif=0.05% -> max_mw=89.955.
         termo_a = next(t for t in result["thermals"] if t["name"] == "TERMO_A")
-        assert termo_a["generation"]["max_mw"] == pytest.approx(90.0)
+        assert termo_a["generation"]["max_mw"] == pytest.approx(89.955)
 
 
 class TestConvertThermalBoundsClastModificacoes:
@@ -233,6 +236,10 @@ class TestConvertThermalBoundsClastModificacoes:
         import datetime
 
         conft, clast, term = _thermal_readers()
+        # Only a plant CONFT marks EE/NE has its registry capacity and
+        # minimum discarded, which is what makes the EXPT schedule the
+        # whole timeline.
+        conft.usinas.loc[conft.usinas["codigo_usina"] == 10, "usina_existente"] = "EE"
 
         expt_df = pd.DataFrame(
             {
@@ -278,6 +285,56 @@ class TestConvertThermalBoundsClastModificacoes:
         # Stage 11 (Dec) past window 2 → zeroed.
         assert a_rows.iloc[11]["max_generation_mw"] == pytest.approx(0.0)
 
+    def test_ex_plant_keeps_its_registry_capacity_outside_the_windows(
+        self, tmp_path
+    ) -> None:
+        """An ``EX`` plant's TERM.DAT capacity survives where EXPT declares none.
+
+        The manual discards the registry capacity only for ``EE``/``NE`` (FAQ
+        33), so a POTEF schedule on an ``EX`` plant modifies it inside the
+        window instead of defining the only period it exists.
+        """
+        import datetime
+
+        conft, clast, term = _thermal_readers()
+        # The fixture's plants are EX; left as is on purpose.
+        expt_df = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "tipo": ["POTEF"],
+                "modificacao": [200.0],
+                "data_inicio": [datetime.datetime(2023, 1, 1)],
+                "data_fim": [datetime.datetime(2023, 3, 1)],
+            }
+        )
+        expt_obj = MagicMock()
+        expt_obj.expansoes = expt_df
+
+        nw = make_nw_files(tmp_path, expt=tmp_path / "expt.dat")
+        case = make_case(
+            nw,
+            conft=conft,
+            clast=clast,
+            term=term,
+            dger=self._make_dger(),
+            expt=expt_obj,
+        )
+
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
+
+        table = convert_thermal_bounds(case, self._make_id_map())
+        assert table is not None
+        a_rows = (
+            table.to_pandas()
+            .query("thermal_id == @self._make_id_map().thermal_id(10)")
+            .sort_values("stage_id")
+        )
+        # Inside the window the POTEF value applies: 200 * 90% * (100 - 0.05)%.
+        assert a_rows.iloc[0]["max_generation_mw"] == pytest.approx(179.910)
+        # Outside it the registry capacity stands, instead of being zeroed.
+        assert a_rows.iloc[6]["max_generation_mw"] == pytest.approx(89.955)
+        assert a_rows.iloc[11]["max_generation_mw"] == pytest.approx(89.955)
+
     def test_modificacao_with_open_end_extends_to_horizon(self, tmp_path) -> None:
         import datetime
 
@@ -322,6 +379,7 @@ class TestConvertThermalBoundsClastModificacoes:
         import datetime
 
         conft, clast, term = _thermal_readers()
+        conft.usinas.loc[conft.usinas["codigo_usina"] == 10, "usina_existente"] = "EE"
 
         # POTEF gives capacity across the whole horizon. GTMIN is active only
         # Jan-Apr and Sep-Dec 2023 (zero May-Aug). December — the freeze point —
@@ -426,6 +484,7 @@ class TestConvertThermalBoundsClastModificacoes:
         import datetime
 
         conft, clast, term = _thermal_readers()
+        conft.usinas.loc[conft.usinas["codigo_usina"] == 10, "usina_existente"] = "EE"
 
         # Plant exists only from 2024 (the post-study). GTMIN: a closed seasonal window
         # Jan-May (30) plus an open-ended tail from Jun (80). The source model freezes
@@ -481,6 +540,67 @@ class TestConvertThermalBoundsClastModificacoes:
 # ---------------------------------------------------------------------------
 
 
+class TestThermalBoundsMaintenanceYearMinimum:
+    def test_minimum_switches_to_the_remaining_years_value(self, tmp_path) -> None:
+        """TERM.DAT's monthly minima end with the maintenance years."""
+        import datetime
+
+        from cobre_bridge.newave.converters.thermal import convert_thermal_bounds
+
+        conft, clast, term = _thermal_readers()
+        # Plant 10 carries the "remaining years" column (mes 13); plant 20 does
+        # not, so its monthly profile keeps applying throughout.
+        term.usinas = pd.DataFrame(
+            {
+                "codigo_usina": [10] * 13 + [20] * 12,
+                "nome_usina": ["TERMO_A"] * 13 + ["TERMO_B"] * 12,
+                "potencia_instalada": [100.0] * 13 + [200.0] * 12,
+                "fator_capacidade_maximo": [100.0] * 25,
+                "teif": [0.0] * 25,
+                "indisponibilidade_programada": [0.0] * 25,
+                "mes": list(range(1, 14)) + list(range(1, 13)),
+                "geracao_minima": [11.0, 22.0] + [0.0] * 10 + [77.0] + [33.0] * 12,
+            }
+        )
+        # No EXPT/MANUTT here, so a cost modification is what makes the table be
+        # emitted at all (see convert_thermal_bounds' early return).
+        clast.modificacoes = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "nome_usina": ["TERMO_A"],
+                "data_inicio": [datetime.datetime(2023, 3, 1)],
+                "data_fim": [datetime.datetime(2023, 3, 1)],
+                "custo": [99.0],
+            }
+        )
+        dger = MagicMock()
+        dger.mes_inicio_estudo = 1
+        dger.ano_inicio_estudo = 2023
+        dger.num_anos_estudo = 2
+        dger.num_anos_pos_estudo = 0
+        dger.num_anos_manutencao_utes = 1
+        case = make_case(tmp_path, conft=conft, clast=clast, term=term, dger=dger)
+
+        id_map = NewaveIdMap(
+            subsystem_ids=[1, 2], hydro_codes=[], thermal_codes=[10, 20]
+        )
+        table = convert_thermal_bounds(case, id_map)
+        assert table is not None
+        df = table.to_pandas()
+
+        a = df[df["thermal_id"] == id_map.thermal_id(10)].set_index("stage_id")
+        # 2023 is the single maintenance year: the monthly columns apply.
+        assert a.loc[0, "min_generation_mw"] == pytest.approx(11.0)
+        assert a.loc[1, "min_generation_mw"] == pytest.approx(22.0)
+        # 2024 onwards takes the mes-13 value instead of repeating January.
+        assert a.loc[12, "min_generation_mw"] == pytest.approx(77.0)
+        assert a.loc[13, "min_generation_mw"] == pytest.approx(77.0)
+
+        b = df[df["thermal_id"] == id_map.thermal_id(20)].set_index("stage_id")
+        # No mes-13 column: the monthly profile is all the deck declares.
+        assert b.loc[12, "min_generation_mw"] == pytest.approx(33.0)
+
+
 class TestThermalBoundStageSteps:
     """Each of the 6 per-stage steps is now an isolated, testable helper."""
 
@@ -517,24 +637,24 @@ class TestThermalBoundStageSteps:
         )
 
         state = self._state(potencia=100.0)
-        _step2_null_potencia_for_potef(state, 5, 5, has_potef=True)
+        _step2_null_potencia_for_potef(state, 5, 5, nullified=True)
         assert state.potencia == 0.0
-        # No POTEF → untouched; before maint end → untouched.
+        # Registry not nulled → untouched; before maint end → untouched.
         s_no_potef = self._state(potencia=100.0)
-        _step2_null_potencia_for_potef(s_no_potef, 5, 5, has_potef=False)
+        _step2_null_potencia_for_potef(s_no_potef, 5, 5, nullified=False)
         assert s_no_potef.potencia == 100.0
         s_before = self._state(potencia=100.0)
-        _step2_null_potencia_for_potef(s_before, 4, 5, has_potef=True)
+        _step2_null_potencia_for_potef(s_before, 4, 5, nullified=True)
         assert s_before.potencia == 100.0
 
     def test_step3_nulls_gen_min_only_for_gtmin_after_maint_end(self) -> None:
         from cobre_bridge.newave.converters.thermal import _step3_null_gen_min_for_gtmin
 
         state = self._state(gen_min=50.0)
-        _step3_null_gen_min_for_gtmin(state, 5, 5, has_gtmin=True)
+        _step3_null_gen_min_for_gtmin(state, 5, 5, nullified=True)
         assert state.gen_min == 0.0
         s_no = self._state(gen_min=50.0)
-        _step3_null_gen_min_for_gtmin(s_no, 5, 5, has_gtmin=False)
+        _step3_null_gen_min_for_gtmin(s_no, 5, 5, nullified=False)
         assert s_no.gen_min == 50.0
 
     def test_step4_applies_in_file_order_for_closed_window(self) -> None:
@@ -622,13 +742,24 @@ class TestThermalBoundStageSteps:
 
         state = self._state(potencia=100.0, gen_min=30.0)
         windows = [(date(2024, 1, 1), date(2024, 6, 1))]
-        _step4b_apply_potef_availability(state, windows, stage_date=date(2024, 9, 1))
+        _step4b_apply_potef_availability(
+            state, windows, stage_date=date(2024, 9, 1), nullified=True
+        )
         assert state.potencia == 0.0
         assert state.gen_min == 0.0
         # Inside a window → untouched.
         s_in = self._state(potencia=100.0, gen_min=30.0)
-        _step4b_apply_potef_availability(s_in, windows, stage_date=date(2024, 3, 1))
+        _step4b_apply_potef_availability(
+            s_in, windows, stage_date=date(2024, 3, 1), nullified=True
+        )
         assert s_in.potencia == 100.0
+        # Registry not nulled (an EX plant) → the schedule does not gate it.
+        s_ex = self._state(potencia=100.0, gen_min=30.0)
+        _step4b_apply_potef_availability(
+            s_ex, windows, stage_date=date(2024, 9, 1), nullified=False
+        )
+        assert s_ex.potencia == 100.0
+        assert s_ex.gen_min == 30.0
 
     def test_step4b_zeroes_expt_plant_without_potef(self) -> None:
         """EXPT plant with modifier-only entries (no POTEF) is not installed.
@@ -646,7 +777,7 @@ class TestThermalBoundStageSteps:
         # No POTEF window + flagged as EXPT-without-POTEF → held out of service.
         state = self._state(potencia=204.0, gen_min=0.0)
         _step4b_apply_potef_availability(
-            state, None, stage_date=date(2024, 9, 1), expt_without_potef=True
+            state, None, stage_date=date(2024, 9, 1), nullified=True
         )
         assert state.potencia == 0.0
         assert state.gen_min == 0.0
@@ -654,7 +785,7 @@ class TestThermalBoundStageSteps:
         # No POTEF window + NOT flagged (purely TERM.DAT plant) → untouched.
         s_keep = self._state(potencia=204.0, gen_min=0.0)
         _step4b_apply_potef_availability(
-            s_keep, None, stage_date=date(2024, 9, 1), expt_without_potef=False
+            s_keep, None, stage_date=date(2024, 9, 1), nullified=False
         )
         assert s_keep.potencia == 204.0
 
@@ -674,14 +805,24 @@ class TestThermalBoundStageSteps:
         windows = [(date(2024, 9, 1), date(2024, 10, 1))]
         # Inside the window → minimum kept; capacity untouched.
         s_in = self._state(potencia=235.0, gen_min=218.68)
-        _step4c_apply_gtmin_availability(s_in, windows, stage_date=date(2024, 9, 1))
+        _step4c_apply_gtmin_availability(
+            s_in, windows, stage_date=date(2024, 9, 1), nullified=True
+        )
         assert s_in.gen_min == 218.68
         assert s_in.potencia == 235.0
         # Outside the window → minimum dropped to 0; capacity untouched.
         s_out = self._state(potencia=235.0, gen_min=201.5)
-        _step4c_apply_gtmin_availability(s_out, windows, stage_date=date(2024, 11, 1))
+        _step4c_apply_gtmin_availability(
+            s_out, windows, stage_date=date(2024, 11, 1), nullified=True
+        )
         assert s_out.gen_min == 0.0
         assert s_out.potencia == 235.0
+        # Registry not nulled (an EX plant) → its minimum survives outside.
+        s_ex = self._state(potencia=235.0, gen_min=201.5)
+        _step4c_apply_gtmin_availability(
+            s_ex, windows, stage_date=date(2024, 11, 1), nullified=False
+        )
+        assert s_ex.gen_min == 201.5
 
     def test_step4c_drops_gtmin_for_expt_plant_without_gtmin(self) -> None:
         """EXPT plant with no GTMIN entry has no minimum (TERM.DAT GTMIN ignored).
@@ -698,14 +839,14 @@ class TestThermalBoundStageSteps:
         # No GTMIN window + flagged → minimum dropped, capacity untouched.
         s = self._state(potencia=75.0, gen_min=62.99)
         _step4c_apply_gtmin_availability(
-            s, None, stage_date=date(2024, 9, 1), expt_without_gtmin=True
+            s, None, stage_date=date(2024, 9, 1), nullified=True
         )
         assert s.gen_min == 0.0
         assert s.potencia == 75.0
         # No GTMIN window + NOT flagged (purely TERM.DAT plant) → untouched.
         s_keep = self._state(potencia=75.0, gen_min=62.99)
         _step4c_apply_gtmin_availability(
-            s_keep, None, stage_date=date(2024, 9, 1), expt_without_gtmin=False
+            s_keep, None, stage_date=date(2024, 9, 1), nullified=False
         )
         assert s_keep.gen_min == 62.99
 
@@ -765,25 +906,79 @@ class TestThermalBoundStageSteps:
 class TestThermalGenerationBounds:
     """``thermal_generation_bounds`` returns the static ``[min_mw, max_mw]``."""
 
-    def test_bounds_from_term_month1(self, tmp_path) -> None:
+    def test_pair_envelopes_both_minimum_and_availability_regimes(
+        self, tmp_path
+    ) -> None:
+        """The pair spans the whole horizon, not the registry row alone.
+
+        IP is zeroed inside the maintenance year and applies after it, and the
+        minimum switches from the monthly columns to the ``mes``-13 value there,
+        so the widest maximum and the smallest minimum come from different
+        stages.
+        """
         from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
 
-        term = MagicMock()
-        term.usinas = _make_term_df()
-        case = make_case(tmp_path, term=term)
+        conft, clast, term = _thermal_readers()
+        term.usinas = pd.DataFrame(
+            {
+                "codigo_usina": [10] * 13,
+                "nome_usina": ["TERMO_A"] * 13,
+                "potencia_instalada": [100.0] * 13,
+                "fator_capacidade_maximo": [90.0] * 13,
+                "teif": [0.0] * 13,
+                "indisponibilidade_programada": [10.0] * 13,
+                "mes": list(range(1, 14)),
+                "geracao_minima": [50.0] * 12 + [20.0],
+            }
+        )
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
 
-        bounds = thermal_generation_bounds(case)
-        # max_mw = potencia_instalada * fator_capacidade_maximo / 100;
-        # min_mw = geracao_minima.
-        assert bounds[10] == pytest.approx((10.0, 90.0))
-        assert bounds[20] == pytest.approx((0.0, 200.0))
-        assert bounds[30] == pytest.approx((5.0, 40.0))
+        # max: 100 * 90% with IP zeroed (stages 0-11), against 100 * 90% * 90%
+        # after the maintenance year. min: the mes-13 value, below every month.
+        assert thermal_generation_bounds(case)[10] == pytest.approx((20.0, 90.0))
+
+    def test_registry_minimum_above_capacity_keeps_the_pair_ordered(
+        self, tmp_path
+    ) -> None:
+        """A registry GTMIN above the registry capacity product cannot invert the pair.
+
+        ``term.dat`` may declare a minimum the ``potencia x fcmax`` product
+        cannot reach; the per-stage evaluation lifts the ceiling to the
+        inflexible minimum, and the envelope inherits that ordering instead of
+        publishing an empty interval no committed value could satisfy.
+        """
+        from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
+
+        conft, clast, term = _thermal_readers()
+        term.usinas = pd.DataFrame(
+            {
+                "codigo_usina": [10],
+                "nome_usina": ["TERMO_A"],
+                "potencia_instalada": [161.0],
+                "fator_capacidade_maximo": [93.0],
+                "teif": [0.0],
+                "indisponibilidade_programada": [0.0],
+                "mes": [1],
+                "geracao_minima": [161.38],
+            }
+        )
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
+
+        low, high = thermal_generation_bounds(case)[10]
+        assert low <= high
+        assert (low, high) == pytest.approx((161.38, 161.38))
 
     def test_no_usinas_returns_empty(self, tmp_path) -> None:
         from cobre_bridge.newave.converters.thermal import thermal_generation_bounds
 
-        term = MagicMock()
+        conft, clast, term = _thermal_readers()
         term.usinas = None
-        case = make_case(tmp_path, term=term)
+        case = make_case(
+            tmp_path, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
+        )
 
         assert thermal_generation_bounds(case) == {}

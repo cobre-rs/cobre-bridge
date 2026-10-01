@@ -15,6 +15,7 @@ from tests.newave.conftest import (
     _hydro_case,
     _make_confhd_df,
     _make_sistema_mock,
+    _make_thermal_dger,
     _thermal_readers,
 )
 
@@ -153,11 +154,9 @@ class TestCrossReferenceConsistency:
         hydro_case = _hydro_case(tmp_path)
 
         conft, clast, term = _thermal_readers()
-        dger = MagicMock()
-        dger.despacho_antecipado_gnl = 0
         nw_files = _make_nw_files(tmp_path)
         thermal_case = make_case(
-            nw_files, conft=conft, clast=clast, term=term, dger=dger
+            nw_files, conft=conft, clast=clast, term=term, dger=_make_thermal_dger()
         )
 
         from cobre_bridge.newave.converters.hydro import convert_hydros

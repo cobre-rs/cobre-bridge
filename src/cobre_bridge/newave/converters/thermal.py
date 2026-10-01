@@ -49,35 +49,25 @@ def thermal_generation_bounds(case: NewaveCase) -> dict[int, tuple[float, float]
     These are the plant-level (non-stage-varying) bounds written to
     ``thermals.json`` as ``generation.min_mw`` / ``generation.max_mw``, and the
     interval Cobre's semantic validator enforces on each
-    ``past_anticipated_commitments.values_mw`` entry:
+    ``past_anticipated_commitments.values_mw`` entry.
 
-    * ``max_mw = potencia_instalada * fator_capacidade_maximo / 100`` and
-    * ``min_mw = geracao_minima``,
+    The pair is the **envelope** of the per-stage bounds
+    :func:`convert_thermal_bounds` writes: the smallest minimum and the largest
+    maximum the plant reaches over the horizon, so it can never be tighter than
+    the stage Cobre enforces it at. Reading the TERM.DAT registry pair directly
+    instead would ignore EXPT.DAT, MANUTT.DAT and the maintenance-year IP rule,
+    which enter only through those stages — and for a plant whose registry GTMIN
+    exceeds its registry capacity product it would publish an inverted interval,
+    which Cobre refuses to load (``max_mw`` must be >= ``min_mw``).
 
-    both from ``term.dat`` month 1 (falling back to any month for plants absent
-    from month 1, with ``min_mw = 0``). Plants absent from ``term.dat`` map to
-    ``(0.0, 0.0)``.
+    A plant no capacity source describes is absent from the mapping; callers
+    supply their own default.
     """
-    term_df = case.term.usinas
+    model = _StageBoundsModel.build(case)
     bounds: dict[int, tuple[float, float]] = {}
-    if term_df is None:
-        return bounds
-
-    month1 = term_df[term_df["mes"] == 1]
-    for _, row in month1.iterrows():
-        code = int(row["codigo_usina"])
-        cap = float(row["potencia_instalada"])
-        max_factor = float(row["fator_capacidade_maximo"])
-        bounds[code] = (float(row["geracao_minima"]), cap * max_factor / 100.0)
-
-    # Plants present in term.dat but not in month 1: use any row, min_mw = 0.
-    for _, row in term_df.iterrows():
-        code = int(row["codigo_usina"])
-        if code not in bounds:
-            cap = float(row["potencia_instalada"])
-            max_factor = float(row["fator_capacidade_maximo"])
-            bounds[code] = (0.0, cap * max_factor / 100.0)
-
+    for code in sorted(model.codes):
+        plant = model.bounds_for(code)
+        bounds[code] = (min(plant.min_mw), max(plant.max_mw))
     return bounds
 
 
@@ -278,25 +268,28 @@ def _step1_zero_ip_before_maintenance(
 
 
 def _step2_null_potencia_for_potef(
-    state: _StageInputs, stage_idx: int, maint_end_stage: int, has_potef: bool
+    state: _StageInputs, stage_idx: int, maint_end_stage: int, nullified: bool
 ) -> None:
-    """Step 2: null ``potencia`` for stages >= maint end when EXPT POTEF exists.
+    """Step 2: null ``potencia`` for stages >= maint end when CONFT nulls it.
 
     EXPT restores the real value in step 4; zeroing first means a plant with no
-    POTEF window covering a stage stays at zero capacity there.
+    POTEF window covering a stage stays at zero capacity there. ``nullified``
+    is the CONFT.DAT ``EE``/``NE`` status, for which the model discards the
+    registry capacity.
     """
-    if stage_idx >= maint_end_stage and has_potef:
+    if stage_idx >= maint_end_stage and nullified:
         state.potencia = 0.0
 
 
 def _step3_null_gen_min_for_gtmin(
-    state: _StageInputs, stage_idx: int, maint_end_stage: int, has_gtmin: bool
+    state: _StageInputs, stage_idx: int, maint_end_stage: int, nullified: bool
 ) -> None:
-    """Step 3: null ``gen_min`` for stages >= maint end when EXPT GTMIN exists.
+    """Step 3: null ``gen_min`` for stages >= maint end when CONFT nulls it.
 
-    EXPT restores the real value in step 4.
+    EXPT restores the real value in step 4. ``nullified`` is the CONFT.DAT
+    ``EE``/``NE`` status, for which the model discards the registry minimum.
     """
-    if stage_idx >= maint_end_stage and has_gtmin:
+    if stage_idx >= maint_end_stage and nullified:
         state.gen_min = 0.0
 
 
@@ -344,27 +337,24 @@ def _step4b_apply_potef_availability(
     windows: list[tuple[date, date]] | None,
     stage_date: date,
     *,
-    expt_without_potef: bool = False,
+    nullified: bool,
 ) -> None:
-    """Step 4b: a POTEF schedule defines the *only* periods the plant is available.
+    """Step 4b: for a plant whose registry capacity CONFT nulls, the POTEF
+    schedule defines the *only* periods it is available.
 
-    Outside every window (tested against the caller-supplied ``stage_date`` — the
-    actual stage date in-study, the frozen last-study-stage date in the post-study
-    tail) the plant is out of service for that stage.
-
-    A plant referenced in EXPT.DAT with modifier-only entries (TEIFT/FCMAX/ GTMIN/IPTER)
-    but **no establishing POTEF** has no installed power: the modifiers have nothing to
-    modify, so the source model reports ``GERACAO MAXIMA POR CLASSE TERMICA = 0`` for it
-    every stage. ``expt_without_potef`` marks that case so the plant is held out of
-    service across the whole horizon rather than falling back to its TERM.DAT registry
-    capacity (e.g. LINHARES, which carries only a TEIFT entry in the validation deck).
+    A plant whose CONFT.DAT status is ``EE`` or ``NE`` has its TERM.DAT
+    effective power and minimum discarded, leaving EXPT.DAT as the whole
+    timeline:
+    outside every POTEF window — tested against the caller-supplied
+    ``stage_date``, the actual stage date in-study and the frozen
+    last-study-stage date in the post-study tail — the plant is out of service,
+    and a plant with no POTEF window at all never enters service. An ``EX``
+    plant is untouched here: its registry capacity stays operative wherever
+    EXPT declares nothing.
     """
-    if windows is None:
-        if expt_without_potef:
-            state.potencia = 0.0
-            state.gen_min = 0.0
+    if not nullified:
         return
-    if not any(ws <= stage_date <= we for ws, we in windows):
+    if windows is None or not any(ws <= stage_date <= we for ws, we in windows):
         state.potencia = 0.0
         state.gen_min = 0.0
 
@@ -374,46 +364,40 @@ def _step4c_apply_gtmin_availability(
     windows: list[tuple[date, date]] | None,
     stage_date: date,
     *,
-    expt_without_gtmin: bool = False,
+    nullified: bool,
 ) -> None:
-    """Step 4c: a GTMIN schedule defines the *only* periods with a minimum.
+    """Step 4c: for a plant whose registry minimum CONFT nulls, the GTMIN
+    schedule defines the *only* periods with a minimum.
 
-    The source model takes the minimum generation from EXPT GTMIN windows and uses **0**
-    outside them — it ignores the TERM.DAT "GTMIN PARA O PRIMEIRO ANO" column. Outside
-    every window (tested against the caller-supplied ``stage_date`` — the actual stage
-    date in-study, the frozen last-study-stage date in the post-study tail) the plant's
-    minimum is dropped to 0.
-
-    A plant configured via EXPT but with **no GTMIN entry** has no minimum at
-    all (``expt_without_gtmin``); its TERM.DAT GTMIN must not leak in as a
-    spurious must-run (e.g. JARAQUI / MARLIM AZUL in the validation deck). This
-    only drops the *lower* bound — capacity (step 4b) is unaffected.
+    Same rule as step 4b applied to the lower bound: for an ``EE``/``NE`` plant
+    the minimum comes only from EXPT GTMIN windows and is 0 outside them, so a
+    TERM.DAT GTMIN cannot leak in as a spurious must-run. An ``EX`` plant keeps
+    its registry minimum where EXPT declares none. This drops only the lower
+    bound — capacity is step 4b's.
     """
-    if windows is None:
-        if expt_without_gtmin:
-            state.gen_min = 0.0
+    if not nullified:
         return
-    if not any(ws <= stage_date <= we for ws, we in windows):
+    if windows is None or not any(ws <= stage_date <= we for ws, we in windows):
         state.gen_min = 0.0
 
 
 def _potef_online_at(
     windows: list[tuple[date, date]] | None,
     *,
-    expt_without_potef: bool,
+    nullified: bool,
     when: date,
 ) -> bool:
     """Whether a plant has installed capacity at ``when`` per its POTEF schedule.
 
-    A plant with no POTEF schedule is always online (its capacity comes from the
-    TERM.DAT registry). A plant referenced in EXPT with no establishing POTEF has
-    no installed power. Otherwise it is online iff some POTEF window covers
-    ``when``. Used to pick the post-study freeze reference (see the loop).
+    A plant whose registry capacity CONFT does not null is always online (that
+    capacity is operative). One whose registry CONFT nulls is online iff some
+    POTEF window covers ``when``, and never when it declares no window at all.
+    Used to pick the post-study freeze reference (see the loop).
     """
-    if expt_without_potef:
-        return False
-    if not windows:
+    if not nullified:
         return True
+    if not windows:
+        return False
     return any(ws <= when <= we for ws, we in windows)
 
 
@@ -480,6 +464,305 @@ class _GtminRecord:
     stage_id: int
     gtmin_mw: float
     capacity_mw: float
+
+
+@dataclass(frozen=True)
+class _PlantStageBounds:
+    """One plant's per-stage bounds in MW, plus what the caller may want to surface.
+
+    ``ref_dates`` is the date each stage was evaluated at — the stage's own date
+    in-study and the frozen freeze-reference date in the post-study tail. Every
+    other date-dependent per-stage lookup (CLAST cost modifications) must test
+    against it, not against the stage date, or the tail re-applies the last
+    year's seasonal pattern.
+    """
+
+    min_mw: list[float]
+    max_mw: list[float]
+    ref_dates: list[date]
+    gtmin_records: list[_GtminRecord]
+
+
+@dataclass(frozen=True)
+class _StageBoundsModel:
+    """TERM/EXPT/MANUTT/CONFT parsed into the six-step pipeline's inputs.
+
+    Single source for both the per-stage ``thermal_bounds.parquet`` and the
+    static envelope in ``thermals.json``: :meth:`bounds_for` evaluates one plant
+    over every stage and emits no diagnostic, leaving each caller to decide what
+    to surface (and keeping the two callers from double-emitting).
+
+    :meth:`bounds_for` follows the sintetizador-newave processing order:
+
+    1. Zero IP for ALL plants in stages before the maintenance end
+       (= ``ano_inicio_estudo + num_anos_manutencao_utes``).
+    2. For a plant CONFT nulls: zero ``potencia`` from the maintenance end on
+       (to be restored by EXPT in step 4).
+    3. For a plant CONFT nulls: zero ``gen_min`` from the maintenance end on
+       (to be restored by EXPT in step 4).
+    4. Apply ALL EXPT overrides (POTEF, FCMAX, TEIFT, GTMIN, IPTER).
+    4b. POTEF availability: zero ``potencia`` outside the EXPT POTEF windows
+       (and for a nulled plant with no POTEF — not installed).
+    4c. GTMIN availability: zero ``gen_min`` outside the EXPT GTMIN windows
+       (and for a nulled plant with no GTMIN). The source model takes the
+       minimum only from EXPT GTMIN windows and ignores the TERM.DAT GTMIN
+       outside them.
+    5. Apply MANUTT capacity reductions (only stages before maintenance end).
+    6. Evaluate: ``pot * (fcmax/100) * ((100-ip)/100) * ((100-teif)/100)``
+    """
+
+    stage_dates: list[date]
+    study_months: int
+    maint_end_stage: int
+    codes: frozenset[int]
+    """Every plant the capacity sources describe (TERM, EXPT or MANUTT)."""
+    nullified_codes: frozenset[int]
+    codes_without_potef: frozenset[int]
+    base_by_code_month: dict[tuple[int, int], dict[str, float]]
+    base_default: dict[int, dict[str, float]]
+    gen_min_other_years: dict[int, float]
+    expt_by_code: dict[int, list[dict]]
+    potef_windows: dict[int, list[tuple[date, date]]]
+    gtmin_windows: dict[int, list[tuple[date, date]]]
+    manutt_by_code: dict[int, pd.DataFrame]
+
+    @classmethod
+    def build(cls, case: NewaveCase) -> _StageBoundsModel:
+        """Parse the capacity sources; reads no cost and emits no diagnostic."""
+        horizon = case.horizon
+        num_maint_years: int = case.dger.num_anos_manutencao_utes or 0
+        # Maintenance years are counted as full calendar years from the study
+        # start year.  For a March 2026 start with 1 maintenance year, the
+        # period covers March-December 2026 (10 stages), not 12.
+        maint_end_stage = num_maint_years * 12 + (1 - horizon.start_month)
+        stage_dates = build_stage_dates(
+            horizon.start_year, horizon.start_month, horizon.total_stages
+        )
+
+        term_df = case.term.usinas
+        base_by_code_month: dict[tuple[int, int], dict[str, float]] = {}
+        base_default: dict[int, dict[str, float]] = {}
+        gen_min_other_years: dict[int, float] = {}
+        if term_df is not None:
+            for _, row in term_df.iterrows():
+                code = int(row["codigo_usina"])
+                mes = int(row["mes"])
+                values = {
+                    "potencia": float(row["potencia_instalada"]),
+                    "fcmax": float(row["fator_capacidade_maximo"]),
+                    "teif": float(row.get("teif", 0.0)),
+                    "ip": float(row.get("indisponibilidade_programada", 0.0)),
+                    "gen_min": float(row["geracao_minima"]),
+                }
+                # TERM.DAT's twelve monthly minimum-generation columns describe
+                # the maintenance years only; its thirteenth value — which
+                # ``inewave`` exposes as ``mes == 13`` — is the minimum for the
+                # years after them.
+                if mes == 13:
+                    gen_min_other_years[code] = values["gen_min"]
+                elif 1 <= mes <= 12:
+                    base_by_code_month[(code, mes)] = values
+                base_default.setdefault(code, values)
+
+        expt_by_code: dict[int, list[dict]] = {}
+        if case.files.expt is not None:
+            try:
+                expt_df = case.expt.expansoes
+                for _, row in expt_df.iterrows():
+                    expt_by_code.setdefault(int(row["codigo_usina"]), []).append(
+                        {
+                            "tipo": str(row["tipo"]),
+                            "modificacao": float(row["modificacao"]),
+                            "data_inicio": row["data_inicio"],
+                            "data_fim": row["data_fim"],
+                        }
+                    )
+            except Exception:  # noqa: BLE001
+                _LOG.warning("expt.dat could not be parsed; EXPT overrides skipped.")
+
+        # ── EXPT-authoritative-timeline principle ────────────────────────────
+        # For a plant CONFT.DAT marks ``EE`` or ``NE``, the source model discards
+        # the TERM.DAT effective power and minimum generation and drives the
+        # configuration from EXPT.DAT. TERM.DAT then supplies only
+        # *registry/reference* values; EXPT.DAT declares the operative
+        # per-attribute timeline over date windows. Each attribute has a DEFAULT
+        # it reverts to OUTSIDE its EXPT windows:
+        #   • POTEF (installed capacity) -> default 0   (plant not motorised)
+        #   • GTMIN (minimum generation) -> default 0   (no must-run)
+        #   • FCMAX / TEIF / IP (modifiers) -> default = TERM.DAT first-year value
+        # So a plant with no POTEF window has 0 capacity, and one with no GTMIN
+        # window (or outside it) has 0 minimum — the TERM.DAT POT/GTMIN columns
+        # are NOT operative defaults. The POTEF (step 4b) and GTMIN (step 4c)
+        # window logic are the SAME rule applied to two attributes, not two
+        # ad-hoc exceptions: build each attribute's window union, then revert to
+        # its default wherever no window covers the stage.
+        #
+        # A stage is covered if its date falls inside at least one window;
+        # open-ended data_fim extends to the last stage date, and chained
+        # schedules (a finite window followed by an open-ended one) apply in
+        # sequence, not ended at the first window.
+        codes_with_potef: set[int] = set()
+        potef_windows: dict[int, list[tuple[date, date]]] = {}
+        gtmin_windows: dict[int, list[tuple[date, date]]] = {}
+
+        def _window(o: dict) -> tuple[date, date]:
+            start = pd.Timestamp(o["data_inicio"]).date()
+            end_raw = o["data_fim"]
+            end = stage_dates[-1] if pd.isna(end_raw) else pd.Timestamp(end_raw).date()
+            return start, end
+
+        for code, overrides in expt_by_code.items():
+            for o in overrides:
+                if o["tipo"] == "POTEF":
+                    codes_with_potef.add(code)
+                    potef_windows.setdefault(code, []).append(_window(o))
+                elif o["tipo"] == "GTMIN":
+                    gtmin_windows.setdefault(code, []).append(_window(o))
+
+        # CONFT.DAT's status is the trigger: only ``EE``/``NE`` have their
+        # registry capacity and minimum discarded. Anything else — ``EX``, or a
+        # status the deck leaves blank — keeps them operative wherever EXPT
+        # declares nothing.
+        nullified_codes = {
+            int(row["codigo_usina"])
+            for _, row in case.conft.usinas.iterrows()
+            if str(row["usina_existente"]).strip() in ("EE", "NE")
+        }
+
+        manutt_by_code: dict[int, pd.DataFrame] = {}
+        if case.files.manutt is not None:
+            try:
+                manutt_df = case.manutt.manutencoes
+                for code, grp in manutt_df.groupby("codigo_usina"):
+                    manutt_by_code[int(code)] = grp.reset_index(drop=True)
+            except Exception:  # noqa: BLE001
+                _LOG.warning("manutt.dat could not be parsed; maintenance skipped.")
+
+        return cls(
+            stage_dates=stage_dates,
+            study_months=horizon.study_months,
+            maint_end_stage=maint_end_stage,
+            codes=frozenset(
+                set(expt_by_code) | set(manutt_by_code) | set(base_default)
+            ),
+            nullified_codes=frozenset(nullified_codes),
+            codes_without_potef=frozenset(nullified_codes - codes_with_potef),
+            base_by_code_month=base_by_code_month,
+            base_default=base_default,
+            gen_min_other_years=gen_min_other_years,
+            expt_by_code=expt_by_code,
+            potef_windows=potef_windows,
+            gtmin_windows=gtmin_windows,
+            manutt_by_code=manutt_by_code,
+        )
+
+    def _base(self, code: int, cal_month: int, stage_idx: int) -> dict[str, float]:
+        row = self.base_by_code_month.get((code, cal_month)) or self.base_default.get(
+            code
+        )
+        base = (
+            dict(row)
+            if row is not None
+            else {
+                "potencia": 0.0,
+                "fcmax": 100.0,
+                "teif": 0.0,
+                "ip": 0.0,
+                "gen_min": 0.0,
+            }
+        )
+        # Past the maintenance years the monthly column no longer applies: the
+        # minimum is TERM.DAT's single "remaining years" value. Only the minimum
+        # switches — the other four fields repeat across a plant's month rows.
+        if stage_idx >= self.maint_end_stage and code in self.gen_min_other_years:
+            base["gen_min"] = self.gen_min_other_years[code]
+        return base
+
+    def bounds_for(self, code: int) -> _PlantStageBounds:
+        """Run the six steps for one plant over every stage."""
+        overrides = self.expt_by_code.get(code, [])
+        nullified = code in self.nullified_codes
+        potef_windows = self.potef_windows.get(code)
+
+        # MANUTT's reduction is a delta from the TERM.DAT capacity, applied to
+        # the EXPT-modified ``potencia`` (step 5), matching sintetizador which
+        # applies EXPT before MANUTT.
+        maint_rows = self.manutt_by_code.get(code)
+        maint_reduction: np.ndarray | None = None
+        if maint_rows is not None and not maint_rows.empty:
+            base_cap = self.base_default.get(code, {}).get("potencia", 0.0)
+            effective = _apply_maint_to_capacity(base_cap, maint_rows, self.stage_dates)
+            maint_reduction = np.maximum(0.0, base_cap - effective)
+
+        # The source model's "período estático final" freezes the post-study tail
+        # at a single December snapshot: thermal min generation, max generation
+        # and cost are ALL frozen there, and maintenance is "não considerada".
+        # The freeze reference is December of the last STUDY year for a plant
+        # already online then; but a plant that comes online ONLY in the
+        # post-study (POTEF dated after the last study stage) does not yet exist
+        # in that December, so the source model instead freezes it at its
+        # *online* terminal configuration. Using the ACTUAL stage date would
+        # re-apply the last year's seasonal on/off pattern across the tail (a
+        # real bug observed as Feb–May GTMIN dropouts repeating every post-study
+        # year).
+        last_study_idx = self.study_months - 1
+        comes_online_in_post_study = not _potef_online_at(
+            potef_windows, nullified=nullified, when=self.stage_dates[last_study_idx]
+        ) and _potef_online_at(
+            potef_windows, nullified=nullified, when=self.stage_dates[-1]
+        )
+        freeze_idx = (
+            len(self.stage_dates) - 1 if comes_online_in_post_study else last_study_idx
+        )
+
+        min_mw: list[float] = []
+        max_mw: list[float] = []
+        ref_dates: list[date] = []
+        gtmin_records: list[_GtminRecord] = []
+        for stage_idx, stage_date in enumerate(self.stage_dates):
+            is_post_study = stage_idx >= self.study_months
+            ref_date = self.stage_dates[freeze_idx] if is_post_study else stage_date
+            state = _StageInputs(**self._base(code, ref_date.month, stage_idx))
+
+            _step1_zero_ip_before_maintenance(state, stage_idx, self.maint_end_stage)
+            _step2_null_potencia_for_potef(
+                state, stage_idx, self.maint_end_stage, nullified
+            )
+            _step3_null_gen_min_for_gtmin(
+                state, stage_idx, self.maint_end_stage, nullified
+            )
+            _step4_apply_expt_overrides(
+                state, overrides, ref_date, is_post_study, self.stage_dates[-1]
+            )
+            _step4b_apply_potef_availability(
+                state, potef_windows, ref_date, nullified=nullified
+            )
+            _step4c_apply_gtmin_availability(
+                state, self.gtmin_windows.get(code), ref_date, nullified=nullified
+            )
+            _step5_apply_maint_reduction(
+                state, maint_reduction, stage_idx, self.maint_end_stage
+            )
+            stage_min, stage_max, gtmin_above_capacity = _step6_evaluate_bounds(state)
+            if gtmin_above_capacity:
+                gtmin_records.append(
+                    _GtminRecord(
+                        code=code,
+                        stage_id=stage_idx,
+                        gtmin_mw=stage_min,
+                        capacity_mw=_capacity_max(state),
+                    )
+                )
+            min_mw.append(stage_min)
+            max_mw.append(stage_max)
+            ref_dates.append(ref_date)
+
+        return _PlantStageBounds(
+            min_mw=min_mw,
+            max_mw=max_mw,
+            ref_dates=ref_dates,
+            gtmin_records=gtmin_records,
+        )
 
 
 def _thermal_names(case: NewaveCase) -> dict[int, str]:
@@ -551,37 +834,15 @@ def convert_thermal_bounds(
 ) -> pa.Table | None:
     """Build per-stage thermal generation bounds from EXPT.DAT and MANUTT.DAT.
 
-    Also embeds per-stage ``cost_per_mwh`` overrides from ``clast.dat``
-    when thermal costs vary across study years.
-
-    Follows the sintetizador-newave processing order:
-
-    1. Zero IP for ALL plants in stages before ``maintenance_end_date``
-       (= ``ano_inicio_estudo + num_anos_manutencao_utes``).
-    2. For plants with EXPT POTEF: zero ``potencia`` for stages >=
-       ``maintenance_end_date`` (to be restored by EXPT in step 3).
-    3. For plants with EXPT GTMIN: zero ``gen_min`` for stages >=
-       ``maintenance_end_date`` (to be restored by EXPT in step 3).
-    4. Apply ALL EXPT overrides (POTEF, FCMAX, TEIFT, GTMIN, IPTER).
-    4b. POTEF availability: zero ``potencia`` outside the EXPT POTEF windows
-       (and for plants in EXPT with no POTEF — not installed).
-    4c. GTMIN availability: zero ``gen_min`` outside the EXPT GTMIN windows
-       (and for plants in EXPT with no GTMIN). The source model takes the minimum only
-       from EXPT GTMIN windows and ignores the TERM.DAT GTMIN outside them.
-    5. Apply MANUTT capacity reductions (only stages < maintenance_end).
-    6. Evaluate: ``pot * (fcmax/100) * ((100-ip)/100) * ((100-teif)/100)``
+    The bounds themselves come from :class:`_StageBoundsModel` (whose docstring
+    owns the processing order); this adds the per-stage ``cost_per_mwh``
+    overrides from ``clast.dat`` when thermal costs vary across study years, and
+    surfaces the pipeline's diagnostics.
 
     Returns ``None`` if no bounds or cost overrides are needed.
     """
-    dger = case.dger
-    horizon = case.horizon
-    start_month = horizon.start_month
-    start_year = horizon.start_year
-    num_anos = horizon.num_anos
-    num_maint_years: int = dger.num_anos_manutencao_utes or 0
-    study_months = horizon.study_months
-    total_stages = horizon.total_stages
-    first_year_stages = horizon.first_year_stages
+    num_anos = case.horizon.num_anos
+    first_year_stages = case.horizon.first_year_stages
 
     # ------------------------------------------------------------------
     # 0. Build per-stage cost lookup from CLAST.DAT.
@@ -635,152 +896,32 @@ def convert_thermal_bounds(
         _LOG.debug("No EXPT/MANUTT/varying costs; skipping thermal bounds.")
         return None
 
-    # Maintenance end: stages before this index have IP=0 globally.
-    # Maintenance years are counted as full calendar years from the study
-    # start year.  For a March 2026 start with 1 maintenance year, the
-    # period covers March-December 2026 (10 stages), not 12.
-    maint_end_stage = num_maint_years * 12 + (1 - start_month)
+    model = _StageBoundsModel.build(case)
 
-    stage_dates = build_stage_dates(start_year, start_month, total_stages)
-
-    # ------------------------------------------------------------------
-    # 1. Build base values per (thermal_code, calendar_month) from term.
-    # ------------------------------------------------------------------
-    term_df = case.term.usinas
-
-    BaseRow = dict[str, float]
-    base_by_code_month: dict[tuple[int, int], BaseRow] = {}
-    if term_df is not None:
-        for _, row in term_df.iterrows():
-            code = int(row["codigo_usina"])
-            mes = int(row["mes"])
-            if mes < 1 or mes > 12:
-                continue
-            base_by_code_month[(code, mes)] = {
-                "potencia": float(row["potencia_instalada"]),
-                "fcmax": float(row["fator_capacidade_maximo"]),
-                "teif": float(row.get("teif", 0.0)),
-                "ip": float(row.get("indisponibilidade_programada", 0.0)),
-                "gen_min": float(row["geracao_minima"]),
-            }
-
-    base_default: dict[int, BaseRow] = {}
-    if term_df is not None:
-        for _, row in term_df.iterrows():
-            code = int(row["codigo_usina"])
-            if code not in base_default:
-                base_default[code] = {
-                    "potencia": float(row["potencia_instalada"]),
-                    "fcmax": float(row["fator_capacidade_maximo"]),
-                    "teif": float(row.get("teif", 0.0)),
-                    "ip": float(
-                        row.get(
-                            "indisponibilidade_programada",
-                            0.0,
-                        )
-                    ),
-                    "gen_min": float(row["geracao_minima"]),
-                }
-
-    def _base(code: int, cal_month: int) -> BaseRow:
-        row = base_by_code_month.get((code, cal_month))
-        if row is not None:
-            return dict(row)
-        default = base_default.get(code)
-        if default is not None:
-            return dict(default)
-        return {
-            "potencia": 0.0,
-            "fcmax": 100.0,
-            "teif": 0.0,
-            "ip": 0.0,
-            "gen_min": 0.0,
-        }
-
-    # ------------------------------------------------------------------
-    # 2. Load EXPT overrides.
-    # ------------------------------------------------------------------
-    expt_by_code: dict[int, list[dict]] = {}
-    if case.files.expt is not None:
-        try:
-            expt_obj = case.expt
-            expt_df = expt_obj.expansoes
-            for _, row in expt_df.iterrows():
-                code = int(row["codigo_usina"])
-                expt_by_code.setdefault(code, []).append(
-                    {
-                        "tipo": str(row["tipo"]),
-                        "modificacao": float(row["modificacao"]),
-                        "data_inicio": row["data_inicio"],
-                        "data_fim": row["data_fim"],
-                    }
-                )
-        except Exception:  # noqa: BLE001
-            _LOG.warning("expt.dat could not be parsed; EXPT overrides skipped.")
-
-    # Pre-compute which codes have POTEF / GTMIN in EXPT.
-    codes_with_potef: set[int] = set()
-    codes_with_gtmin: set[int] = set()
-    # ── EXPT-authoritative-timeline principle ─────────────────────────────
-    # The source model drives the thermal configuration from EXPT.DAT, not TERM.DAT.
-    # TERM.DAT supplies *registry/reference* values; EXPT.DAT declares the operative
-    # per-attribute timeline over date windows. Each attribute has a
-    # DEFAULT it reverts to OUTSIDE its EXPT windows:
-    #   • POTEF (installed capacity) -> default 0   (plant not motorised)
-    #   • GTMIN (minimum generation) -> default 0   (no must-run)
-    #   • FCMAX / TEIF / IP (modifiers) -> default = TERM.DAT first-year value
-    # So a plant with no POTEF window has 0 capacity, and one with no GTMIN
-    # window (or outside it) has 0 minimum — the TERM.DAT POT/GTMIN columns are
-    # NOT operative defaults. The POTEF (step 4b) and GTMIN (step 4c) window
-    # logic below are the SAME rule applied to two attributes, not two ad-hoc
-    # exceptions: build each attribute's window union, then revert to its
-    # default wherever no window covers the stage.
-    #
-    # A stage is covered if its date falls inside at least one window; open-ended
-    # data_fim extends to the last stage date, and chained schedules (a finite
-    # window followed by an open-ended one) apply in sequence, not ended at the
-    # first window.
-    potef_windows: dict[int, list[tuple[date, date]]] = {}
-    gtmin_windows: dict[int, list[tuple[date, date]]] = {}
-
-    def _window(o: dict) -> tuple[date, date]:
-        start = pd.Timestamp(o["data_inicio"]).date()
-        end_raw = o["data_fim"]
-        end = stage_dates[-1] if pd.isna(end_raw) else pd.Timestamp(end_raw).date()
-        return start, end
-
-    for code, overrides in expt_by_code.items():
-        for o in overrides:
-            if o["tipo"] == "POTEF":
-                codes_with_potef.add(code)
-                potef_windows.setdefault(code, []).append(_window(o))
-            elif o["tipo"] == "GTMIN":
-                codes_with_gtmin.add(code)
-                gtmin_windows.setdefault(code, []).append(_window(o))
-
-    # Plants referenced in EXPT with modifier-only entries (TEIFT/FCMAX/GTMIN/ IPTER)
-    # but no establishing POTEF have no installed power: The source model reports
-    # ``GERACAO MAXIMA POR CLASSE TERMICA = 0`` for them every stage. Hold them out of
-    # service (step 4b) rather than falling back to the TERM.DAT registry capacity.
-    codes_expt_without_potef = set(expt_by_code) - codes_with_potef
-    if codes_expt_without_potef:
+    # Plants referenced in EXPT with modifier-only entries (TEIFT/FCMAX/GTMIN/
+    # IPTER) but no establishing POTEF have no installed power: the source model
+    # reports ``GERACAO MAXIMA POR CLASSE TERMICA = 0`` for them every stage.
+    if model.codes_without_potef:
         names = _thermal_names(case)
         emit(
             Diagnostic(
                 code="thermal-expt-without-potef",
                 severity=Severity.INFO,
                 category="Thermal bounds",
-                title=f"EXPT entries without POTEF ({len(codes_expt_without_potef)})",
+                title=(
+                    f"Plants without a POTEF entry ({len(model.codes_without_potef)})"
+                ),
                 summary=(
-                    f"{len(codes_expt_without_potef)} thermal plant(s) appear in "
-                    "EXPT.DAT without a POTEF entry; treated as not installed "
-                    "(max generation 0), matching NEWAVE."
+                    f"{len(model.codes_without_potef)} thermal plant(s) are marked "
+                    "EE or NE in CONFT.DAT with no POTEF entry in EXPT.DAT; the "
+                    "model discards their registry capacity and declares none, "
+                    "so they are treated as not installed (max generation 0)."
                 ),
                 table=DiagnosticTable(
                     columns=["Plant", "Code"],
                     rows=[
                         [names.get(code, "?"), code]
-                        for code in sorted(codes_expt_without_potef)
+                        for code in sorted(model.codes_without_potef)
                     ],
                     justify=["left", "right"],
                 ),
@@ -788,139 +929,23 @@ def convert_thermal_bounds(
             logger=_LOG,
         )
 
-    # The same authority applies to the minimum generation: The source model takes GTMIN
-    # only from EXPT GTMIN windows and uses 0 outside them, ignoring the TERM.DAT "GTMIN
-    # PARA O PRIMEIRO ANO" column. A plant configured via EXPT but with no GTMIN entry
-    # therefore has no minimum (its TERM.DAT GTMIN must not leak in as a spurious
-    # must-run). Handled in step 4c.
-    codes_expt_without_gtmin = set(expt_by_code) - codes_with_gtmin
-
-    # ------------------------------------------------------------------
-    # 3. Load MANUTT maintenance events.
-    # ------------------------------------------------------------------
-    manutt_by_code: dict[int, pd.DataFrame] = {}
-    if case.files.manutt is not None:
-        try:
-            manutt_obj = case.manutt
-            manutt_df = manutt_obj.manutencoes
-            for code, grp in manutt_df.groupby("codigo_usina"):
-                manutt_by_code[int(code)] = grp.reset_index(drop=True)
-        except Exception:  # noqa: BLE001
-            _LOG.warning("manutt.dat could not be parsed; maintenance skipped.")
-
-    all_codes = (
-        set(expt_by_code.keys())
-        | set(manutt_by_code.keys())
-        | set(base_default.keys())
-        | cost_varies
-    )
-
     rows_thermal_id: list[int] = []
     rows_stage_id: list[int] = []
     rows_min: list[float] = []
     rows_max: list[float] = []
     rows_cost: list[float | None] = []
-    # Per-stage records where GTMIN exceeded the FCMAX-derived capacity, kept so the
-    # diagnostic can name the plant, the stages, and the GTMIN-vs-capacity values.
     gtmin_records: list[_GtminRecord] = []
 
-    for newave_code in sorted(all_codes):
+    for newave_code in sorted(model.codes | cost_varies):
         try:
             thermal_id = id_map.thermal_id(newave_code)
         except KeyError:
             continue
 
-        overrides = expt_by_code.get(newave_code, [])
-        maint_rows = manutt_by_code.get(newave_code)
-        has_maint = maint_rows is not None and not maint_rows.empty
+        plant = model.bounds_for(newave_code)
+        gtmin_records.extend(plant.gtmin_records)
 
-        # Build per-stage MANUTT reduction (delta from base).
-        # Applied to EXPT-modified potencia, matching sintetizador
-        # which applies EXPT before MANUTT.
-        base_cap = base_default.get(newave_code, {}).get("potencia", 0.0)
-        maint_reduction: np.ndarray | None = None
-        if has_maint:
-            effective = _apply_maint_to_capacity(base_cap, maint_rows, stage_dates)
-            maint_reduction = np.maximum(0.0, base_cap - effective)
-
-        # The source model's "período estático final" freezes the post-study tail at a
-        # single December snapshot (manual table, p.32-33): thermal min generation, max
-        # generation and cost are ALL frozen there, and maintenance is "não
-        # considerada". The freeze reference is December of the last STUDY year for a
-        # plant already online then; but a plant that comes online ONLY in the
-        # post-study (POTEF dated after the last study stage — e.g. AZULAO II/IV, MANAUS
-        # I) does not yet exist in that December, so the source model instead freezes it
-        # at its *online* terminal configuration. We mirror this by picking the freeze
-        # reference per plant: the last study stage normally, or the last (terminal
-        # December) stage when the plant only switches on in the post-study tail. Every
-        # date-dependent input — base, windowed EXPT overrides, POTEF/GTMIN availability
-        # (4b/4c) and clast cost modifications — is then evaluated at that single
-        # reference date; using the ACTUAL stage date would re-apply the last year's
-        # seasonal on/off pattern across the tail (a real bug observed as Feb–May GTMIN
-        # dropouts repeating every post-study year).
-        last_study_idx = study_months - 1
-        comes_online_in_post_study = not _potef_online_at(
-            potef_windows.get(newave_code),
-            expt_without_potef=newave_code in codes_expt_without_potef,
-            when=stage_dates[last_study_idx],
-        ) and _potef_online_at(
-            potef_windows.get(newave_code),
-            expt_without_potef=newave_code in codes_expt_without_potef,
-            when=stage_dates[-1],
-        )
-        freeze_idx = (
-            len(stage_dates) - 1 if comes_online_in_post_study else last_study_idx
-        )
-        for stage_idx, stage_date in enumerate(stage_dates):
-            is_post_study = stage_idx >= study_months
-            ref_date = stage_dates[freeze_idx] if is_post_study else stage_date
-
-            cal_month = ref_date.month
-            state = _StageInputs(**_base(newave_code, cal_month))
-
-            _step1_zero_ip_before_maintenance(state, stage_idx, maint_end_stage)
-            _step2_null_potencia_for_potef(
-                state,
-                stage_idx,
-                maint_end_stage,
-                newave_code in codes_with_potef,
-            )
-            _step3_null_gen_min_for_gtmin(
-                state,
-                stage_idx,
-                maint_end_stage,
-                newave_code in codes_with_gtmin,
-            )
-            _step4_apply_expt_overrides(
-                state, overrides, ref_date, is_post_study, stage_dates[-1]
-            )
-            _step4b_apply_potef_availability(
-                state,
-                potef_windows.get(newave_code),
-                ref_date,
-                expt_without_potef=newave_code in codes_expt_without_potef,
-            )
-            _step4c_apply_gtmin_availability(
-                state,
-                gtmin_windows.get(newave_code),
-                ref_date,
-                expt_without_gtmin=newave_code in codes_expt_without_gtmin,
-            )
-            _step5_apply_maint_reduction(
-                state, maint_reduction, stage_idx, maint_end_stage
-            )
-            min_mw, max_mw, gtmin_above_capacity = _step6_evaluate_bounds(state)
-            if gtmin_above_capacity:
-                gtmin_records.append(
-                    _GtminRecord(
-                        code=newave_code,
-                        stage_id=stage_idx,
-                        gtmin_mw=min_mw,
-                        capacity_mw=_capacity_max(state),
-                    )
-                )
-
-            # Per-stage cost override from CLAST (only for varying-cost thermals).
+        for stage_idx, ref_date in enumerate(plant.ref_dates):
             stage_cost: float | None = None
             if newave_code in cost_varies:
                 year_idx = _stage_to_study_year(stage_idx, first_year_stages, num_anos)
@@ -935,7 +960,7 @@ def convert_thermal_bounds(
                     mod_start = pd.Timestamp(modif["data_inicio"]).date()
                     mod_end_raw = modif["data_fim"]
                     if pd.isna(mod_end_raw):
-                        mod_end = stage_dates[-1]
+                        mod_end = model.stage_dates[-1]
                     else:
                         mod_end = pd.Timestamp(mod_end_raw).date()
                     if mod_start <= ref_date <= mod_end:
@@ -943,8 +968,8 @@ def convert_thermal_bounds(
 
             rows_thermal_id.append(thermal_id)
             rows_stage_id.append(stage_idx)
-            rows_min.append(min_mw)
-            rows_max.append(max_mw)
+            rows_min.append(plant.min_mw[stage_idx])
+            rows_max.append(plant.max_mw[stage_idx])
             rows_cost.append(stage_cost)
 
     if gtmin_records:
