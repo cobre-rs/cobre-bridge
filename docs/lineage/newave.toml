@@ -920,9 +920,10 @@ summary = "Uma entrada por usina térmica de `conft.dat`, ordenada pelo id Cobre
     { file = "expt", item = "expansoes · data_inicio" },
     { file = "expt", item = "expansoes · data_fim" },
     { file = "conft", item = "usinas · usina_existente" },
-    { file = "dger", item = "num_anos_manutencao_utes" },
+    { file = "dger", item = "ano_inicio_estudo" },
+    { file = "dger", item = "mes_inicio_estudo" },
   ]
-  how = "Menor mínimo do horizonte: o envelope de `min_generation_mw` de `constraints/thermal_bounds.parquet`, que detalha as fontes. Ler só a linha de cadastro do `term.dat` publicaria um par que contradiz a tabela por estágio, porque as janelas de `expt.dat`, as manutenções e a regra de IP dos anos de manutenção entram apenas por ela. Usina que nenhuma fonte de capacidade descreve recebe 0."
+  how = "Menor mínimo do horizonte: o envelope de `min_generation_mw` de `constraints/thermal_bounds.parquet`, que detalha as fontes. Ler só a linha de cadastro do `term.dat` publicaria um par que contradiz a tabela por estágio, porque as janelas de `expt.dat`, o valor dos demais anos de `term.dat`, as manutenções e a regra de IP dos anos de manutenção entram apenas por ela. Usina que nenhuma fonte de capacidade descreve recebe 0."
 
   [[output.field]]
   path = "thermals[].generation.max_mw"
@@ -1162,7 +1163,7 @@ summary = "Uma linha base por (linha, estágio) com os limites de intercâmbio d
 [[output]]
 path = "constraints/thermal_bounds.parquet"
 kind = "parquet"
-when = "somente quando `expt.dat` ou `manutt.dat` está presente, ou quando alguma térmica tem custo variável por ano de estudo ou modificação datada em `clast.dat`"
+when = "somente quando os limites de alguma térmica variam entre estágios (e diferem, portanto, do envelope publicado em `system/thermals.json`), ou quando alguma térmica tem custo variável por ano de estudo ou modificação datada em `clast.dat`"
 module = "src/cobre_bridge/newave/converters/thermal.py"
 reads = [
   { file = "conft" },
@@ -1172,7 +1173,7 @@ reads = [
   { file = "manutt" },
   { file = "dger" },
 ]
-summary = "Limites de geração por (térmica, estágio) seguindo a ordem do sintetizador do NEWAVE (IP, POTEF, GTMIN, EXPT, MANUTT), com sobrescrita de custo por estágio das térmicas de custo variável. Com `expt.dat` ou `manutt.dat` presentes, toda térmica de `term.dat` recebe linhas."
+summary = "Limites de geração por (térmica, estágio) seguindo a ordem do sintetizador do NEWAVE (IP, EXPT, disponibilidade POTEF/GTMIN, MANUTT), com sobrescrita de custo por estágio das térmicas de custo variável. Quando a tabela é emitida, toda térmica de `term.dat`, `expt.dat` ou `manutt.dat` recebe linhas; cada linha fica dentro do envelope de `system/thermals.json`."
 
   [[output.field]]
   path = "thermal_id"
@@ -1200,9 +1201,10 @@ summary = "Limites de geração por (térmica, estágio) seguindo a ordem do sin
     { file = "expt", item = "expansoes · data_inicio" },
     { file = "expt", item = "expansoes · data_fim" },
     { file = "conft", item = "usinas · usina_existente" },
-    { file = "dger", item = "num_anos_manutencao_utes" },
+    { file = "dger", item = "ano_inicio_estudo" },
+    { file = "dger", item = "mes_inicio_estudo" },
   ]
-  how = "`geracao_minima` de `term.dat` em dois regimes: nos anos de manutenção, a coluna do mês calendário do estágio (campos 7 a 18); a partir do fim deles, o valor único dos demais anos (campo 19, que a inewave entrega como `mes = 13`), quando a usina o declara. Em cima disso entram as janelas GTMIN de `expt.dat`. Para usina `EE` ou `NE` em `conft.dat`, o NEWAVE descarta o mínimo de cadastro: fora das janelas, e para usina sem nenhuma janela, vale 0. Usina `EX` conserva o valor do `term.dat` onde o `expt.dat` não declara nada. No pós-estudo congela na configuração do último estágio de estudo (ou do estágio final, para usina que só entra no pós-estudo)."
+  how = "`geracao_minima` de `term.dat` em dois regimes: nos estágios do primeiro ano de estudo (o ano de `ano_inicio_estudo`), a coluna do mês calendário do estágio; nos anos seguintes, inclusive o pós-estudo, o valor único dos demais anos (que a inewave entrega como `mes = 13`), independentemente de `num_anos_manutencao_utes`. Usina com esse valor em branco conserva a coluna do mês calendário nos anos seguintes. Em cima disso entram as janelas GTMIN de `expt.dat`. Para usina `EE` ou `NE` em `conft.dat`, o NEWAVE descarta o mínimo de cadastro: fora das janelas, e para usina sem nenhuma janela, vale 0. Usina `EX` conserva o valor do `term.dat` onde o `expt.dat` não declara nada. No pós-estudo congela na configuração do último estágio de estudo (ou do estágio final, para usina que só entra no pós-estudo)."
 
   [[output.field]]
   path = "max_generation_mw"
@@ -3007,7 +3009,7 @@ file = "clast"
 
 [[source]]
 file = "term"
-note = "Todas as colunas de `usinas` são lidas (potência, FCMAX, TEIF, IP, GTMIN por mês). O GTMIN de `term.dat` só vale fora de janelas GTMIN de `expt.dat` para usinas ausentes de `expt.dat`, seguindo o NEWAVE."
+note = "Todas as colunas de `usinas` são lidas (potência, FCMAX, TEIF, IP, GTMIN por mês do primeiro ano de estudo e GTMIN dos demais anos). Para usina `EE` ou `NE` em `conft.dat`, o NEWAVE descarta o GTMIN de `term.dat` e só valem as janelas GTMIN de `expt.dat`."
 
 [[source]]
 file = "ree"
