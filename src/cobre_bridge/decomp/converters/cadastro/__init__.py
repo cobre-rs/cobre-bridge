@@ -19,7 +19,13 @@ from cobre_bridge.decomp.converters.cadastro.effective import (
     effective_storage_range as effective_storage_range,
 )
 from cobre_bridge.decomp.converters.cadastro.effective import (
+    is_reservoir as is_reservoir,
+)
+from cobre_bridge.decomp.converters.cadastro.effective import (
     storage_envelope as storage_envelope,
+)
+from cobre_bridge.decomp.converters.cadastro.effective import (
+    unregulated_runofriver_codes as unregulated_runofriver_codes,
 )
 from cobre_bridge.decomp.converters.cadastro.overrides import (
     _SCALAR_AC_SPECS as _SCALAR_AC_SPECS,

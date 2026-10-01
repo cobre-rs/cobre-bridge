@@ -62,7 +62,9 @@ def _handle_conversion_pipeline_failure(
             status = _convert_status(diagnostics, success="ok")
         _emit_convert_json(build_verdict(command, status, summary, diagnostics))
     else:
-        render_diagnostics([diag], console=err_console, quiet=args.quiet)
+        render_diagnostics(
+            [diag], heading="Conversion notes", console=err_console, quiet=args.quiet
+        )
     raise typer.Exit(code=1)
 
 
@@ -189,7 +191,10 @@ def _run_newave_conversion(args: ConvertArgs) -> None:
             if not args.quiet:
                 _render_dry_run_summary(report, console=out_console)
             render_diagnostics(
-                report.diagnostics, console=err_console, quiet=args.quiet
+                report.diagnostics,
+                heading="Conversion notes",
+                console=err_console,
+                quiet=args.quiet,
             )
         if args.validate:
             print_status(
@@ -210,7 +215,12 @@ def _run_newave_conversion(args: ConvertArgs) -> None:
     if not args.json_output:
         if not args.quiet:
             render_conversion_summary(report, console=out_console)
-        render_diagnostics(report.diagnostics, console=err_console, quiet=args.quiet)
+        render_diagnostics(
+            report.diagnostics,
+            heading="Conversion notes",
+            console=err_console,
+            quiet=args.quiet,
+        )
 
     if args.diagnostics_json is not None:
         # The --diagnostics-json sidecar coexists with --json (both can be set).
@@ -379,7 +389,10 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
             if not args.quiet:
                 _render_dry_run_summary(report, console=out_console)
             render_diagnostics(
-                report.diagnostics, console=err_console, quiet=args.quiet
+                report.diagnostics,
+                heading="Conversion notes",
+                console=err_console,
+                quiet=args.quiet,
             )
         if args.validate:
             print_status(
@@ -408,7 +421,12 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
     if not args.json_output:
         if not args.quiet:
             render_conversion_summary(report, console=out_console)
-        render_diagnostics(report.diagnostics, console=err_console, quiet=args.quiet)
+        render_diagnostics(
+            report.diagnostics,
+            heading="Conversion notes",
+            console=err_console,
+            quiet=args.quiet,
+        )
 
     # The --diagnostics-json sidecar write is deferred until AFTER the
     # boundary-FCF block below (both on its success and its failure path) so
@@ -509,7 +527,10 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
                 )
             else:
                 render_diagnostics(
-                    [*fcf_diags, diag], console=err_console, quiet=args.quiet
+                    [*fcf_diags, diag],
+                    heading="Conversion notes",
+                    console=err_console,
+                    quiet=args.quiet,
                 )
             raise typer.Exit(code=1)
         else:
@@ -528,7 +549,10 @@ def _run_decomp_conversion(args: ConvertArgs) -> None:
                 # this renders solely the importer's captured diagnostics —
                 # never a double-render of the same findings.
                 render_diagnostics(
-                    boundary_diagnostics, console=err_console, quiet=args.quiet
+                    boundary_diagnostics,
+                    heading="Conversion notes",
+                    console=err_console,
+                    quiet=args.quiet,
                 )
 
     # The merge of the converter's own findings and the boundary-FCF

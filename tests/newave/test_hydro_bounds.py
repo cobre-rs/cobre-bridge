@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,7 @@ from cobre_bridge.core.diagnostics import Severity
 from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 from tests.newave.conftest import (
+    _ee_expansion_case,
     _hydro_case,
     _make_cfuga_rec,
     _make_confhd_df,
@@ -451,8 +453,20 @@ class TestConvertStorageBoundsPostStudy:
     def test_outflow_freezes_post_study(self, tmp_path) -> None:
         """VAZMINT (no flag) freezes the post-study tail at last study Dec."""
         overrides = [
-            {"type": "VAZMINT", "year": 2024, "month": 1, "value": 10.0},
-            {"type": "VAZMINT", "year": 2024, "month": 12, "value": 120.0},
+            {
+                "type": "VAZMINT",
+                "period": None,
+                "year": 2024,
+                "month": 1,
+                "value": 10.0,
+            },
+            {
+                "type": "VAZMINT",
+                "period": None,
+                "year": 2024,
+                "month": 12,
+                "value": 120.0,
+            },
         ]
         df = self._run(tmp_path, overrides)
         # Study: Jan–Nov step-carry 10, Dec=120.
@@ -465,8 +479,20 @@ class TestConvertStorageBoundsPostStudy:
     def test_turbined_min_freezes_post_study(self, tmp_path) -> None:
         """TURBMINT (no flag) freezes the post-study tail."""
         overrides = [
-            {"type": "TURBMINT", "year": 2024, "month": 1, "value": 5.0},
-            {"type": "TURBMINT", "year": 2024, "month": 12, "value": 50.0},
+            {
+                "type": "TURBMINT",
+                "period": None,
+                "year": 2024,
+                "month": 1,
+                "value": 5.0,
+            },
+            {
+                "type": "TURBMINT",
+                "period": None,
+                "year": 2024,
+                "month": 12,
+                "value": 50.0,
+            },
         ]
         df = self._run(tmp_path, overrides)
         assert df.loc[11, "min_turbined_m3s"] == pytest.approx(50.0)
@@ -476,8 +502,8 @@ class TestConvertStorageBoundsPostStudy:
     def test_vmaxt_seasonalizes_when_flag_set(self, tmp_path) -> None:
         """VMAXT with sazonaliza_vmaxt=1 repeats the seasonal pattern."""
         overrides = [
-            {"type": "VMAXT", "year": 2024, "month": 1, "value": 50.0},
-            {"type": "VMAXT", "year": 2024, "month": 12, "value": 80.0},
+            {"type": "VMAXT", "period": None, "year": 2024, "month": 1, "value": 50.0},
+            {"type": "VMAXT", "period": None, "year": 2024, "month": 12, "value": 80.0},
         ]
         df = self._run(tmp_path, overrides, vmaxt_flag=1)
         # vol_min=0, useful=100 → pct == hm3. Study Jan=50, Dec=80.
@@ -490,8 +516,8 @@ class TestConvertStorageBoundsPostStudy:
     def test_vmaxt_freezes_when_flag_clear(self, tmp_path) -> None:
         """VMAXT with sazonaliza_vmaxt=0 freezes the post-study tail."""
         overrides = [
-            {"type": "VMAXT", "year": 2024, "month": 1, "value": 50.0},
-            {"type": "VMAXT", "year": 2024, "month": 12, "value": 80.0},
+            {"type": "VMAXT", "period": None, "year": 2024, "month": 1, "value": 50.0},
+            {"type": "VMAXT", "period": None, "year": 2024, "month": 12, "value": 80.0},
         ]
         df = self._run(tmp_path, overrides, vmaxt_flag=0)
         # Post-study frozen at Dec=80, NOT seasonal Jan=50.
@@ -502,8 +528,20 @@ class TestConvertStorageBoundsPostStudy:
         """``REST. TURBINAMENTO = 2`` keeps TURBMAXT and drops TURBMINT, with
         one INFO diagnostic naming the dropped records."""
         overrides = [
-            {"type": "TURBMAXT", "year": 2024, "month": 1, "value": 400.0},
-            {"type": "TURBMINT", "year": 2024, "month": 1, "value": 20.0},
+            {
+                "type": "TURBMAXT",
+                "period": None,
+                "year": 2024,
+                "month": 1,
+                "value": 400.0,
+            },
+            {
+                "type": "TURBMINT",
+                "period": None,
+                "year": 2024,
+                "month": 1,
+                "value": 20.0,
+            },
         ]
         with dx.collect() as collected:
             df = self._run(tmp_path, overrides, restricao_turbinamento=2)
@@ -515,7 +553,9 @@ class TestConvertStorageBoundsPostStudy:
 
     def test_min_outflow_switch_drops_vazmint(self, tmp_path) -> None:
         """``DESCONSIDERA VAZMIN = 1`` leaves no per-stage outflow floor."""
-        overrides = [{"type": "VAZMINT", "year": 2024, "month": 1, "value": 10.0}]
+        overrides = [
+            {"type": "VAZMINT", "period": None, "year": 2024, "month": 1, "value": 10.0}
+        ]
         with dx.collect() as collected:
             df = self._run(tmp_path, overrides, desconsidera_vazao_minima=1)
         assert df is None
@@ -523,7 +563,9 @@ class TestConvertStorageBoundsPostStudy:
         assert "minimum outflow" in collected[0].title
 
     def test_switched_off_ghmin_is_reported(self, tmp_path) -> None:
-        overrides = [{"type": "VAZMINT", "year": 2024, "month": 1, "value": 10.0}]
+        overrides = [
+            {"type": "VAZMINT", "period": None, "year": 2024, "month": 1, "value": 10.0}
+        ]
         with dx.collect() as collected:
             self._run(tmp_path, overrides, ghmin_present=True, considera_ghmin=0)
         assert [d.code for d in collected] == ["dger-switch-off"]
@@ -533,9 +575,23 @@ class TestConvertStorageBoundsPostStudy:
         """Unit ``h`` is absolute hm³; ``%`` (and no unit) is a share of the
         useful volume on top of the minimum."""
         overrides = [
-            {"type": "VMAXT", "year": 2024, "month": 1, "value": 250.0, "unit": "h"},
-            {"type": "VMINT", "year": 2024, "month": 1, "value": 10.0, "unit": "%"},
-            {"type": "VMINT", "year": 2024, "month": 6, "value": 25.0},
+            {
+                "type": "VMAXT",
+                "period": None,
+                "year": 2024,
+                "month": 1,
+                "value": 250.0,
+                "unit": "h",
+            },
+            {
+                "type": "VMINT",
+                "period": None,
+                "year": 2024,
+                "month": 1,
+                "value": 10.0,
+                "unit": "%",
+            },
+            {"type": "VMINT", "period": None, "year": 2024, "month": 6, "value": 25.0},
         ]
         df = self._run(tmp_path, overrides, vol_min=100.0, vol_max=300.0)
         assert df.loc[0, "max_storage_hm3"] == pytest.approx(250.0)
@@ -1327,3 +1383,95 @@ class TestClampOutagePctDiagnostics:
         assert result == 100.0
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 1
+
+
+class TestExpansionRampBounds:
+    """An ``EE`` plant's reduced capacity is written over its ramp window only,
+    onto the same ``(hydro, stage)`` row as any MODIF/GHMIN bound — never as a
+    competing row that the de-dup pass would have to choose against."""
+
+    # Both plants carry a VMINT from Mar-2024 (stage 2), inside plant 2's ramp.
+    _VMINT = [
+        {
+            "type": "VMINT",
+            "period": None,
+            "year": 2024,
+            "month": 3,
+            "value": 60.0,
+            "unit": "h",
+        }
+    ]
+
+    def _id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
+
+    def _run(self, tmp_path) -> pd.DataFrame:
+        from cobre_bridge.newave.converters.hydro import convert_storage_bounds
+
+        modif = MagicMock()
+        modif.usina.return_value = []
+        case = _ee_expansion_case(tmp_path, modif=modif)
+        case.files = dataclasses.replace(case.files, modif=tmp_path / "modif.dat")
+        with patch(
+            "cobre_bridge.newave.converters.hydro.bounds._extract_temporal_overrides",
+            return_value={1: self._VMINT, 2: self._VMINT},
+        ):
+            tbl = convert_storage_bounds(case, self._id_map())
+        assert tbl is not None
+        return tbl.to_pandas()
+
+    def test_reduced_capacity_covers_only_the_pre_entry_stages(self, tmp_path) -> None:
+        # Jul-2024 entry under a Jan-2024 horizon is stage 6, so stages 0-5 carry
+        # conjunto 1 alone (3 x 150 = 450 MW) and stage 6 onward carries no cap:
+        # the plant's declared 690 MW applies there.
+        df = self._run(tmp_path)
+        ramp = df[(df.hydro_id == 1) & df.max_generation_mw.notna()]
+        assert sorted(ramp.stage_id) == [0, 1, 2, 3, 4, 5]
+        assert list(ramp.max_generation_mw) == [pytest.approx(450.0)] * 6
+
+    def test_non_expanding_plant_gets_no_generation_cap(self, tmp_path) -> None:
+        other = self._run(tmp_path).query("hydro_id == 0")
+        assert not other.empty
+        assert other.max_generation_mw.isna().all()
+
+    def test_ramp_cap_and_modif_bound_share_one_row(self, tmp_path) -> None:
+        df = self._run(tmp_path)
+        assert not df.duplicated(subset=["hydro_id", "stage_id"]).any()
+        row = df[(df.hydro_id == 1) & (df.stage_id == 2)].iloc[0]
+        assert row.min_storage_hm3 == pytest.approx(60.0)
+        assert row.max_generation_mw == pytest.approx(450.0)
+
+    def test_ramp_turbined_cap_is_rated_at_the_declared_head(self, tmp_path) -> None:
+        # Before the entry the cap equals what the plant declares with the
+        # entering machines absent: the same head path as the declaration, so
+        # the ramp neither diverges from it nor inflates it.
+        from cobre_bridge.newave.converters.hydro import (
+            convert_hydros,
+            convert_turbined_bounds_head_corrected,
+        )
+
+        cadastro = _head_corrected_two_plant_cadastro()
+        cadastro.loc[2, "numero_conjuntos_maquinas"] = 2
+        cadastro.loc[2, "maquinas_conjunto_2"] = 2
+        cadastro.loc[2, "potencia_nominal_conjunto_2"] = 500.0
+        cadastro.loc[2, "vazao_nominal_conjunto_2"] = 50.0
+        cadastro.loc[2, "queda_nominal_conjunto_2"] = 200.0
+        start_only = cadastro.copy()
+        start_only.loc[2, "maquinas_conjunto_2"] = 0
+
+        def declared_turbined(case) -> float:
+            hydros = convert_hydros(case, self._id_map())["hydros"]
+            return next(h for h in hydros if h["id"] == 1)["generation"][
+                "max_turbined_m3s"
+            ]
+
+        ee_case = _ee_expansion_case(tmp_path, cadastro=cadastro)
+        table = convert_turbined_bounds_head_corrected(ee_case, self._id_map())
+        assert table is not None
+        ramp = table.to_pandas().query("hydro_id == 1")
+        assert list(ramp.stage_id) == [0, 1, 2, 3, 4, 5]
+        start_cap = declared_turbined(_hydro_case(tmp_path, cadastro=start_only))
+        assert list(ramp.max_turbined_m3s) == [pytest.approx(start_cap)] * 6
+        assert declared_turbined(ee_case) == pytest.approx(
+            declared_turbined(_hydro_case(tmp_path, cadastro=cadastro))
+        )

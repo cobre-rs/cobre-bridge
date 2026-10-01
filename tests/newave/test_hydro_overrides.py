@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -190,32 +190,84 @@ class TestApplyPermanentOverrides:
         assert int(result.loc[1, "numero_conjuntos_maquinas"]) == 2
         assert int(result.loc[1, "maquinas_conjunto_2"]) == 3
 
-    def test_volcota_override_warns_and_skips(self, tmp_path) -> None:
-        """VOLCOTA records produce a diagnostic and are skipped gracefully."""
+    def test_potefe_override(self, tmp_path) -> None:
+        """POTEFE replaces the conjunto's nominal power, leaving the others."""
         from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
 
-        volcota_rec = MagicMock()
-        type(volcota_rec).__name__ = "VOLCOTA"
+        potefe_rec = MagicMock()
+        type(potefe_rec).__name__ = "POTEFE"
+        potefe_rec.potencia = 500.0
+        potefe_rec.conjunto = 2
 
         usina_rec = MagicMock()
-        usina_rec.codigo = 1
+        usina_rec.codigo = 2
 
         mock_modif = MagicMock()
         mock_modif.usina.return_value = [usina_rec]
-        mock_modif.modificacoes_usina.return_value = [volcota_rec]
+        mock_modif.modificacoes_usina.return_value = [potefe_rec]
 
         with dx.collect() as collected:
             result = _apply_permanent_overrides(
                 self._base_cadastro(), self._modif_case(tmp_path, mock_modif)
             )
 
-        # Values must be unchanged (dtype may differ due to float cast for safety).
-        pd.testing.assert_frame_equal(result, self._base_cadastro(), check_dtype=False)
-        assert len(collected) == 1
-        diag = collected[0]
-        assert diag.code == "modif-permanent-override-unsupported"
-        assert diag.table is not None
-        assert diag.table.rows == [[1, "VOLCOTA"]]
+        assert result.loc[2, "potencia_nominal_conjunto_2"] == 500.0
+        assert result.loc[2, "potencia_nominal_conjunto_1"] == 150.0
+        assert collected == []
+
+    @pytest.mark.parametrize(
+        ("type_name", "attr", "prefix", "raw", "expected"),
+        [
+            (
+                "VOLCOTA",
+                "polinomio_volume_cota",
+                "volume_cota",
+                [400.0, 0.2, 0.0, 0.0, 0.0],
+                [400.0, 0.2, 0.0, 0.0, 0.0],
+            ),
+            (
+                "COTAREA",
+                "polinomio_cota_area",
+                "cota_area",
+                [-1.0e7, 9.0e4, -2.5e2, 3.0e-1, 0.0],
+                [-1.0e7, 9.0e4, -2.5e2, 3.0e-1, 0.0],
+            ),
+            # A record that truncates its tail leaves the high-order terms at zero.
+            (
+                "VOLCOTA",
+                "polinomio_volume_cota",
+                "volume_cota",
+                [400.0, None, None, None, None],
+                [400.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+        ],
+    )
+    def test_polynomial_override_replaces_the_whole_polynomial(
+        self, tmp_path, type_name, attr, prefix, raw, expected
+    ) -> None:
+        from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
+
+        poly_rec = MagicMock()
+        type(poly_rec).__name__ = type_name
+        setattr(poly_rec, attr, raw)
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [poly_rec]
+
+        base = self._base_cadastro()
+        columns = [f"a{i}_{prefix}" for i in range(5)]
+        with dx.collect() as collected:
+            result = _apply_permanent_overrides(
+                base, self._modif_case(tmp_path, mock_modif)
+            )
+
+        assert result.loc[1, columns].tolist() == expected
+        assert result.loc[2, columns].tolist() == base.loc[2, columns].tolist()
+        assert collected == []
 
     def test_unknown_plant_code_skipped(self, tmp_path) -> None:
         """Plant code not in cadastro: diagnostic emitted, no crash."""
@@ -302,6 +354,8 @@ class TestExtractTemporalOverrides:
         vazmint_rec = MagicMock()
         type(vazmint_rec).__name__ = "VAZMINT"
         vazmint_rec.data_inicio = datetime.datetime(2025, 1, 1)
+        vazmint_rec.periodo = None
+        vazmint_rec.mes = 1
         vazmint_rec.vazao = 50.0
 
         usina_rec = MagicMock()
@@ -317,7 +371,13 @@ class TestExtractTemporalOverrides:
 
         assert 1 in result
         assert result[1] == [
-            {"type": "VAZMINT", "month": 1, "year": 2025, "value": 50.0}
+            {
+                "type": "VAZMINT",
+                "month": 1,
+                "year": 2025,
+                "period": None,
+                "value": 50.0,
+            }
         ]
 
     def test_vmaxt_and_vmint_carry_their_unit(self, tmp_path) -> None:
@@ -351,8 +411,22 @@ class TestExtractTemporalOverrides:
 
         assert collected == []
         assert result[1] == [
-            {"type": "VMAXT", "month": 1, "year": 2025, "value": 73.2, "unit": "%"},
-            {"type": "VMINT", "month": 2, "year": 2025, "value": 1500.0, "unit": "h"},
+            {
+                "type": "VMAXT",
+                "month": 1,
+                "year": 2025,
+                "period": None,
+                "value": 73.2,
+                "unit": "%",
+            },
+            {
+                "type": "VMINT",
+                "month": 2,
+                "year": 2025,
+                "period": None,
+                "value": 1500.0,
+                "unit": "h",
+            },
         ]
 
     def test_dated_volume_without_unit_is_percent_and_reported(self, tmp_path) -> None:
@@ -392,6 +466,8 @@ class TestExtractTemporalOverrides:
         vazmint_rec = MagicMock()
         type(vazmint_rec).__name__ = "VAZMINT"
         vazmint_rec.data_inicio = datetime.datetime(2025, 3, 1)
+        vazmint_rec.periodo = None
+        vazmint_rec.mes = 3
         vazmint_rec.vazao = 40.0
 
         # Plant 99 is NOT in confhd_codes [1, 2].
@@ -418,6 +494,8 @@ class TestExtractTemporalOverrides:
             r = MagicMock()
             type(r).__name__ = "VAZMINT"
             r.data_inicio = datetime.datetime(2025, month, 1)
+            r.periodo = None
+            r.mes = month
             r.vazao = vazao
             return r
 
@@ -462,7 +540,13 @@ class TestExtractTemporalOverrides:
         )
 
         assert result[2] == [
-            {"type": "CFUGA", "month": 6, "year": 2025, "value": pytest.approx(75.4)}
+            {
+                "type": "CFUGA",
+                "month": 6,
+                "year": 2025,
+                "period": None,
+                "value": pytest.approx(75.4),
+            }
         ]
 
     def test_extracts_turbmint_turbmaxt_records(self, tmp_path) -> None:
@@ -496,14 +580,80 @@ class TestExtractTemporalOverrides:
             "type": "TURBMINT",
             "month": 11,
             "year": 2025,
+            "period": None,
             "value": pytest.approx(330.0),
         }
         assert result[1][1] == {
             "type": "TURBMAXT",
             "month": 3,
             "year": 2025,
+            "period": None,
             "value": pytest.approx(322.0),
         }
+
+    def test_extracts_pre_pos_markers(self, tmp_path) -> None:
+        """PRE/POS year markers are carried through with ``year=None`` and the
+        ``period`` field set, so the step-function builder can map them onto the
+        horizon entry (PRE) and the post-study tail (POS)."""
+        import datetime
+
+        from cobre_bridge.newave.converters.hydro import _extract_temporal_overrides
+
+        pre_rec = MagicMock()
+        type(pre_rec).__name__ = "VAZMINT"
+        pre_rec.data_inicio = None
+        pre_rec.periodo = "PRE"
+        pre_rec.mes = 1
+        pre_rec.vazao = 100.0
+
+        study_rec = MagicMock()
+        type(study_rec).__name__ = "VAZMINT"
+        study_rec.data_inicio = datetime.datetime(2030, 6, 1)
+        study_rec.periodo = None
+        study_rec.mes = 6
+        study_rec.vazao = 300.0
+
+        pos_rec = MagicMock()
+        type(pos_rec).__name__ = "VAZMINT"
+        pos_rec.data_inicio = None
+        pos_rec.periodo = "POS"
+        pos_rec.mes = 6
+        pos_rec.vazao = 300.0
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = [pre_rec, study_rec, pos_rec]
+
+        result = _extract_temporal_overrides(
+            self._modif_case(tmp_path, mock_modif), [1]
+        )
+
+        assert result[1] == [
+            {
+                "type": "VAZMINT",
+                "month": 1,
+                "year": None,
+                "period": "PRE",
+                "value": 100.0,
+            },
+            {
+                "type": "VAZMINT",
+                "month": 6,
+                "year": 2030,
+                "period": None,
+                "value": 300.0,
+            },
+            {
+                "type": "VAZMINT",
+                "month": 6,
+                "year": None,
+                "period": "POS",
+                "value": 300.0,
+            },
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -664,16 +814,14 @@ class TestApplyPermanentOverridesDiagnostics:
             modif=mock_modif,
         )
 
-    def test_unknown_permanent_type_folds_into_same_code_as_volcota(
-        self, tmp_path
-    ) -> None:
-        """VOLCOTA and a genuinely unknown type both land in
-        ``modif-permanent-override-unsupported`` — the Type column is what
+    def test_unsupported_types_fold_into_the_same_code(self, tmp_path) -> None:
+        """A modelled-but-unconsumed type and a genuinely unknown one both land
+        in ``modif-permanent-override-unsupported`` — the Type column is what
         distinguishes them, not the code."""
         from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
 
         volcota_rec = MagicMock()
-        type(volcota_rec).__name__ = "VOLCOTA"
+        type(volcota_rec).__name__ = "VMINP"
         unknown_rec = MagicMock()
         type(unknown_rec).__name__ = "SOME_FUTURE_TYPE"
 
@@ -700,7 +848,7 @@ class TestApplyPermanentOverridesDiagnostics:
         assert diag.category == "Cadastro overrides"
         assert diag.table is not None
         assert diag.table.columns == ["Code", "Type"]
-        assert diag.table.rows == [[1, "VOLCOTA"], [2, "SOME_FUTURE_TYPE"]]
+        assert diag.table.rows == [[1, "VMINP"], [2, "SOME_FUTURE_TYPE"]]
 
         _assert_no_repo_internal_leaks(collected)
 
@@ -808,104 +956,61 @@ class TestApplyPermanentOverridesDiagnostics:
 
 
 class TestExtractTemporalOverridesDiagnostics:
-    """Emission-shape coverage for the unknown-temporal-type diagnostic.
+    """A VAZMINT record with no month, or with neither a year nor a PRE/POS
+    marker, is skipped and reported once."""
 
-    ``_TEMPORAL_OVERRIDE_TYPES`` gates entry to the type-dispatch chain, and
-    every one of its current members is handled there, so the ``else``
-    branch is unreachable through the real frozenset — it is defensive
-    against a future member added to the set without a matching dispatch
-    arm. These tests patch the frozenset to admit a type the chain does not
-    handle, exercising exactly that defensive path.
-    """
-
-    def _modif_case(self, tmp_path, mock_modif):
+    def _modif_case(self, tmp_path, records):
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.return_value = records
         return make_case(
             make_nw_files(tmp_path, modif=tmp_path / "modif.dat"),
             modif=mock_modif,
         )
 
-    def test_unknown_temporal_type_emits_table(self, tmp_path) -> None:
-        from cobre_bridge.newave.converters.hydro import _extract_temporal_overrides
+    @staticmethod
+    def _vazmint(mes, periodo, data_inicio) -> MagicMock:
+        rec = MagicMock()
+        type(rec).__name__ = "VAZMINT"
+        rec.mes = mes
+        rec.periodo = periodo
+        rec.data_inicio = data_inicio
+        rec.vazao = 50.0
+        return rec
 
-        unknown_rec = MagicMock()
-        type(unknown_rec).__name__ = "SOME_FUTURE_TEMPORAL_TYPE"
-
-        usina_rec = MagicMock()
-        usina_rec.codigo = 1
-
-        mock_modif = MagicMock()
-        mock_modif.usina.return_value = [usina_rec]
-        mock_modif.modificacoes_usina.return_value = [unknown_rec]
-
-        with (
-            patch(
-                "cobre_bridge.newave.converters.hydro.overrides._TEMPORAL_OVERRIDE_TYPES",
-                frozenset({"SOME_FUTURE_TEMPORAL_TYPE"}),
-            ),
-            dx.collect() as collected,
-        ):
-            result = _extract_temporal_overrides(
-                self._modif_case(tmp_path, mock_modif), [1]
-            )
-
-        assert result == {}
-        assert len(collected) == 1
-        diag = collected[0]
-        assert diag.code == "modif-temporal-override-unknown"
-        assert diag.severity is Severity.WARNING
-        assert diag.category == "Cadastro overrides"
-        assert diag.table is not None
-        assert diag.table.columns == ["Code", "Type"]
-        assert diag.table.rows == [[1, "SOME_FUTURE_TEMPORAL_TYPE"]]
-
-        _assert_no_repo_internal_leaks(collected)
-
-    def test_no_unknown_types_emits_nothing(self, tmp_path) -> None:
+    def test_undated_records_are_skipped_and_reported(self, tmp_path) -> None:
         import datetime
 
         from cobre_bridge.newave.converters.hydro import _extract_temporal_overrides
 
-        vazmint_rec = MagicMock()
-        type(vazmint_rec).__name__ = "VAZMINT"
-        vazmint_rec.data_inicio = datetime.datetime(2025, 1, 1)
-        vazmint_rec.vazao = 50.0
-
-        usina_rec = MagicMock()
-        usina_rec.codigo = 1
-
-        mock_modif = MagicMock()
-        mock_modif.usina.return_value = [usina_rec]
-        mock_modif.modificacoes_usina.return_value = [vazmint_rec]
-
+        records = [
+            self._vazmint(None, "POS", None),
+            self._vazmint(3, None, None),
+            self._vazmint(1, None, datetime.datetime(2025, 1, 1)),
+        ]
         with dx.collect() as collected:
-            _extract_temporal_overrides(self._modif_case(tmp_path, mock_modif), [1])
+            result = _extract_temporal_overrides(
+                self._modif_case(tmp_path, records), [1]
+            )
 
-        assert collected == []
+        assert [o["year"] for o in result[1]] == [2025]
+        [diag] = collected
+        assert diag.code == "modif-temporal-override-undated"
+        assert diag.severity is Severity.WARNING
+        assert diag.table is not None
+        assert diag.table.rows == [[1, "VAZMINT"], [1, "VAZMINT"]]
+        _assert_no_repo_internal_leaks(collected)
 
     def test_no_sink_fallback_logs_one_warning(self, tmp_path, caplog) -> None:
-        """With no active collect() sink, emit() degrades to a single logging
-        record — the pre-migration caplog contract keeps working."""
         import logging
 
         from cobre_bridge.newave.converters.hydro import _extract_temporal_overrides
 
-        unknown_rec = MagicMock()
-        type(unknown_rec).__name__ = "SOME_FUTURE_TEMPORAL_TYPE"
-        usina_rec = MagicMock()
-        usina_rec.codigo = 1
-
-        mock_modif = MagicMock()
-        mock_modif.usina.return_value = [usina_rec]
-        mock_modif.modificacoes_usina.return_value = [unknown_rec]
-
-        with (
-            patch(
-                "cobre_bridge.newave.converters.hydro.overrides._TEMPORAL_OVERRIDE_TYPES",
-                frozenset({"SOME_FUTURE_TEMPORAL_TYPE"}),
-            ),
-            caplog.at_level(logging.WARNING),
-        ):
-            _extract_temporal_overrides(self._modif_case(tmp_path, mock_modif), [1])
+        case = self._modif_case(tmp_path, [self._vazmint(None, "PRE", None)])
+        with caplog.at_level(logging.WARNING):
+            _extract_temporal_overrides(case, [1])
 
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 1

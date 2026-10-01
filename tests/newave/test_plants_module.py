@@ -233,7 +233,7 @@ def test_active_hydros_includes_filling_in_declaration_order() -> None:
 
 
 def test_active_hydros_unchanged_when_exph_none() -> None:
-    # With exph_df=None the NE plant is dropped -> identical to the EX-only set.
+    # With exph_df=None the NE plant is dropped -> identical to the in-service set.
     confhd_df = _confhd(
         [
             {
@@ -255,3 +255,40 @@ def test_active_hydros_unchanged_when_exph_none() -> None:
     assert active_hydro_codes(confhd_df, cad) == [10, 7]
     assert active_hydro_codes(confhd_df, cad, None) == [10, 7]
     assert list(active_hydros(confhd_df, cad)["codigo_usina"]) == [10, 7]
+
+
+# --- In-service admission: EE ("existente em expansão") ---------
+
+
+_EE_CASE = _confhd(
+    [
+        {"codigo_usina": 10, "nome_usina": "A", "posto": 10, "usina_existente": "EX"},
+        {
+            "codigo_usina": 5,
+            "nome_usina": "EXPANDING",
+            "posto": 5,
+            "usina_existente": "EE",
+        },
+        {"codigo_usina": 7, "nome_usina": "B", "posto": 7, "usina_existente": "EX"},
+        {"codigo_usina": 9, "nome_usina": "GONE", "posto": 9, "usina_existente": "NC"},
+    ]
+)
+_EE_CAD = _cadastro({10: 0.01, 5: 0.01, 7: 0.01})
+
+
+def test_existing_hydros_includes_ee() -> None:
+    assert sorted(existing_hydros(_EE_CASE)["codigo_usina"]) == [5, 7, 10]
+
+
+def test_existing_hydros_tolerates_padded_status() -> None:
+    padded = _confhd(
+        [{"codigo_usina": 1, "nome_usina": "A", "posto": 1, "usina_existente": " EE "}]
+    )
+    assert list(existing_hydros(padded)["codigo_usina"]) == [1]
+
+
+def test_active_hydros_admits_ee_at_declaration_position_without_exph() -> None:
+    # EE admission reads confhd alone, so a path-only caller (the comparators'
+    # ``build_id_map``, which passes exph=None) enumerates the pipeline's set.
+    assert active_hydro_codes(_EE_CASE, _EE_CAD) == [10, 5, 7]
+    assert list(active_hydros(_EE_CASE, _EE_CAD, None)["codigo_usina"]) == [10, 5, 7]

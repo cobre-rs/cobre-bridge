@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pyarrow as pa
@@ -24,6 +24,7 @@ from cobre_bridge.newave.converters.constraints import (
     _ElectricTermSkip,
     _is_stored_energy_reservoir,
     _parse_formula,
+    _parse_re_dat,
     _vminop_energy_factor,
     _warn_if_non_fixa_penalization,
     compute_accumulated_integrated_productivities,
@@ -522,8 +523,6 @@ class TestConvertVminopConstraints:
         """dger.dat curva_aversao=0 means the source model disabled the risk-aversion
         curve; cobre-bridge must skip VminOP constraints even when curva.dat is present
         on disk."""
-        from unittest.mock import MagicMock
-
         mock_dger = MagicMock()
         mock_dger.curva_aversao = 0
         # curva.dat is present (non-None reader), but curva_aversao=0 disables it.
@@ -540,7 +539,6 @@ class TestConvertVminopConstraints:
 def _make_vminop_no_hydro_case(tmp_path: Path) -> tuple[NewaveCase, NewaveIdMap]:
     """A VminOP case where REE 1 has a curva.dat entry but zero hydro plants."""
     from datetime import datetime as _dt
-    from unittest.mock import MagicMock
 
     dger = MagicMock()
     dger.mes_inicio_estudo = 1
@@ -612,7 +610,6 @@ class TestConvertVminopConstraintsEmission:
 
     def test_nonpositive_penalty_emits_clamp_diagnostic(self, tmp_path: Path) -> None:
         from datetime import datetime as _dt
-        from unittest.mock import MagicMock
 
         cadastro = _make_cadastro()
         cadastro["tipo_regulacao"] = "M"  # stored-energy reservoirs (EARM set)
@@ -825,8 +822,6 @@ def _make_electric_re_case(tmp_path: Path) -> tuple[NewaveCase, NewaveIdMap]:
     ``[50, 200]`` limit on ``ger_usih(10)`` over 2020, with ``dger``/``sistema``
     mocked to a 1-year 2020 study carrying no exchange/deficit data.
     """
-    from unittest.mock import MagicMock
-
     indices = tmp_path / "indices.csv"
     indices.write_text(
         "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
@@ -868,8 +863,6 @@ class TestConvertElectricConstraints:
 
     def test_switched_off_re_dat_is_ignored_and_reported(self, tmp_path: Path) -> None:
         """With ``RESTRICOES ELETRICAS = 0`` a present re.dat is never parsed."""
-        from unittest.mock import MagicMock
-
         dger = MagicMock()
         dger.mes_inicio_estudo = 1
         dger.ano_inicio_estudo = 2020
@@ -966,8 +959,6 @@ class TestConvertElectricConstraints:
 
 def _valid_ree_reader():
     """A REE.DAT reader with a clean individualizado cutoff (no diagnostic)."""
-    from unittest.mock import MagicMock
-
     ree = MagicMock()
     ree.rees = pd.DataFrame(
         {
@@ -989,8 +980,6 @@ class TestConvertElectricConstraintsEmission:
         """One hydro-unmapped term from a formula and one from an
         RE.DAT-only constraint both land in the same diagnostic, with the
         Source column distinguishing them."""
-        from unittest.mock import MagicMock
-
         indices = tmp_path / "indices.csv"
         indices.write_text(
             "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
@@ -1056,8 +1045,6 @@ class TestConvertElectricConstraintsEmission:
         _assert_no_repo_internal_leaks(collected)
 
     def test_interchange_no_line_recorded(self, tmp_path: Path) -> None:
-        from unittest.mock import MagicMock
-
         indices = tmp_path / "indices.csv"
         indices.write_text(
             "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
@@ -1104,8 +1091,6 @@ class TestConvertElectricConstraintsEmission:
         _assert_no_repo_internal_leaks(collected)
 
     def test_malformed_term_recorded(self, tmp_path: Path) -> None:
-        from unittest.mock import MagicMock
-
         indices = tmp_path / "indices.csv"
         indices.write_text(
             "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
@@ -1156,8 +1141,6 @@ class TestConvertElectricConstraintsEmission:
         """Two constraint codes hit the two ``electric-constraint-skipped``
         reasons: code 1 has only an unmapped hydro term (no valid terms);
         code 2 has a valid expression but a horizon carrying no bound rows."""
-        from unittest.mock import MagicMock
-
         indices = tmp_path / "indices.csv"
         indices.write_text(
             "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
@@ -1209,8 +1192,6 @@ class TestConvertElectricConstraintsEmission:
     def test_electric_penalty_unreadable_records_exception_text(
         self, tmp_path: Path
     ) -> None:
-        from unittest.mock import MagicMock
-
         class _BadPenalid:
             @property
             def penalidades(self) -> pd.DataFrame:
@@ -1263,8 +1244,6 @@ class TestConvertElectricConstraintsEmission:
         _assert_no_repo_internal_leaks(collected)
 
     def test_re_dat_unreadable_records_diagnostic(self, tmp_path: Path) -> None:
-        from unittest.mock import MagicMock
-
         indices = tmp_path / "indices.csv"
         indices.write_text(
             "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
@@ -1314,8 +1293,6 @@ class TestConvertElectricConstraintsEmission:
         _assert_no_repo_internal_leaks(collected)
 
     def test_individualizado_cutoff_unknown_no_entries(self, tmp_path: Path) -> None:
-        from unittest.mock import MagicMock
-
         indices = tmp_path / "indices.csv"
         indices.write_text(
             "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
@@ -1402,8 +1379,6 @@ LIMITES POR GRUPO
 
 def _make_dger_mock_for_agrint():
     """Dger mock for study starting Jan 2020, 1 year."""
-    from unittest.mock import MagicMock
-
     dger = MagicMock()
     dger.mes_inicio_estudo = 1
     dger.ano_inicio_estudo = 2020
@@ -1534,8 +1509,6 @@ class TestConvertAgrintConstraints:
         future-dated agrint.dat entries (the source model convention — the pmo.dat
         "LIMITES DOS AGRUPAMENTOS DE INTERCAMBIO" POS row is flat at the last study
         December value)."""
-        from unittest.mock import MagicMock
-
         content = (
             "AGRUPAMENTOS DE INTERCAMBIO\n"
             " #AG A   B   COEF\n"
@@ -1864,3 +1837,70 @@ class TestConstraintsNoLongerBridgesLegacyWarning:
         assert len(result) == 1
         assert result[0].code == "legacy-warning"
         assert result[0].summary == "some other warning"
+
+
+# ---------------------------------------------------------------------------
+# Tests: electric constraint validity windows
+# ---------------------------------------------------------------------------
+
+_RE_COLUMNS = (
+    "conjunto",
+    "mes_inicio",
+    "ano_inicio",
+    "mes_fim",
+    "ano_fim",
+    "patamar",
+    "restricao",
+)
+
+
+def test_re_dat_bound_covers_only_its_declared_window(tmp_path: Path) -> None:
+    # A patamar-0 row over 2020 plus a narrower patamar-2 row (March-May),
+    # inside a three-year horizon.
+    reader = MagicMock()
+    reader.usinas_conjuntos = pd.DataFrame({"conjunto": [1], "codigo_usina": [10]})
+    reader.restricoes = pd.DataFrame(
+        [(1, 1, 2020, 12, 2020, 0, 500.0), (1, 3, 2020, 5, 2020, 2, 300.0)],
+        columns=list(_RE_COLUMNS),
+    )
+    files = make_nw_files(tmp_path, re_dat=tmp_path / "RE.DAT")
+
+    _, bounds = _parse_re_dat(make_case(files, re_dat=reader), 2020, 1, 36, 3)
+    stage_bounds = bounds[1]
+
+    assert set(stage_bounds) == {(sid, b) for sid in range(12) for b in range(3)}
+    assert [stage_bounds[(2, b)] for b in range(3)] == [500.0, 300.0, 500.0]
+    assert [stage_bounds[(5, b)] for b in range(3)] == [500.0, 500.0, 500.0]
+
+
+def test_restricao_eletrica_bounds_stop_at_the_declared_end(tmp_path: Path) -> None:
+    # Declared for the first quarter of a three-year horizon whose
+    # individualizado period ends in December 2020.
+    (tmp_path / "indices.csv").write_text(
+        "RESTRICAO-ELETRICA-ESPECIAL;Descricao;restricao-eletrica.csv\n",
+        encoding="latin-1",
+    )
+    (tmp_path / "restricao-eletrica.csv").write_text(
+        "RE;1;1.0ger_usih(10)\n"
+        "RE-HORIZ-PER;1;2020/01;2020/03\n"
+        "RE-LIM-FORM-PER-PAT;1;2020/01;2020/03;1;50.;200.\n",
+        encoding="latin-1",
+    )
+    dger = MagicMock(
+        mes_inicio_estudo=1,
+        ano_inicio_estudo=2020,
+        num_anos_estudo=3,
+        num_anos_pos_estudo=0,
+    )
+    sistema = MagicMock(limites_intercambio=None, custo_deficit=None)
+    case = make_case(
+        make_nw_files(tmp_path), dger=dger, sistema=sistema, ree=_valid_ree_reader()
+    )
+    id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[10], thermal_codes=[])
+
+    result = convert_electric_constraints(case, id_map)
+
+    assert result is not None
+    df = result[1].to_pandas()
+    assert set(df[df["bound_upper"].notna()]["stage_id"]) == {0, 1, 2}
+    assert set(df[df["bound_lower"].notna()]["stage_id"]) == {0, 1, 2}

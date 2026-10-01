@@ -317,7 +317,6 @@ def synthetic_roundtrip(
         warm_start_cuts=0,
         rng_seed=0,
         created_at=_CREATED_AT,
-        cobre_version=cobre.__version__,
         season_manifest=manifest.season_manifest,
     )
     write_boundary_checkpoint(boundary_dir, stage_cuts_payload, metadata)

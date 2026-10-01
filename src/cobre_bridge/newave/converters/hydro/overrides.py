@@ -23,10 +23,17 @@ from cobre_bridge.newave.horizon import POST_STUDY_YEAR
 _LOG = logging.getLogger(__name__)
 
 
-# Temporal override types extracted from MODIF.DAT.
-_TEMPORAL_OVERRIDE_TYPES = frozenset(
-    {"VAZMINT", "VMAXT", "VMINT", "CFUGA", "CMONT", "TURBMINT", "TURBMAXT"}
-)
+# Temporal (dated) MODIF.DAT record types and the attribute holding each value.
+_TEMPORAL_VALUE_ATTR = {
+    "VAZMINT": "vazao",
+    "VMAXT": "volume",
+    "VMINT": "volume",
+    "CFUGA": "nivel",
+    "CMONT": "nivel",
+    "TURBMINT": "turbinamento",
+    "TURBMAXT": "turbinamento",
+}
+_TEMPORAL_OVERRIDE_TYPES = frozenset(_TEMPORAL_VALUE_ATTR)
 
 
 def _raw_unit(rec: object) -> str:
@@ -44,6 +51,15 @@ def _volume_unit(rec: object) -> str | None:
     if unit == "%":
         return "%"
     return None
+
+
+def _polynomial_coefficients(raw: list[float | None]) -> list[float]:
+    """The coefficients of a MODIF.DAT polynomial record, a0 first.
+
+    A blank field is a zero coefficient, not a missing one: a low-order
+    polynomial leaves its tail blank instead of spelling out ``0.``.
+    """
+    return [0.0 if pd.isna(value) else float(value) for value in raw]
 
 
 def percent_of_useful_volume(percent: float, vol_min: float, vol_max: float) -> float:
@@ -84,10 +100,9 @@ def _apply_permanent_overrides(
 ) -> pd.DataFrame:
     """Apply MODIF.DAT permanent overrides to the hidr.dat cadastro.
 
-    Reads ``MODIF.DAT`` from *case* and
-    applies permanent override records — VAZMIN, VOLMAX, VOLMIN, NUMCNJ,
-    NUMMAQ — to a *copy* of *cadastro*.  The original DataFrame is not
-    mutated.
+    Reads ``MODIF.DAT`` from *case* and applies its permanent (undated)
+    override records to a *copy* of *cadastro*.  The original DataFrame is
+    not mutated.
 
     Parameters
     ----------
@@ -170,16 +185,27 @@ def _apply_permanent_overrides(
                 n_maq = int(rec.numero_maquinas)
                 result.loc[code, f"maquinas_conjunto_{set_num}"] = n_maq
 
-            elif type_name in ("VOLCOTA", "COTARE"):
-                # VOLCOTA/COTARE are not present in the example case; the spec
-                # mentions them but the inewave API does not expose them as
-                # separate methods in the tested version.
-                unsupported_perm.append((code, type_name))
+            elif type_name == "POTEFE":
+                # ``potencia_nominal_conjunto_*`` is the conjunto's POTEF.
+                set_num = int(rec.conjunto)
+                result.loc[code, f"potencia_nominal_conjunto_{set_num}"] = float(
+                    rec.potencia
+                )
+
+            elif type_name == "VOLCOTA":
+                result.loc[code, [f"a{i}_volume_cota" for i in range(5)]] = (
+                    _polynomial_coefficients(rec.polinomio_volume_cota)
+                )
+
+            elif type_name == "COTAREA":
+                result.loc[code, [f"a{i}_cota_area" for i in range(5)]] = (
+                    _polynomial_coefficients(rec.polinomio_cota_area)
+                )
 
             elif type_name == "DefaultRegister":
-                # inewave emits DefaultRegister for records it does not model
-                # (e.g. COTAREA). These are benign for the conversion, so log at
-                # debug level only — no user-facing warning.
+                # inewave emits DefaultRegister for records it does not model.
+                # These are benign for the conversion, so log at debug level
+                # only — no user-facing warning.
                 _LOG.debug(
                     "MODIF.DAT contains an unmodeled record (DefaultRegister)"
                     " for plant %d; skipping.",
@@ -248,8 +274,7 @@ def read_cadastro(case: NewaveCase) -> pd.DataFrame:
     -------
     pd.DataFrame
         The ``Hidr.cadastro`` DataFrame indexed by ``codigo_usina`` with all
-        permanent MODIF.DAT overrides (VAZMIN, VOLMAX, VOLMIN, NUMCNJ,
-        NUMMAQ) already applied.
+        permanent MODIF.DAT overrides already applied.
     """
     cadastro = case.hidr.cadastro
     return _apply_permanent_overrides(cadastro, case)
@@ -263,7 +288,13 @@ def _extract_temporal_overrides(
     Reads ``MODIF.DAT`` and returns a dict keyed by plant code.  Each value
     is a list of override dicts in file order::
 
-        {"type": str, "month": int, "year": int, "value": float}
+        {"type": str, "month": int, "year": int | None,
+         "period": "PRE" | "POS" | None, "value": float}
+
+    A VAZMINT record may mark its year field ``PRE`` (pre-study period) or
+    ``POS`` (post-study period); it then carries ``year=None`` and that
+    ``period``. A VAZMINT record with no month, or with neither a year nor a
+    marker, is skipped and reported.
 
     For CFUGA/CMONT the ``"value"`` field is the level in metres.  For
     TURBMINT/TURBMAXT it is the turbined flow in m³/s and for VAZMINT the flow
@@ -299,7 +330,7 @@ def _extract_temporal_overrides(
         return result
 
     # Loop-accumulate-then-emit-once (see _apply_permanent_overrides above).
-    unknown_temporal: list[tuple[int, str]] = []
+    undated: list[tuple[int, str]] = []
     unit_unknown: list[tuple[int, str, str]] = []
 
     for usina_rec in usina_records:
@@ -313,32 +344,35 @@ def _extract_temporal_overrides(
             if type_name not in _TEMPORAL_OVERRIDE_TYPES:
                 continue
 
-            data = rec.data_inicio
-            month = int(data.month)
-            year = int(data.year)
-
+            # VMAXT/VMINT carry a unit column ('h' hm³ or '%' of useful volume);
+            # a record with no recognisable unit is taken as '%' and reported.
             unit: str | None = None
-            if type_name in ("VAZMINT",):
-                value = float(rec.vazao)
-            elif type_name in ("VMAXT", "VMINT"):
-                value = float(rec.volume)
+            if type_name in ("VMAXT", "VMINT"):
                 unit = _volume_unit(rec)
                 if unit is None:
                     unit_unknown.append((code, type_name, _raw_unit(rec)))
                     unit = "%"
-            elif type_name in ("CFUGA", "CMONT"):
-                value = float(rec.nivel)
-            elif type_name in ("TURBMINT", "TURBMAXT"):
-                value = float(rec.turbinamento)
+
+            # Only VAZMINT admits the PRE/POS markers, so only it reads them.
+            if type_name == "VAZMINT":
+                period = rec.periodo
+                start = rec.data_inicio
+                if rec.mes is None or (period is None and start is None):
+                    undated.append((code, type_name))
+                    continue
+                month = int(rec.mes)
+                year = None if period is not None else int(start.year)
             else:
-                unknown_temporal.append((code, type_name))
-                continue
+                period = None
+                month = int(rec.data_inicio.month)
+                year = int(rec.data_inicio.year)
 
             override: dict = {
                 "type": type_name,
                 "month": month,
                 "year": year,
-                "value": value,
+                "period": period,
+                "value": float(getattr(rec, _TEMPORAL_VALUE_ATTR[type_name])),
             }
             if unit is not None:
                 override["unit"] = unit
@@ -347,20 +381,21 @@ def _extract_temporal_overrides(
         if plant_overrides:
             result[code] = plant_overrides
 
-    if unknown_temporal:
+    if undated:
         emit(
             Diagnostic(
-                code="modif-temporal-override-unknown",
+                code="modif-temporal-override-undated",
                 severity=Severity.WARNING,
                 category="Cadastro overrides",
-                title=f"Unknown temporal override type(s) ({len(unknown_temporal)})",
+                title=f"Dated override(s) without a date ({len(undated)})",
                 summary=(
-                    f"MODIF.DAT contains {len(unknown_temporal)} unknown "
-                    "temporal override record(s); skipping."
+                    f"MODIF.DAT contains {len(undated)} dated override record(s) "
+                    "with no month, or with neither a year nor a PRE/POS marker; "
+                    "skipping."
                 ),
                 table=DiagnosticTable(
                     columns=["Code", "Type"],
-                    rows=[[code, type_name] for code, type_name in unknown_temporal],
+                    rows=[[code, type_name] for code, type_name in undated],
                     justify=["right", "left"],
                 ),
             ),

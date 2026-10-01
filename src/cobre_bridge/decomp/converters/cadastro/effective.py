@@ -9,7 +9,7 @@ import pandas as pd
 from idecomp.decomp.modelos.dadger import ACCOTVOL, ACNUMJUS, ACNUMPOS
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from idecomp.decomp import Dadger
 
@@ -250,6 +250,69 @@ def storage_envelope(effective: EffectiveCadastro, code: int) -> tuple[float, fl
         for stage_index in range(effective.n_stages)
     ]
     return (min(r[0] for r in ranges), max(r[1] for r in ranges))
+
+
+def is_reservoir(effective: EffectiveCadastro, code: int) -> bool:
+    """True iff plant *code* is a reservoir under the DECOMP predicate.
+
+    DECOMP classifies both monthly-regulating (``"M"``) and weekly-regulating
+    (``"S"``) plants as reservoirs; only ``"D"`` is run-of-river. This differs
+    from the source model's monthly predicate (``"M"`` only).
+    """
+    if code not in effective.base.index:
+        return False
+    return str(effective.base.loc[code, "tipo_regulacao"]).strip() in ("M", "S")
+
+
+def unregulated_runofriver_codes(
+    effective: EffectiveCadastro,
+    operated_codes: Iterable[int],
+) -> set[int]:
+    """Operated run-of-river codes with no reservoir upstream in the cascade.
+
+    A plant *code* (from *operated_codes*) qualifies iff it is run-of-river
+    (``tipo_regulacao == "D"``) and no reservoir (:func:`is_reservoir`) sits
+    **upstream** of it — equivalently, it lies on the headwater side of the
+    first reservoir in its cascade. These are the plants whose minimum-outflow
+    restriction is released to avoid infeasibility on a stage/scenario with
+    zero inflow.
+
+    The upstream test walks *downstream* from every operated reservoir and
+    marks each ``D`` plant reached as *not* unregulated; every operated ``D``
+    plant not so marked lies above the first reservoir (or in a cascade with
+    no reservoir at all) and qualifies. Topology is the *effective* (post-``AC
+    NUMJUS``) chain at the initial stage — ``tipo_regulacao`` is a
+    base-cadastro scalar and the cascade is read stage-representative, as
+    every other cascade consumer does. ``0`` is the sink; a cycle or invalid
+    link ends the walk.
+    """
+    operated = set(operated_codes)
+
+    def _is_runofriver(code: int) -> bool:
+        if code not in effective.base.index:
+            return False
+        return str(effective.base.loc[code, "tipo_regulacao"]).strip() == "D"
+
+    runofriver = {code for code in operated if _is_runofriver(code)}
+
+    # A reservoir bounds the D plants below it, not above it: walking
+    # downstream from every operated reservoir, every D plant on that path is
+    # downstream of a reservoir and must keep its floor.
+    below_a_reservoir: set[int] = set()
+    for code in operated:
+        if not is_reservoir(effective, code):
+            continue
+        visited = {code}
+        current = effective.downstream_plant(code, 0)
+        while (
+            current != 0 and current not in visited and current in effective.base.index
+        ):
+            visited.add(current)
+            if current in runofriver:
+                below_a_reservoir.add(current)
+            current = effective.downstream_plant(current, 0)
+
+    return runofriver - below_a_reservoir
 
 
 @dataclass(frozen=True)

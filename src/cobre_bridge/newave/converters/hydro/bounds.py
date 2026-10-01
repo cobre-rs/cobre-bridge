@@ -17,6 +17,7 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.hydro_units import rated_capacity
 from cobre_bridge.core.pandas_utils import is_na
 from cobre_bridge.core.productivity import (
     KTURB_BY_TIPO_TURBINA,
@@ -26,7 +27,10 @@ from cobre_bridge.core.productivity import (
 )
 from cobre_bridge.core.tolerances import BIG_M
 from cobre_bridge.newave.case import NewaveCase
-from cobre_bridge.newave.converters.hydro.geometry import _read_volref_saz
+from cobre_bridge.newave.converters.hydro.geometry import (
+    _expansion_configs,
+    _read_volref_saz,
+)
 from cobre_bridge.newave.converters.hydro.overrides import (
     _apply_permanent_overrides,
     _extract_temporal_overrides,
@@ -39,8 +43,12 @@ from cobre_bridge.newave.converters.hydro.productivity import (
     _per_stage_productivities,
     _total_study_stages,
 )
-from cobre_bridge.newave.filling import filling_schedule, online_machines
-from cobre_bridge.newave.filling import stage_id as filling_stage_id
+from cobre_bridge.newave.filling import (
+    exph_unit_rows,
+    filling_schedule,
+    hreg_with_machines,
+    online_machines,
+)
 from cobre_bridge.newave.horizon import seasonal_step_function
 from cobre_bridge.newave.id_map import NewaveIdMap
 from cobre_bridge.newave.plants import fictitious_codes, filling_hydro_codes
@@ -112,29 +120,6 @@ def _compute_max_turbined_simple(hreg: pd.Series, name: str) -> tuple[float, flo
     return max_turbined * availability, max_generation * availability
 
 
-def _compute_max_turbined_rated(hreg: pd.Series) -> tuple[float, float]:
-    """Return ``(max_turbined, max_generation)`` as the rated nameplate capacity:
-    ``Σ_c (n_c · q_nom_c)`` for flow and ``Σ_c (n_c · p_nom_c)`` for power, with
-    **no** TEIF/IP availability derating and no head correction.
-
-    ``convert_hydros`` emits the power value ``[1]`` as every plant's ``max_generation``
-    (independent of the production function): it equals the source model's
-    installed-capacity ceiling / FPHA ``GHmax`` exactly (verified TUCURUI 7445, QUEBRA
-    QUEIX 120). The flow value ``[0]`` (``Σ n·q_nom``) is the source model's
-    fitting-grid ``Qmax``, **not** the operational turbined cap — the emitted
-    ``max_turbined`` comes from :func:`_compute_max_turbined_head_corrected` instead
-    (the head-corrected engolimento that actually binds in dispatch).
-    """
-    n_sets = int(hreg["numero_conjuntos_maquinas"])
-    max_turbined = 0.0
-    max_generation = 0.0
-    for i in range(1, n_sets + 1):
-        n_machines = int(hreg[f"maquinas_conjunto_{i}"])
-        max_turbined += float(hreg[f"vazao_nominal_conjunto_{i}"]) * n_machines
-        max_generation += float(hreg[f"potencia_nominal_conjunto_{i}"]) * n_machines
-    return max_turbined, max_generation
-
-
 def _compute_max_turbined_head_corrected(
     hreg: pd.Series, name: str, *, h_op_override: float | None = None
 ) -> tuple[float, float]:
@@ -156,7 +141,7 @@ def _compute_max_turbined_head_corrected(
     n·q_nom`` = 117.0 overshoots it by 3.5%). ``convert_hydros`` emits the flow value
     ``[0]`` as ``max_turbined``; the ``[1]`` it returns is the availability-derated
     power and is no longer used for the emitted ``max_generation`` (that comes from
-    :func:`_compute_max_turbined_rated`).
+    :func:`~cobre_bridge.core.hydro_units.rated_capacity`).
 
     For each machine set *c* with nominal head ``h_nom_c``, nominal flow
     ``q_nom_c`` and number of units ``n_c``, the effective rated flow at
@@ -325,11 +310,11 @@ def _reduced_caps(
     a skip).
     """
     n_sets = int(hreg["numero_conjuntos_maquinas"])
-    hreg_copy = hreg.copy()
-    for c in range(1, n_sets + 1):
-        hreg_copy[f"maquinas_conjunto_{c}"] = int(online.get(c, 0))
+    hreg_copy = hreg_with_machines(
+        hreg, {c: online.get(c, 0) for c in range(1, n_sets + 1)}
+    )
     max_turbined = _compute_max_turbined_head_corrected(hreg_copy, name)[0]
-    max_generation = _compute_max_turbined_rated(hreg_copy)[1]
+    max_generation = rated_capacity(hreg_copy)[1]
     return max_turbined, max_generation
 
 
@@ -347,10 +332,12 @@ def convert_turbined_bounds_head_corrected(
     high-flow/low-head stages it under-caps turbining and forces spill (lost hydro →
     extra thermal). This emits a per-(hydro, stage) ``max_turbined`` override using
     the SAME per-stage head (``h = ρ_eq / ρ_esp``) that drives productivity, so the
-    two stay consistent.
+    two stay consistent. An expanding plant is rated with the machines in service
+    at each stage; one with no per-stage head gets rows only before its last
+    machine enters.
 
     Returns a ``(hydro_id, stage_id, max_turbined_m3s)`` table for the affected
-    plants/stages, or ``None`` when no plant has a per-stage head.
+    plants/stages, or ``None`` when no plant has a per-stage head or a machine ramp.
     """
     cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
     confhd_codes = [int(r["codigo_usina"]) for _, r in case.active_hydros.iterrows()]
@@ -362,7 +349,8 @@ def convert_turbined_bounds_head_corrected(
         if any(o["type"] in ("CFUGA", "CMONT") for o in overrides)
     }
     seasonal_volref = _read_volref_saz(case)
-    if not drop_overrides and not seasonal_volref:
+    expansion = _expansion_configs(case, cadastro)
+    if not drop_overrides and not seasonal_volref and not expansion:
         return None
 
     total_stages = _total_study_stages(case)
@@ -376,7 +364,8 @@ def convert_turbined_bounds_head_corrected(
     for newave_code in sorted(confhd_codes):
         overrides = drop_overrides.get(newave_code, [])
         plant_seasonal = seasonal_volref.get(newave_code)
-        if not overrides and not plant_seasonal:
+        config = expansion.get(newave_code)
+        if not overrides and not plant_seasonal and config is None:
             continue
         if newave_code not in cadastro.index:
             continue
@@ -385,11 +374,23 @@ def convert_turbined_bounds_head_corrected(
         except KeyError:
             continue
         hreg = cadastro.loc[newave_code]
+        name = str(hreg.get("nome_usina", newave_code))
+        if config is not None and not overrides and not plant_seasonal:
+            # Rated at the reference head the declared value uses, never a
+            # productivity-derived one, which rates the same machines differently.
+            for stage_id in range(min(config.full_online_stage, total_stages)):
+                hydro_ids.append(hydro_id)
+                stage_ids.append(stage_id)
+                max_turbined_vals.append(
+                    _compute_max_turbined_head_corrected(
+                        config.hreg_at(hreg, stage_id), name
+                    )[0]
+                )
+            continue
         rho_esp_raw = hreg.get("produtibilidade_especifica")
         if rho_esp_raw is None or is_na(rho_esp_raw) or float(rho_esp_raw) <= 0.0:
             continue
         rho_esp = float(rho_esp_raw)
-        name = str(hreg.get("nome_usina", newave_code))
 
         legacy_base = _compute_productivity(hreg)
         per_stage_prod = _per_stage_productivities(
@@ -404,8 +405,9 @@ def convert_turbined_bounds_head_corrected(
             if prod <= 0.0:
                 continue
             h_op = prod / rho_esp
+            hreg_stage = hreg if config is None else config.hreg_at(hreg, stage_id)
             max_turbined = _compute_max_turbined_head_corrected(
-                hreg, name, h_op_override=h_op
+                hreg_stage, name, h_op_override=h_op
             )[0]
             hydro_ids.append(hydro_id)
             stage_ids.append(stage_id)
@@ -438,8 +440,8 @@ def _per_stage_turbined_envelope(
     two views of the same table, not two formulas that happen to agree today.
 
     Returns an empty dict when no plant has a per-stage head (no CFUGA/CMONT
-    temporal overrides and no seasonal ``VOLREF_SAZ`` row), so callers must
-    treat a missing key as "no per-stage variation", not as zero.
+    temporal overrides and no seasonal ``VOLREF_SAZ`` row) or a machine ramp,
+    so callers must treat a missing key as "no per-stage variation", not as zero.
     """
     table = convert_turbined_bounds_head_corrected(case, id_map)
     if table is None:
@@ -709,11 +711,9 @@ def convert_storage_bounds(
     # Read confhd for the list of active plant codes.
     confhd_codes = case.active_hydro_codes
 
-    # Determine whether the case has any NE-with-filling plant (admission
-    # predicate). The max_generation_mw column is gated on this:
-    # EX-only cases keep the byte-identical 8-column schema.
     exph_df = case.exph.expansoes if case.exph is not None else None
     filling_codes = filling_hydro_codes(case.confhd.usinas, exph_df)
+    expansion = _expansion_configs(case, cadastro)
 
     # Extract temporal overrides — empty dict when MODIF.DAT is absent,
     # which is fine because GHMIN.DAT alone can still produce per-stage
@@ -732,17 +732,21 @@ def convert_storage_bounds(
         *,
         seasonalize: bool,
     ) -> dict[int, float]:
-        """Thin adapter over :func:`cobre_bridge.newave.horizon.seasonal_step_function`.
-
-        Maps MODIF override dicts to ``(year, month, value)`` change-points. The
-        forward-fill, big-M clearing, and seasonalize-vs-freeze post-study logic
-        live in the shared helper.
+        """Thin adapter over :func:`cobre_bridge.newave.horizon.seasonal_step_function`:
+        dated records become ``(year, month, value)`` change-points and
+        ``PRE``/``POS`` records ``(month, value)`` steps.
         """
+
+        def steps(period: str) -> list[tuple[int, float]]:
+            return [(r["month"], r["value"]) for r in recs if r["period"] == period]
+
         return seasonal_step_function(
-            [(int(r["year"]), int(r["month"]), float(r["value"])) for r in recs],
+            [(r["year"], r["month"], r["value"]) for r in recs if r["period"] is None],
             transform,
             seasonalize=seasonalize,
             horizon=horizon,
+            pre_recs=steps("PRE"),
+            pos_recs=steps("POS"),
         )
 
     # GHMIN.DAT per-stage minimums.  These are not MODIF.DAT overrides
@@ -772,8 +776,11 @@ def convert_storage_bounds(
     def _identity(val: float) -> float:
         return val
 
-    plant_codes_with_data = set(temporal_overrides) | set(ghmin_by_plant_stage)
+    plant_codes_with_data = (
+        set(temporal_overrides) | set(ghmin_by_plant_stage) | set(expansion)
+    )
     for newave_code in sorted(plant_codes_with_data):
+        config = expansion.get(newave_code)
         overrides = temporal_overrides.get(newave_code, [])
         vmaxt = [o for o in overrides if o["type"] == "VMAXT"]
         vmint = [o for o in overrides if o["type"] == "VMINT"]
@@ -782,7 +789,10 @@ def convert_storage_bounds(
         vazmint = [o for o in overrides if o["type"] == "VAZMINT"]
         ghmin_by_stage = ghmin_by_plant_stage.get(newave_code, {})
 
-        if not any((vmaxt, vmint, turbmaxt, turbmint, vazmint, ghmin_by_stage)):
+        if (
+            not any((vmaxt, vmint, turbmaxt, turbmint, vazmint, ghmin_by_stage))
+            and config is None
+        ):
             continue
 
         try:
@@ -797,6 +807,16 @@ def convert_storage_bounds(
         vol_min = float(hreg["volume_minimo"])
         vol_max = float(hreg["volume_maximo"])
         useful = vol_max - vol_min
+
+        # An expanding plant's ramp caps land on the SAME ``(hydro, stage)`` row
+        # as any MODIF/GHMIN bound below, never a competing one, so the de-dup
+        # pass never has to choose between a ramp cap and a VMINT floor.
+        ramp_generation: dict[int, float] = {}
+        if config is not None:
+            for ramp_stage in range(min(config.full_online_stage, total_stages)):
+                ramp_generation[ramp_stage] = rated_capacity(
+                    config.hreg_at(hreg, ramp_stage)
+                )[1]
 
         def _storage_hm3(rec: dict) -> dict | None:
             """The record with its volume in hm³; ``None`` drops a percentage
@@ -833,6 +853,7 @@ def convert_storage_bounds(
             | set(turbmint_by_stage)
             | set(vazmint_by_stage)
             | set(ghmin_by_stage)
+            | set(ramp_generation)
         )
         for stage_id in all_stages:
             hydro_ids.append(hydro_id)
@@ -843,10 +864,7 @@ def convert_storage_bounds(
             min_turbined_vals.append(turbmint_by_stage.get(stage_id))
             min_outflow_vals.append(vazmint_by_stage.get(stage_id))
             min_generation_vals.append(ghmin_by_stage.get(stage_id))
-            # Column present but unpopulated here; the filling-plant unit-ramp
-            # branch below populates per-stage ramp caps. None mirrors
-            # min_generation null handling.
-            max_generation_vals.append(None)
+            max_generation_vals.append(ramp_generation.get(stage_id))
             is_ramp_vals.append(False)
 
     # Filling-plant unit-ramp branch: a ``NE``-with-filling plant operates from
@@ -889,21 +907,7 @@ def convert_storage_bounds(
                 start_month,
             )
 
-            # inewave parses ``data_entrada_operacao`` (the unit's online date) and
-            # ``conjunto_maquina_entrada`` (its machine group) independently, so a
-            # unit row can carry a conjunto with a BLANK date (``NaT``) — which would
-            # make ``ud.year``/``ud.month`` NaN and crash ``range(...)`` downstream.
-            # Filter on the online date (the defining field) and skip a row missing
-            # the conjunto: either alone cannot define an online stage.
-            unit_rows: list[tuple[int, int]] = []
-            unit_df = rows.loc[rows["data_entrada_operacao"].notna()]
-            for _, ur in unit_df.iterrows():
-                conjunto = ur["conjunto_maquina_entrada"]
-                if pd.isna(conjunto):
-                    continue
-                ud = ur["data_entrada_operacao"]
-                usid = filling_stage_id(ud.year, ud.month, start_year, start_month)
-                unit_rows.append((int(conjunto), usid))
+            unit_rows = exph_unit_rows(exph_df, code, start_year, start_month)
             if not unit_rows:
                 continue
 
@@ -933,9 +937,9 @@ def convert_storage_bounds(
 
     # Resolve duplicate ``(hydro_id, stage_id)`` pairs: a ramp row wins over a
     # MODIF/GHMIN row at the same key (the explicit 0-cap during filling must not
-    # be undercut by a MODIF/GHMIN minimum). EX-only cases produce no ramp rows
-    # (``is_ramp_vals`` all False), so every key is unique and this is a no-op,
-    # keeping the regression-guard output byte-identical.
+    # be undercut by a MODIF/GHMIN minimum). A case with no filling plant
+    # produces no ramp rows (``is_ramp_vals`` all False), so every key is unique
+    # and this is a no-op, keeping the regression-guard output byte-identical.
     chosen: dict[tuple[int, int], int] = {}
     for i, (h, s, ramp) in enumerate(zip(hydro_ids, stage_ids, is_ramp_vals)):
         key = (h, s)
@@ -964,10 +968,10 @@ def convert_storage_bounds(
         "min_outflow_m3s": pa.array(min_outflow_vals, type=pa.float64()),
         "min_generation_mw": pa.array(min_generation_vals, type=pa.float64()),
     }
-    # Gate the column on filling-plant presence: EX-only cases keep the
-    # existing 8-column schema byte-identical (the regression guard depends
-    # on this); cobre's parse_hydro_bounds tolerates the absent column.
-    if filling_codes:
+    # Gate the column on a filling or expanding plant: a case with neither keeps
+    # the 8-column schema byte-identical (the regression guard depends on this);
+    # cobre's parse_hydro_bounds tolerates the absent column.
+    if filling_codes or expansion:
         columns["max_generation_mw"] = pa.array(max_generation_vals, type=pa.float64())
     return pa.table(columns).sort_by(
         [("hydro_id", "ascending"), ("stage_id", "ascending")]

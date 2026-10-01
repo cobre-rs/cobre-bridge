@@ -59,12 +59,16 @@ def _make_stages_data(
 def _make_inflow_history(
     rows: list[tuple[int, str, float]],
 ) -> pd.DataFrame:
-    """Build an inflow_history DataFrame from (hydro_id, date_str, value_m3s) rows."""
-    hydro_ids, dates, values = zip(*rows) if rows else ([], [], [])
+    """Build a windowed inflow_history DataFrame (the converted case's
+    ``scenarios/inflow_history.parquet`` shape) from (hydro_id, month_start,
+    value_m3s) rows, one calendar-month window per row."""
+    hydro_ids, starts, values = zip(*rows) if rows else ([], [], [])
+    start = pd.to_datetime(list(starts))
     return pd.DataFrame(
         {
             "hydro_id": list(hydro_ids),
-            "date": pd.to_datetime(list(dates)),
+            "start_date": start.date,
+            "end_date": (start + pd.offsets.MonthBegin(1)).date,
             "value_m3s": list(values),
         }
     )
@@ -92,7 +96,7 @@ def _make_data(
     data.inflow_history = (
         inflow_history
         if inflow_history is not None
-        else pd.DataFrame(columns=["hydro_id", "date", "value_m3s"])
+        else pd.DataFrame(columns=["hydro_id", "start_date", "end_date", "value_m3s"])
     )
     data.inflow_stats_stoch = (
         inflow_stats_stoch
@@ -843,24 +847,22 @@ class TestExtractFittedCorrelation:
 class TestComputeEmpiricalCorrelation:
     """Unit tests for _compute_empirical_correlation."""
 
-    def _make_history(
-        self, n_hydros: int = 3, n_days_per_month: int = 15
-    ) -> pd.DataFrame:
-        """Synthetic inflow history with daily observations for 1 year.
-
-        Produces ``n_days_per_month`` rows per (month, hydro_id), giving
-        enough data points per month to satisfy the ``min_periods=10``
-        requirement in ``_compute_empirical_correlation``.
+    def _make_history(self, n_hydros: int = 3, n_years: int = 15) -> pd.DataFrame:
+        """Synthetic windowed inflow history: one calendar-month window per
+        hydro over *n_years* years, enough observations per month for the
+        ``min_periods=10`` requirement in ``_compute_empirical_correlation``.
         """
         rng = np.random.default_rng(99)
         rows: list[dict] = []
-        for month in range(1, 13):
-            for day in range(1, n_days_per_month + 1):
+        for year in range(2000, 2000 + n_years):
+            for month in range(1, 13):
+                start = pd.Timestamp(year=year, month=month, day=1)
                 for hid in range(n_hydros):
                     rows.append(
                         {
                             "hydro_id": hid,
-                            "date": pd.Timestamp(year=2000, month=month, day=day),
+                            "start_date": start.date(),
+                            "end_date": (start + pd.offsets.MonthBegin(1)).date(),
                             "value_m3s": float(rng.uniform(10, 1000)),
                         }
                     )
@@ -889,7 +891,9 @@ class TestComputeEmpiricalCorrelation:
 
     def test_empty_history_returns_none(self) -> None:
         """Empty inflow_history returns None."""
-        empty = pd.DataFrame(columns=["hydro_id", "date", "value_m3s"])
+        empty = pd.DataFrame(
+            columns=["hydro_id", "start_date", "end_date", "value_m3s"]
+        )
         assert _compute_empirical_correlation(empty, [0, 1, 2]) is None
 
     def test_single_hydro_returns_none(self) -> None:
@@ -920,7 +924,8 @@ class TestChartArOrderDistribution:
     The current implementation signature is:
         _chart_ar_order_distribution(fitting_report, hydro_meta)
 
-    The x-axis covers orders from 1 through max_order (no order-0 bin).
+    The x-axis covers orders from 1 through max_order, plus an order-0 bin
+    only when some hydro selects order 0.
     """
 
     # Minimal hydro_meta for tests that don't care about names.
@@ -979,6 +984,19 @@ class TestChartArOrderDistribution:
         fig = _chart_ar_order_distribution(fitting_report, self._EMPTY_HYDRO_META)
 
         assert list(fig.data[0].x) == [1, 2, 3]
+
+    def test_order_zero_gets_its_own_bin(self) -> None:
+        fitting_report = {
+            "hydros": {
+                "0": {"selected_order": 0},
+                "1": {"selected_order": 2},
+            }
+        }
+
+        fig = _chart_ar_order_distribution(fitting_report, self._EMPTY_HYDRO_META)
+
+        assert list(fig.data[0].x) == [0, 1, 2]
+        assert list(fig.data[0].y) == [1, 0, 1]
 
     def test_order_counts_correct(self) -> None:
         """Counts match the manually expected distribution.
@@ -1256,10 +1274,13 @@ class TestRenderSectionsDEF:
 
         assert "No noise data" in html
 
-    def test_section_f_empty_fitting_report_shows_fallback(self) -> None:
-        """Empty fitting_report shows fallback in section F."""
-        data = _make_data(fitting_report={})
+    @pytest.mark.parametrize("fitting_report", [{}, {"hydros": {}}])
+    def test_section_f_without_fitted_hydros_shows_fallback(
+        self, fitting_report: dict
+    ) -> None:
+        """A missing report, or one with no fitted hydro (no AR estimation),
+        shows the fallback instead of an empty chart."""
+        html = render(_make_data(fitting_report=fitting_report))
 
-        html = render(data)
-
-        assert "No fitting report available" in html
+        assert "No AR model was fitted for this case" in html
+        assert "v2-stoch-ar-order" not in html

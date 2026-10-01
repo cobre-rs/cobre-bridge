@@ -288,19 +288,24 @@ def render_checklist(
         target.print(line, soft_wrap=True)
 
     render_diagnostics(
-        result.diagnostics, console=diagnostics_console or console, quiet=quiet
+        result.diagnostics,
+        heading="Preflight notes",
+        console=diagnostics_console or console,
+        quiet=quiet,
     )
 
 
 def render_diagnostics(
     diagnostics: Sequence[Diagnostic],
     *,
+    heading: str,
     console: Console | None = None,
     quiet: bool = False,
 ) -> None:
     """Render diagnostics grouped by category, ordered INFO < WARNING < ERROR.
 
-    A one-line roll-up (``⚠ 2 warnings · 1 note``) precedes the per-category panels.
+    A one-line roll-up under *heading* (``⚠ Conversion notes: 2 warning(s) · 1
+    note(s)``) precedes the per-category panels.
     With *quiet* set, INFO-severity diagnostics are suppressed and only the roll-up
     plus warnings/errors are shown. Does nothing when there are no diagnostics.
     """
@@ -310,7 +315,7 @@ def render_diagnostics(
     target = console or get_console(stderr=True)
     shown = [d for d in diagnostics if not (quiet and d.severity is Severity.INFO)]
 
-    target.print(_rollup_line(diagnostics))
+    target.print(_rollup_line(diagnostics, heading))
     if not shown:
         return
 
@@ -324,8 +329,8 @@ def render_diagnostics(
         target.print(_diagnostic_panel(diag))
 
 
-def _rollup_line(diagnostics: Sequence[Diagnostic]) -> Text:
-    """Build the ``N errors · N warnings · N notes`` header line."""
+def _rollup_line(diagnostics: Sequence[Diagnostic], heading: str) -> Text:
+    """Build the ``<heading>: N errors · N warnings · N notes`` header line."""
     counts = {sev: 0 for sev in Severity}
     for diag in diagnostics:
         counts[diag.severity] += 1
@@ -344,7 +349,7 @@ def _rollup_line(diagnostics: Sequence[Diagnostic]) -> Text:
         else Severity.INFO
     ]
     summary = " · ".join(parts) if parts else "no findings"
-    return Text(f"{glyph} Conversion notes: {summary}", style="bold")
+    return Text(f"{glyph} {heading}: {summary}", style="bold")
 
 
 def _diagnostic_panel(diag: Diagnostic) -> Panel:

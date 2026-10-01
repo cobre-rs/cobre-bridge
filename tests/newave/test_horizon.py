@@ -122,3 +122,48 @@ def test_seasonal_step_function_freeze_vs_seasonal_post_study():
 def test_seasonal_step_function_empty_recs():
     h = study_horizon(_dger())
     assert seasonal_step_function([], lambda v: v, seasonalize=False, horizon=h) == {}
+
+
+def test_seasonal_step_function_pre_holds_until_first_study_record():
+    # Jan-start, 1 study year, no post-study. PRE steps Mar=100, Nov=200 over a
+    # repeating year: December (the month before the start) is in force at 200.
+    h = study_horizon(_dger(start_month=1, num_anos=1, num_anos_pos=0))
+    out = seasonal_step_function(
+        [(2024, 6, 300.0)],
+        lambda v: v,
+        seasonalize=False,
+        horizon=h,
+        pre_recs=[(3, 100.0), (11, 200.0)],
+    )
+    assert [out[s] for s in range(5)] == [200.0] * 5
+    assert all(out[s] == 300.0 for s in range(5, 12))
+
+
+def test_seasonal_step_function_pos_steps_wrap_and_replace_freeze():
+    # Jan-start, 1 study year, 2 post-study years. POS Jun=500, Dec=100: every
+    # post-study June-November is 500 and December-May wraps to 100, instead of
+    # freezing the last study value (300).
+    h = study_horizon(_dger(start_month=1, num_anos=1, num_anos_pos=2))
+    out = seasonal_step_function(
+        [(2024, 1, 300.0)],
+        lambda v: v,
+        seasonalize=False,
+        horizon=h,
+        pos_recs=[(6, 500.0), (12, 100.0)],
+    )
+    expected = [100.0] * 5 + [500.0] * 6 + [100.0]
+    assert [out[s] for s in range(12, 36)] == expected * 2
+
+
+def test_seasonal_step_function_big_m_steps_clear_their_months():
+    h = study_horizon(_dger(start_month=1, num_anos=1, num_anos_pos=1))
+    out = seasonal_step_function(
+        [],
+        lambda v: v,
+        seasonalize=False,
+        horizon=h,
+        pre_recs=[(1, BIG_M)],
+        pos_recs=[(1, 40.0), (7, BIG_M)],
+    )
+    assert all(s not in out for s in range(12))
+    assert [s for s in range(12, 24) if s in out] == list(range(12, 18))

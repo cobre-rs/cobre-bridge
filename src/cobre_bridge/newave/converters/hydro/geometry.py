@@ -1,5 +1,7 @@
 """Hydro geometry: the VHA volume->height->area table, seasonal reference-volume
-reads, and FPHA eligibility (a property of the volume->cota polynomial).
+reads, the machine configuration an expanding plant declares, and FPHA
+eligibility (the volume->cota polynomial, the specific productivity, and the
+rated capacity of that declared configuration).
 
 Depends only on :mod:`.overrides` within the package.
 """
@@ -14,8 +16,10 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
+from cobre_bridge.core.hydro_units import fpha_zero_capacity_diagnostic, rated_capacity
 from cobre_bridge.newave.case import NewaveCase
 from cobre_bridge.newave.converters.hydro.overrides import _apply_permanent_overrides
+from cobre_bridge.newave.filling import ExpansionConfig, exph_unit_rows
 from cobre_bridge.newave.id_map import NewaveIdMap
 
 _LOG = logging.getLogger(__name__)
@@ -24,13 +28,22 @@ _LOG = logging.getLogger(__name__)
 def _is_fpha_eligible(hreg: pd.Series) -> bool:
     """Whether a hydro plant can be fit by cobre's *computed* FPHA.
 
-    Requires a non-degenerate volume→cota polynomial (the forebay curve) and a
+    Requires a non-degenerate volume→cota polynomial (the forebay curve), a
     positive specific productivity ``rho_esp`` (needed to derive the
-    dimensionless turbine efficiency). Storage swing is **not** required:
-    run-of-river / zero-storage plants (``vmax == vmin``) emit a single VHA geometry row
-    and cobre fits them through the single-volume FPHA path (γ_V = 0), matching the
-    source model, which fits these plants with ``Npt_V = 1``.
+    dimensionless turbine efficiency), and a positive rated turbined flow
+    **and** rated power (:func:`~cobre_bridge.core.hydro_units.rated_capacity`
+    over the declared machine sets). cobre samples the fit on
+    ``[0, max_turbined]`` and clamps it at ``max_generation``, so a zero on
+    either side collapses the production cloud and aborts the fit. Storage
+    swing is **not** required: run-of-river / zero-storage plants
+    (``vmax == vmin``) emit a single VHA geometry row and cobre fits them
+    through the single-volume FPHA path (γ_V = 0), matching the source model,
+    which fits these plants with ``Npt_V = 1``.
     """
+    return _has_fpha_curve_inputs(hreg) and _has_rated_capacity(hreg)
+
+
+def _has_fpha_curve_inputs(hreg: pd.Series) -> bool:
     coeffs = [float(hreg[f"a{i}_volume_cota"]) for i in range(5)]
     if all(c == 0.0 for c in coeffs):
         return False
@@ -41,23 +54,86 @@ def _is_fpha_eligible(hreg: pd.Series) -> bool:
     return not math.isnan(rho_esp) and rho_esp > 0.0
 
 
+def _has_rated_capacity(hreg: pd.Series) -> bool:
+    max_turbined, max_generation = rated_capacity(hreg)
+    return max_turbined > 0.0 and max_generation > 0.0
+
+
+def _expansion_configs(
+    case: NewaveCase, cadastro: pd.DataFrame
+) -> dict[int, ExpansionConfig]:
+    """``{code: config}`` for every active ``EE`` plant with a machine still to enter.
+
+    *cadastro* is the permanent-override-corrected registry (the study-start
+    configuration); the uncorrected ``case.hidr.cadastro`` holds the final one.
+    """
+    exph_df = case.exph.expansoes if case.exph is not None else None
+    if exph_df is None or exph_df.empty:
+        return {}
+    registry = case.hidr.cadastro
+    horizon = case.horizon
+    configs: dict[int, ExpansionConfig] = {}
+    for _, row in case.active_hydros.iterrows():
+        code = int(row["codigo_usina"])
+        if str(row["usina_existente"]).strip() != "EE" or code not in cadastro.index:
+            continue
+        unit_rows = exph_unit_rows(
+            exph_df, code, horizon.start_year, horizon.start_month
+        )
+        if not unit_rows:
+            continue
+        final = registry.loc[code]
+        start = cadastro.loc[code]
+        n_final = int(final["numero_conjuntos_maquinas"])
+        n_start = int(start["numero_conjuntos_maquinas"])
+        configs[code] = ExpansionConfig(
+            registry_counts={
+                c: int(final[f"maquinas_conjunto_{c}"]) for c in range(1, n_final + 1)
+            },
+            start_counts={
+                c: int(start[f"maquinas_conjunto_{c}"]) if c <= n_start else 0
+                for c in range(1, n_final + 1)
+            },
+            unit_rows=unit_rows,
+        )
+    return configs
+
+
 def fpha_eligible_codes(case: NewaveCase) -> set[int]:
     """The source model plant codes emitted as ``model: "fpha"`` for this case.
 
     Empty unless :attr:`NewaveCase.fpha_enabled`. The single source of truth for
     FPHA eligibility, shared by :func:`convert_hydros`,
     :func:`convert_production_models`, and :func:`convert_hydro_energy_productivity`
-    so the three files agree on which plants are FPHA. Uses the same
-    permanent-override cadastro the converters use, so eligibility is consistent.
+    so the three files agree on which plants are FPHA. Rated capacity is read on
+    the machine configuration :func:`convert_hydros` declares, so an expanding
+    plant with no machine in service at the study start still qualifies. A
+    plant passing every check but rated capacity is reported through
+    :func:`~cobre_bridge.core.hydro_units.fpha_zero_capacity_diagnostic`.
     """
     if not case.fpha_enabled:
         return set()
     cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
+    expansion = _expansion_configs(case, cadastro)
     eligible: set[int] = set()
+    zero_capacity: list[tuple[str, int, float, float]] = []
     for _, row in case.active_hydros.iterrows():
         code = int(row["codigo_usina"])
-        if code in cadastro.index and _is_fpha_eligible(cadastro.loc[code]):
+        if code not in cadastro.index:
+            continue
+        hreg = cadastro.loc[code]
+        if not _has_fpha_curve_inputs(hreg):
+            continue
+        config = expansion.get(code)
+        declared = hreg if config is None else config.declared_hreg(hreg)
+        if _has_rated_capacity(declared):
             eligible.add(code)
+        else:
+            zero_capacity.append(
+                (str(hreg["nome_usina"]).strip(), code, *rated_capacity(declared))
+            )
+    if zero_capacity:
+        emit(fpha_zero_capacity_diagnostic(zero_capacity), logger=_LOG)
     return eligible
 
 

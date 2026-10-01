@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+import typer
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -36,7 +38,8 @@ def configure_logging(verbose: int, log_file: Path | None) -> None:
     full DEBUG firehose. ``--log-file`` (below) gives the complete DEBUG trace to
     anyone who needs it regardless of the console level.
 
-    When *log_file* is not ``None``, a DEBUG ``FileHandler`` is attached to the
+    When *log_file* is not ``None``, its missing parent directories are created and
+    a DEBUG ``FileHandler`` is attached to the
     ``cobre_bridge`` logger and the package logger level is lowered to DEBUG, so the
     file always captures the full trace even at console verbose ``0`` (the console
     output stays at the ladder level — it is driven by ``basicConfig``/root, while
@@ -68,10 +71,16 @@ def configure_logging(verbose: int, log_file: Path | None) -> None:
         pkg.propagate = False
 
     if log_file is not None:
-        # An unwritable path raises OSError here; it is deliberately not swallowed —
-        # an unwritable --log-file is a user error that should fail loudly through
-        # the per-command CLI boundary.
-        handler = logging.FileHandler(log_file, encoding="utf-8")
+        # Runs before any command builds its arguments, so an unwritable path is
+        # reported as an option error rather than escaping as a traceback.
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            handler = logging.FileHandler(log_file, encoding="utf-8")
+        except OSError as exc:
+            raise typer.BadParameter(
+                f"cannot write {log_file}: {exc.strerror or exc}",
+                param_hint="'--log-file'",
+            ) from exc
         handler.setLevel(logging.DEBUG)
         handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
         pkg.addHandler(handler)

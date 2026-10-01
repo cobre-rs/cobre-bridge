@@ -85,7 +85,7 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     # separate ``filling_storage`` list, never ``storage`` — cobre's IC reader
     # rejects a hydro that appears in both arrays.  Computed once here from the same
     # admission predicate ``case.active_hydros`` uses; ``set()`` when there is no
-    # exph (EX-only case), so the in-loop guard below never fires.
+    # filling plant, so the in-loop guard below never fires.
     exph_df = case.exph.expansoes if case.exph is not None else None
     filling = filling_hydro_codes(case.confhd.usinas, exph_df)
 
@@ -139,17 +139,21 @@ def convert_initial_conditions(case: NewaveCase, id_map: NewaveIdMap) -> dict:
         # Fio-d'água plants don't accumulate water across stages, so the
         # bounds converter collapses their storage to a single point in
         # ``hydro.py``.  Anchor the initial storage to that same point so the
-        # initial condition stays inside the (collapsed) [min, max] range:
-        #   * 'D' (daily) → ``volume_referencia`` (legacy, validated).
-        #   * 'S' (run-of-river) → ``volume_minimo`` (the source model pins ITAIPU at
-        #     VARMPUH 0% = Vmin; matches the collapse in ``hydro.py``).
+        # initial condition stays inside the (collapsed) [min, max] range.
+        # Both 'D' (daily) and 'S' (run-of-river) freeze at ``volume_referencia``
+        # — the same anchor the reservoir-range collapse uses in ``hydro.py``.
+        # When ``volume_referencia`` is absent/NaN the range is not collapsed
+        # there, so we skip the anchor here too and fall through to the normal
+        # ``volume_inicial_percentual`` seeding below.
         tipo_reg = str(hreg.get("tipo_regulacao", "")).strip()
         vol_ref_raw = hreg.get("volume_referencia")
         anchored: float | None = None
-        if tipo_reg == "D" and vol_ref_raw is not None and not pd.isna(vol_ref_raw):
+        if (
+            tipo_reg in ("D", "S")
+            and vol_ref_raw is not None
+            and not pd.isna(vol_ref_raw)
+        ):
             anchored = float(vol_ref_raw)
-        elif tipo_reg == "S":
-            anchored = vol_min
         if anchored is not None:
             storage.append(
                 {

@@ -895,12 +895,12 @@ class TestGnlWiring:
     ``gnl_emission`` param without a real ``dadgnl`` deck or a real
     ``convert_gnl`` call (mocked)."""
 
-    def test_convert_gnl_called_with_first_thermal_id_bus_id_of_and_stages(
+    def test_convert_gnl_called_with_first_thermal_id_bus_id_of_and_calendar(
         self, tmp_path: Path
     ) -> None:
         """``first_thermal_id`` resolves to 1 past the single mocked CT
         thermal (id 0); ``bus_id_of`` is the run's own ``id_map.bus_id``;
-        ``stages`` is the exact list written to ``stages.json``."""
+        ``calendar`` is the operative calendar ``stages.json`` is written from."""
         convert_gnl_mock_out: list[MagicMock] = []
         dst = _run_cadastro_pipeline(
             tmp_path,
@@ -915,7 +915,10 @@ class TestGnlWiring:
         assert call_kwargs["first_thermal_id"] == 1
         assert call_kwargs["bus_id_of"] == _CADASTRO_ID_MAP.bus_id
         written_stages = json.loads((dst / "stages.json").read_text())["stages"]
-        assert call_kwargs["stages"] == written_stages
+        assert [
+            (s.start_date.isoformat(), s.end_date.isoformat())
+            for s in call_kwargs["calendar"]
+        ] == [(s["start_date"], s["end_date"]) for s in written_stages]
 
     def test_populated_emission_routes_thermals_and_past_boundary(
         self, tmp_path: Path

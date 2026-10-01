@@ -19,7 +19,8 @@ import pyarrow as pa
 from inewave.newave import Cadic, Dger, Vazoes
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.core.diagnostics import emit
+from cobre_bridge.core.diagnostics import Diagnostic, Severity, emit
+from cobre_bridge.core.errors import FieldParseError
 from cobre_bridge.newave import plants
 from cobre_bridge.newave.case import NewaveCase
 from cobre_bridge.newave.horizon import POST_STUDY_YEAR, study_horizon
@@ -27,6 +28,112 @@ from cobre_bridge.newave.id_map import NewaveIdMap
 from cobre_bridge.newave.switches import switch_off_diagnostic
 
 logger = logging.getLogger(__name__)
+
+
+# ``vazoes.dat`` is a headerless int32 matrix (months x postos) whose width the
+# deck never declares anywhere, so it is derived from the file size.
+_POSTO_COUNTS: tuple[int, int] = (320, 600)
+_DEFAULT_POSTO_COUNT = 320
+
+
+def _posto_count(path: Path, *, hist_start_year: int, study_start_year: int) -> int:
+    """Return the number of postos in ``vazoes.dat``, derived from its size.
+
+    A width qualifies when it divides the matrix into whole years, since the
+    historical record always ends in December, and when the record it implies
+    ends no later than the study start year, the last year the history spans.
+    Every 600-posto history whose length is a multiple of 8 years is also a
+    whole number of years at 320, so the year bound is what tells the two
+    apart; reading a deck at the wrong width silently reinterprets the whole
+    series. Should both widths still qualify, the size resolves to the far
+    more common width and says so. A size no width fits fails here, naming
+    the file, where reading on surfaces as an opaque reshape error from
+    inside the reader.
+    """
+    size = path.stat().st_size
+    if size % 4:
+        raise FieldParseError(
+            f"vazoes.dat is {size} bytes, which is not a whole number of "
+            "4-byte values -- the file is truncated, or it is not a "
+            "historical inflow record.",
+            path=str(path),
+            field="vazoes.dat",
+        )
+    num_values = size // 4
+    if num_values == 0:
+        # An empty file implies nothing about its width, and the callers below
+        # already report the emptiness itself.
+        return _DEFAULT_POSTO_COUNT
+
+    years_by_count = {
+        count: num_values // (12 * count)
+        for count in _POSTO_COUNTS
+        if num_values % (12 * count) == 0
+    }
+    if not years_by_count:
+        raise FieldParseError(
+            f"vazoes.dat holds {num_values} values, which is not a whole "
+            f"number of years at {' or '.join(str(c) for c in _POSTO_COUNTS)} "
+            "postos -- the file is truncated, or it is not a historical "
+            "inflow record.",
+            path=str(path),
+            field="vazoes.dat",
+        )
+
+    candidates = [
+        count
+        for count, years in years_by_count.items()
+        if hist_start_year + years - 1 <= study_start_year
+    ]
+    if not candidates:
+        overruns = " and ".join(
+            f"to {hist_start_year + years - 1} at {count} postos"
+            for count, years in years_by_count.items()
+        )
+        raise FieldParseError(
+            f"vazoes.dat holds {num_values} values, a history from "
+            f"{hist_start_year} running {overruns} -- past {study_start_year}, "
+            "the study start year. The file does not match the deck's "
+            "historical period, or it is not a historical inflow record.",
+            path=str(path),
+            field="vazoes.dat",
+        )
+    if len(candidates) == 1:
+        return candidates[0]
+
+    emit(
+        Diagnostic(
+            code="vazoes-posto-count-ambiguous",
+            severity=Severity.WARNING,
+            category="Historical inflows",
+            title="Ambiguous vazoes.dat width",
+            summary=(
+                f"vazoes.dat holds {num_values} values, a whole number of "
+                f"years ending by {study_start_year} at "
+                f"{' and at '.join(str(c) for c in candidates)} postos; it is "
+                f"read at {_DEFAULT_POSTO_COUNT}, the width almost every deck "
+                "uses. A deck written at the other width is read as a "
+                "different number of months of history, with no further sign "
+                "that anything is wrong."
+            ),
+            remediation=(
+                "Check the deck's posto count if the historical inflow "
+                "series look implausible."
+            ),
+        ),
+        logger=logger,
+    )
+    return _DEFAULT_POSTO_COUNT
+
+
+def _read_vazoes(path: Path, dger: Dger) -> Vazoes:
+    """Read ``vazoes.dat`` at the width its size and the deck's years imply."""
+    count = _posto_count(
+        path,
+        hist_start_year=int(dger.ano_inicial_historico),
+        study_start_year=int(dger.ano_inicio_estudo),
+    )
+    return Vazoes.read(path, postos=count)
 
 
 def _build_upstream_postos(
@@ -42,14 +149,14 @@ def _build_upstream_postos(
 
     The algorithm:
 
-    1. Map every EX plant code → posto.  NE/NC plants are not in the LP
-       and contribute no inflow series, but their ``codigo_usina_jusante``
+    1. Map every in-service plant code → posto.  NE/NC plants are not in the
+       LP and contribute no inflow series, but their ``codigo_usina_jusante``
        links are still authoritative topology — see step 2.
-    2. For every EX plant ``P``, follow ``P.codigo_usina_jusante`` and
+    2. For every in-service plant ``P``, follow ``P.codigo_usina_jusante`` and
        walk through any NE/NC plants in the chain until reaching the next
-       EX plant ``D`` (or the cascade terminates).  Add a posto edge
+       in-service plant ``D`` (or the cascade terminates).  Add a posto edge
        ``P.posto → D.posto``.  Without this walk-through, an NE/NC plant
-       sitting between two EX plants silently disconnects the upstream
+       sitting between two in-service plants silently disconnects the upstream
        contribution from the downstream's incremental inflow.
     3. Invert the edge direction: for each ``src_posto → dst_posto`` edge,
        record ``dst_posto ← src_posto`` (upstream).
@@ -68,30 +175,31 @@ def _build_upstream_postos(
         the map as a real node rather than being walked through: an upstream
         plant forms a posto edge **to** the filling plant instead of stepping
         past it.  ``None`` (the default) is normalised to the empty set, in
-        which case behaviour is byte-identical to the ``EX``-only map.
+        which case behaviour is byte-identical to the in-service-only map.
     """
     filling: set[int] = filling_codes if filling_codes is not None else set()
 
     # Index every row so the cascade walker can step through NE/NC plants
-    # without losing the link to the next EX plant downstream.
+    # without losing the link to the next in-service plant downstream.
     row_by_code: dict[int, pd.Series] = {}
     code_to_posto: dict[int, int] = {}
     for _, row in confhd_df.iterrows():
         code = int(row["codigo_usina"])
         row_by_code[code] = row
-        # An EX plant — or an admitted NE-with-filling plant — is a real
-        # inflow node.  A filling plant whose posto is NaN is skipped (same
-        # guard the EX path relies on, since posto is always present there).
-        if str(row["usina_existente"]).strip() == "EX" or code in filling:
+        # An in-service plant — or an admitted NE-with-filling plant — is a
+        # real inflow node.  A filling plant whose posto is NaN is skipped
+        # (the in-service path relies on posto always being present).
+        status = str(row["usina_existente"]).strip()
+        if status in plants.IN_SERVICE_STATUSES or code in filling:
             posto_raw = row["posto"]
             if pd.isna(posto_raw):
                 continue
             code_to_posto[code] = int(posto_raw)
 
-    def _walk_to_next_ex(start_code: int) -> int | None:
-        """Follow the cascade through NE/NC plants until an EX plant is found.
+    def _walk_to_next_in_service(start_code: int) -> int | None:
+        """Follow the cascade through NE/NC plants to the next in-service plant.
 
-        Returns the EX plant code, or ``None`` when the chain terminates
+        Returns that plant's code, or ``None`` when the chain terminates
         (downstream 0, unknown code, or a cycle is detected).
         """
         cur: int = start_code
@@ -116,8 +224,8 @@ def _build_upstream_postos(
         ds_code: int | None = int(ds_raw)
         if ds_code not in code_to_posto:
             # Downstream is NE/NC (or otherwise absent) — walk through to
-            # the next EX plant so the posto graph stays connected.
-            ds_code = _walk_to_next_ex(ds_code)
+            # the next in-service plant so the posto graph stays connected.
+            ds_code = _walk_to_next_in_service(ds_code)
             if ds_code is None:
                 continue
         dst_posto = code_to_posto[ds_code]
@@ -248,12 +356,12 @@ def _incremental_history(
         If the vazoes.dat DataFrame is absent or empty.
     """
     # vazoes.dat is large and read only here, so it stays uncached on case.files.
-    vazoes_obj = Vazoes.read(case.files.vazoes)
+    dger = case.dger
+    vazoes_obj = _read_vazoes(case.files.vazoes, dger)
     df_vazoes: pd.DataFrame | None = vazoes_obj.vazoes
     if df_vazoes is None or df_vazoes.empty:
         raise FileNotFoundError("vazoes.dat not found or empty")
 
-    dger = case.dger
     hist_start_year: int = dger.ano_inicial_historico
     study_start_year: int = dger.ano_inicio_estudo
     study_start_month: int = dger.mes_inicio_estudo
@@ -333,15 +441,14 @@ def convert_inflow_stats(case: NewaveCase, id_map: NewaveIdMap) -> pa.Table:
     FileNotFoundError
         If ``vazoes.dat`` DataFrame is empty.
     """
-    vazoes_obj = Vazoes.read(case.files.vazoes)
+    dger = case.dger
+    vazoes_obj = _read_vazoes(case.files.vazoes, dger)
     df_vazoes: pd.DataFrame | None = vazoes_obj.vazoes
 
     if df_vazoes is None or df_vazoes.empty:
         raise FileNotFoundError("vazoes.dat not found or empty")
 
     confhd_df: pd.DataFrame = case.confhd.usinas
-
-    dger = case.dger
 
     # Truncate to months before the study start (same window as inflow_history).
     hist_start_year: int = dger.ano_inicial_historico
@@ -473,9 +580,16 @@ def convert_load_factors(
     study_end_month = ((start_month - 1 + study_months) % 12) + 1
 
     if df_carga is None or df_carga.empty:
-        logger.warning(
-            "patamar.dat has no carga_patamares data; load_factors.json will be empty."
-        )
+        # A single block's load factor is 1 by definition, which an empty list
+        # already gives; only a multi-block deck is missing data.
+        num_blocks = patamar.numero_patamares or 1
+        if num_blocks > 1:
+            logger.warning(
+                "%s declares %d load blocks but no block load factors; "
+                "load_factors.json will be empty.",
+                case.files.patamar.name,
+                num_blocks,
+            )
         return {
             "$schema": cobre_schemas.schema_url_for("scenarios/load_factors.json"),
             "load_factors": [],

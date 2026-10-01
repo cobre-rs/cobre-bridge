@@ -3,10 +3,74 @@
 ``build_mirror_unit_group`` is the single builder for cobre's mandatory
 ``unit_groups`` array entries — reused verbatim by the source-model track
 (:mod:`cobre_bridge.newave.converters.hydro.entity`) and the DECOMP track
-(:mod:`cobre_bridge.decomp.converters.hydro`).
+(:mod:`cobre_bridge.decomp.converters.hydro`). :func:`rated_capacity` is the
+nameplate sum over a ``hidr`` row's machine sets, and
+:func:`fpha_zero_capacity_diagnostic` reports the plants either track keeps
+off cobre's computed FPHA because that capacity is zero.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    import pandas as pd
+
+
+def rated_capacity(hreg: pd.Series) -> tuple[float, float]:
+    """Return ``(max_turbined, max_generation)`` as the rated nameplate capacity:
+    ``Σ_c (n_c · q_nom_c)`` for flow and ``Σ_c (n_c · p_nom_c)`` for power over
+    the row's ``numero_conjuntos_maquinas`` machine sets, with **no** TEIF/IP
+    availability derating and no head correction.
+
+    The source model emits the power value ``[1]`` as every plant's
+    ``max_generation`` (independent of the production function): it equals the
+    source model's installed-capacity ceiling / FPHA ``GHmax`` exactly
+    (verified TUCURUI 7445, QUEBRA QUEIX 120). The flow value ``[0]``
+    (``Σ n·q_nom``) is the source model's fitting-grid ``Qmax``, **not** the
+    operational turbined cap, which is head-corrected.
+    """
+    n_sets = int(hreg["numero_conjuntos_maquinas"])
+    max_turbined = 0.0
+    max_generation = 0.0
+    for i in range(1, n_sets + 1):
+        n_machines = int(hreg[f"maquinas_conjunto_{i}"])
+        max_turbined += float(hreg[f"vazao_nominal_conjunto_{i}"]) * n_machines
+        max_generation += float(hreg[f"potencia_nominal_conjunto_{i}"]) * n_machines
+    return max_turbined, max_generation
+
+
+def fpha_zero_capacity_diagnostic(
+    plants: Sequence[tuple[str, int, float, float]],
+) -> Diagnostic:
+    """INFO diagnostic for plants kept on ``constant_productivity`` because
+    their rated turbined flow or rated power is zero.
+
+    Each entry of *plants* is ``(name, code, max_turbined_m3s,
+    max_generation_mw)``. cobre's computed FPHA samples ``[0, max_turbined]``
+    and clamps at ``max_generation``; a zero on either side collapses the
+    production cloud and aborts the fit, so such a plant cannot be ``fpha``.
+    """
+    return Diagnostic(
+        code="fpha-zero-capacity",
+        severity=Severity.INFO,
+        category="Hydro production model",
+        title=f"FPHA skipped for zero-capacity plants ({len(plants)} plant(s))",
+        summary=(
+            f"{len(plants)} plant(s) eligible for the computed FPHA have zero "
+            "rated turbined flow or rated power after overrides and keep "
+            "constant productivity."
+        ),
+        table=DiagnosticTable(
+            columns=["Plant", "Code", "Turbined (m3/s)", "Generation (MW)"],
+            rows=[[name, code, q, p] for name, code, q, p in plants],
+            justify=["left", "right", "right", "right"],
+        ),
+    )
 
 
 def build_mirror_unit_group(

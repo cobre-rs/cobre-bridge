@@ -37,7 +37,10 @@ A cobre-bridge release `X.Y.Z` targets cobre `X.Y.Z`: the converted case
 follows that cobre release's input contract, and the `cobre-python`
 dependency floor is the oldest cobre the output loads on. A packaging test
 keeps the two in lockstep. `convert --validate` skips its validation step,
-with a note, when the installed `cobre-python` is older than that floor.
+with a note, when the installed `cobre-python` is older than that floor. A
+DECOMP boundary imported by `convert decomp` is stricter: cobre loads it only
+in the exact version of the `cobre-python` that wrote it (see the
+[DECOMP track page](https://github.com/cobre-rs/cobre-bridge/blob/main/docs/decomp.md#running-a-case-with-an-imported-boundary)).
 
 ## Quick start
 

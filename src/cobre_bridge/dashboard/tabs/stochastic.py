@@ -66,6 +66,15 @@ _NO_DATA = "<p>No data.</p>"
 # ---------------------------------------------------------------------------
 
 
+def _with_month(history: pd.DataFrame) -> pd.DataFrame:
+    """Copy of *history* (one row per hydro and monthly ``start_date`` /
+    ``end_date`` window) with each window's calendar ``month``."""
+    df = history.copy()
+    df["start_date"] = pd.to_datetime(df["start_date"])
+    df["month"] = df["start_date"].dt.month
+    return df
+
+
 def _compute_historical_stats(data: DashboardData) -> pd.DataFrame:
     """Compute per-hydro per-stage mean and std from inflow_history.
 
@@ -105,9 +114,7 @@ def _compute_historical_stats(data: DashboardData) -> pd.DataFrame:
     if not month_to_stages:
         return empty
 
-    df = hist.copy()
-    df["date"] = pd.to_datetime(df["date"])
-    df["month"] = df["date"].dt.month
+    df = _with_month(hist)
 
     # Compute historical mean/std per hydro per calendar month
     grp = df.groupby(["hydro_id", "month"])["value_m3s"]
@@ -741,12 +748,10 @@ def _compute_empirical_correlation(
     if inflow_history.empty or len(hydro_ids) < 2:
         return None
 
-    df = inflow_history[inflow_history["hydro_id"].isin(hydro_ids)].copy()
+    df = inflow_history[inflow_history["hydro_id"].isin(hydro_ids)]
     if df.empty:
         return None
-
-    df["date"] = pd.to_datetime(df["date"])
-    df["month"] = df["date"].dt.month
+    df = _with_month(df)
 
     n = len(hydro_ids)
     cumulative = np.zeros((n, n), dtype=np.float64)
@@ -757,7 +762,10 @@ def _compute_empirical_correlation(
         if sub.empty:
             continue
         pivot = sub.pivot_table(
-            index="date", columns="hydro_id", values="value_m3s", aggfunc="mean"
+            index="start_date",
+            columns="hydro_id",
+            values="value_m3s",
+            aggfunc="mean",
         )
         # Reindex to the canonical hydro_id order; missing hydros get NaN cols
         pivot = pivot.reindex(columns=hydro_ids)
@@ -990,8 +998,7 @@ def _chart_ar_order_distribution(
     if not order_names:
         return go.Figure()
 
-    max_order = max(order_names)
-    orders = list(range(1, max_order + 1))
+    orders = list(range(min(min(order_names), 1), max(order_names) + 1))
     counts = [len(order_names.get(o, [])) for o in orders]
 
     # Build hover text with hydro names (truncate long lists)
@@ -1438,11 +1445,9 @@ def _render_spatial_correlation(data: DashboardData) -> str:
     # Build per-month historical correlation matrices
     historical_by_season: dict[str, list[list[float]]] = {}
     if not data.inflow_history.empty and len(sorted_ids) >= 2:
-        df = data.inflow_history[
-            data.inflow_history["hydro_id"].isin(sorted_ids)
-        ].copy()
-        df["date"] = pd.to_datetime(df["date"])
-        df["month"] = df["date"].dt.month
+        df = _with_month(
+            data.inflow_history[data.inflow_history["hydro_id"].isin(sorted_ids)]
+        )
 
         for month_idx in range(12):
             month_num = month_idx + 1
@@ -1450,7 +1455,7 @@ def _render_spatial_correlation(data: DashboardData) -> str:
             if sub.empty:
                 continue
             pivot = sub.pivot_table(
-                index="date",
+                index="start_date",
                 columns="hydro_id",
                 values="value_m3s",
                 aggfunc="mean",
@@ -1609,10 +1614,10 @@ def _render_noise_diagnostics(data: DashboardData) -> str:
 
 def _render_ar_model_summary(data: DashboardData) -> str:
     """Render the AR model summary (order distribution histogram)."""
-    if not data.fitting_report:
+    if not data.fitting_report.get("hydros"):
         return collapsible_section(
             "AR Model Summary",
-            "<p>No fitting report available.</p>",
+            "<p>No AR model was fitted for this case.</p>",
             section_id="v2-stoch-section-f",
             default_collapsed=True,
         )

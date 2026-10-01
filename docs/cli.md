@@ -29,16 +29,16 @@ Generate an interactive HTML dashboard from Cobre simulation results.
 **Usage**:
 
 ```console
-$ cobre-bridge dashboard [OPTIONS] CASE_DIR
+$ cobre-bridge dashboard [OPTIONS] {case_dir}
 ```
 
 **Arguments**:
 
-* `CASE_DIR`: Path to the Cobre case directory.  [required]
+* `case_dir`: Path to the Cobre case directory.  [required]
 
 **Options**:
 
-* `-o, --output PATH`: Output HTML file path (default: &lt;case_dir&gt;/dashboard.html).
+* `-o, --output <path>`: Output HTML file path (default: &lt;case_dir&gt;/dashboard.html).
 * `--open`: Open the generated dashboard in the default web browser after writing it.
 * `--json`: Emit a single machine-readable JSON verdict to stdout and suppress the human-readable (Rich) output.
 * `-v, --verbose`: Increase console log verbosity (-v INFO, -vv DEBUG).  [default: 0]
@@ -73,13 +73,13 @@ Convert a NEWAVE case directory to a Cobre case directory.
 **Usage**:
 
 ```console
-$ cobre-bridge convert newave [OPTIONS] SRC DST
+$ cobre-bridge convert newave [OPTIONS] {src} {dst}
 ```
 
 **Arguments**:
 
-* `SRC`: Path to the NEWAVE case directory.  [required]
-* `DST`: Path to the output Cobre case directory.  [required]
+* `src`: Path to the NEWAVE case directory.  [required]
+* `dst`: Path to the output Cobre case directory.  [required]
 
 **Options**:
 
@@ -106,13 +106,13 @@ skips it.
 **Usage**:
 
 ```console
-$ cobre-bridge convert decomp [OPTIONS] SRC DST
+$ cobre-bridge convert decomp [OPTIONS] {src} {dst}
 ```
 
 **Arguments**:
 
-* `SRC`: Path to the DECOMP deck directory.  [required]
-* `DST`: Path to the output Cobre case directory.  [required]
+* `src`: Path to the DECOMP deck directory.  [required]
+* `dst`: Path to the output Cobre case directory.  [required]
 
 **Options**:
 
@@ -165,19 +165,19 @@ synthesizing it.
 **Usage**:
 
 ```console
-$ cobre-bridge compare decomp [OPTIONS] DECOMP_DIR COBRE_OUTPUT_DIR
+$ cobre-bridge compare decomp [OPTIONS] {decomp_dir} {cobre_output_dir}
 ```
 
 **Arguments**:
 
-* `DECOMP_DIR`: Path to the DECOMP deck directory (deck + dec_oper_*.csv result files, all directly in it).  [required]
-* `COBRE_OUTPUT_DIR`: Path to the Cobre output directory.  [required]
+* `decomp_dir`: Path to the DECOMP deck directory (deck + dec_oper_*.csv result files, all directly in it).  [required]
+* `cobre_output_dir`: Path to the Cobre output directory.  [required]
 
 **Options**:
 
-* `--tolerance FLOAT`: Relative tolerance for results comparison (default 1e-2; overridable via COBRE_BRIDGE_RESULTS_TOLERANCE or cobre-bridge.toml).  [env var: COBRE_BRIDGE_RESULTS_TOLERANCE]
+* `--tolerance <float>`: Relative tolerance for results comparison (default 1e-2; overridable via COBRE_BRIDGE_RESULTS_TOLERANCE or cobre-bridge.toml).  [env var: COBRE_BRIDGE_RESULTS_TOLERANCE]
 * `--format FORMAT`: Output format(s): console,html,csv,parquet,json,all. Comma-separated and/or repeatable. Overridable via COBRE_BRIDGE_FORMAT or cobre-bridge.toml. (default: console,parquet,json)  [env var: COBRE_BRIDGE_FORMAT]
-* `--out-dir PATH`: Directory for file artifacts. Overridable via COBRE_BRIDGE_OUT_DIR or cobre-bridge.toml. (default: &lt;cobre_output_dir&gt;/comparison_artifacts).  [env var: COBRE_BRIDGE_OUT_DIR]
+* `--out-dir <path>`: Directory for file artifacts. Overridable via COBRE_BRIDGE_OUT_DIR or cobre-bridge.toml. (default: &lt;cobre_output_dir&gt;/comparison_artifacts).  [env var: COBRE_BRIDGE_OUT_DIR]
 * `--json`: Emit a single machine-readable JSON verdict to stdout and suppress the human-readable (Rich) output.
 * `-v, --verbose`: Increase console log verbosity (-v INFO, -vv DEBUG).  [default: 0]
 * `--log-file PATH`: Write the full DEBUG log to PATH (the console verbosity is unaffected).
@@ -194,19 +194,19 @@ Informational: always exits 0, reporting divergences without failing.
 **Usage**:
 
 ```console
-$ cobre-bridge compare newave [OPTIONS] NEWAVE_DIR COBRE_OUTPUT_DIR
+$ cobre-bridge compare newave [OPTIONS] {newave_dir} {cobre_output_dir}
 ```
 
 **Arguments**:
 
-* `NEWAVE_DIR`: Path to the NEWAVE case directory (case + MEDIAS-*.CSV result files, all directly in it).  [required]
-* `COBRE_OUTPUT_DIR`: Path to the Cobre output directory.  [required]
+* `newave_dir`: Path to the NEWAVE case directory (case + MEDIAS-*.CSV result files, all directly in it).  [required]
+* `cobre_output_dir`: Path to the Cobre output directory.  [required]
 
 **Options**:
 
-* `--tolerance FLOAT`: Relative tolerance for results comparison (default 1e-2; overridable via COBRE_BRIDGE_RESULTS_TOLERANCE or cobre-bridge.toml).  [env var: COBRE_BRIDGE_RESULTS_TOLERANCE]
+* `--tolerance <float>`: Relative tolerance for results comparison (default 1e-2; overridable via COBRE_BRIDGE_RESULTS_TOLERANCE or cobre-bridge.toml).  [env var: COBRE_BRIDGE_RESULTS_TOLERANCE]
 * `--format FORMAT`: Output format(s): console,html,csv,parquet,json,all. Comma-separated and/or repeatable. Overridable via COBRE_BRIDGE_FORMAT or cobre-bridge.toml. (default: console,parquet,json)  [env var: COBRE_BRIDGE_FORMAT]
-* `--out-dir PATH`: Directory for file artifacts. Overridable via COBRE_BRIDGE_OUT_DIR or cobre-bridge.toml. (default: &lt;cobre_output_dir&gt;/comparison_artifacts).  [env var: COBRE_BRIDGE_OUT_DIR]
+* `--out-dir <path>`: Directory for file artifacts. Overridable via COBRE_BRIDGE_OUT_DIR or cobre-bridge.toml. (default: &lt;cobre_output_dir&gt;/comparison_artifacts).  [env var: COBRE_BRIDGE_OUT_DIR]
 * `--json`: Emit a single machine-readable JSON verdict to stdout and suppress the human-readable (Rich) output.
 * `-v, --verbose`: Increase console log verbosity (-v INFO, -vv DEBUG).  [default: 0]
 * `--log-file PATH`: Write the full DEBUG log to PATH (the console verbosity is unaffected).
@@ -240,12 +240,12 @@ Validate a NEWAVE case directory without converting or writing any files.
 **Usage**:
 
 ```console
-$ cobre-bridge check newave [OPTIONS] SRC
+$ cobre-bridge check newave [OPTIONS] {src}
 ```
 
 **Arguments**:
 
-* `SRC`: Path to the NEWAVE case directory.  [required]
+* `src`: Path to the NEWAVE case directory.  [required]
 
 **Options**:
 
@@ -266,12 +266,12 @@ is never a silent omission.
 **Usage**:
 
 ```console
-$ cobre-bridge check decomp [OPTIONS] SRC
+$ cobre-bridge check decomp [OPTIONS] {src}
 ```
 
 **Arguments**:
 
-* `SRC`: Path to the DECOMP deck directory.  [required]
+* `src`: Path to the DECOMP deck directory.  [required]
 
 **Options**:
 

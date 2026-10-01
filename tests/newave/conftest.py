@@ -88,6 +88,11 @@ def _make_hidr_cadastro() -> pd.DataFrame:
         "a2_volume_cota": [0.0, 0.0],
         "a3_volume_cota": [0.0, 0.0],
         "a4_volume_cota": [0.0, 0.0],
+        "a0_cota_area": [0.0, 0.0],
+        "a1_cota_area": [0.0, 0.0],
+        "a2_cota_area": [0.0, 0.0],
+        "a3_cota_area": [0.0, 0.0],
+        "a4_cota_area": [0.0, 0.0],
         "produtibilidade_especifica": [0.9, 0.85],
         "numero_conjuntos_maquinas": [1, 2],
         "maquinas_conjunto_1": [4, 3],
@@ -236,6 +241,62 @@ def _make_intercambio_df() -> pd.DataFrame:
         },
     ]
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# EE fixtures: plant 2 in service with machines still to enter (exph.dat).
+# ---------------------------------------------------------------------------
+
+
+def _make_ee_confhd_df() -> pd.DataFrame:
+    """The two-plant confhd with plant 2 marked ``EE`` (in service, expanding)."""
+    df = _make_confhd_df()
+    df["usina_existente"] = ["EX", "EE"]
+    return df
+
+
+def _make_ee_exph_mock(
+    *, entry: str = "2024-07-01", code: int = 2, conjunto: int = 2
+) -> MagicMock:
+    """An ``exph`` reader whose ``expansoes`` carries two machine entries of *code*.
+
+    Mirrors the ``EE`` layout of a real ``exph.dat``: **no** filling row
+    (``data_inicio_enchimento`` is ``NaT`` throughout, which is what keeps
+    ``filling_hydro_codes`` from claiming the plant) and one row per entering
+    machine, both in *conjunto*.
+    """
+    expansoes = pd.DataFrame(
+        {
+            "codigo_usina": [code, code],
+            "nome_usina": ["", ""],
+            "data_inicio_enchimento": [pd.NaT, pd.NaT],
+            "duracao_enchimento": [0, 0],
+            "volume_morto": [0.0, 0.0],
+            "data_entrada_operacao": [pd.Timestamp(entry), pd.Timestamp(entry)],
+            "conjunto_maquina_entrada": [conjunto, conjunto],
+            "maquina_entrada": [1, 2],
+        }
+    )
+    exph = MagicMock()
+    exph.expansoes = expansoes
+    return exph
+
+
+def _ee_expansion_case(tmp_path, *, entry: str = "2024-07-01", **hydro_case_kwargs):
+    """A ``NewaveCase`` whose plant 2 is ``EE`` with two machines still to enter.
+
+    Under the default Jan-2024 one-year horizon (12 stages), the Jul-2024 entry
+    is stage 6: plant 2 runs on conjunto 1 alone (3 × 150 MW = 450) for stages
+    0-5 and reaches its registry configuration (450 + 2 × 120 = 690) from stage
+    6. The deck carries no ``modif.dat``, so the study-start configuration comes
+    from the ``registry − all entering`` fallback rather than ``NUMMAQ``.
+    """
+    return _hydro_case(
+        tmp_path,
+        confhd=_make_ee_confhd_df(),
+        exph=_make_ee_exph_mock(entry=entry),
+        **hydro_case_kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +534,23 @@ def _thermal_readers():
     term = MagicMock()
     term.usinas = _make_term_df()
     return conft, clast, term
+
+
+def _make_thermal_dger(mes_inicio: int = 1) -> MagicMock:
+    """The ``dger`` fields the thermal converters read: horizon plus the GNL switch.
+
+    Two study years from January 2023, no post-study tail, and one maintenance
+    year — so stages 0-11 are inside it and 12-23 after it, which is what the
+    IP and minimum-generation regimes switch on.
+    """
+    dger = MagicMock()
+    dger.ano_inicio_estudo = 2023
+    dger.mes_inicio_estudo = mes_inicio
+    dger.num_anos_estudo = 2
+    dger.num_anos_pos_estudo = 0
+    dger.num_anos_manutencao_utes = 1
+    dger.despacho_antecipado_gnl = 0
+    return dger
 
 
 def _make_sistema_mock() -> MagicMock:

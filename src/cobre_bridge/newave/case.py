@@ -285,7 +285,8 @@ class NewaveCase:
 
         The case's ``exph`` reader is threaded through, so any ``NE`` plant carrying a
         dead-volume filling row is admitted at its confhd declaration position. The
-        path-only ``build_id_map`` keeps the ``EX``-only enumeration (``exph=None``).
+        path-only ``build_id_map`` keeps the in-service-only enumeration
+        (``exph=None``).
         """
         from cobre_bridge.newave.id_map import build_id_map_from_readers
 

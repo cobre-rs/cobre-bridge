@@ -1,9 +1,9 @@
 """Canonical definition of "which hydro plants are in the Cobre case".
 
 The source model's ``confhd.dat`` lists every hydro the study knows about, tagged by
-``usina_existente`` (``EX`` = existing/in-operation, ``NE``/``NC`` = not yet built) and
-including *fictitious* accounting plants. Only the existing, non-fictitious plants
-become LP variables in Cobre.
+``usina_existente`` (``EX`` and ``EE`` = in operation, ``NE``/``NC`` = not yet
+built) and including *fictitious* accounting plants. Only the in-service,
+non-fictitious plants become LP variables in Cobre.
 
 A plant is identified as **fictitious structurally**, not by the ``FICT.`` name
 prefix: a fictitious accounting twin shares its inflow gauge (``posto``) with a
@@ -29,10 +29,23 @@ import pandas as pd
 # accounting plants carry produtibilidade_especifica == 0 exactly).
 _RHO_COL = "produtibilidade_especifica"
 
+#: ``usina_existente`` values that put a plant in the LP from stage 0. ``EE``
+#: ("existente em expansão") is already in operation and only gains machines
+#: later, so narrowing this to ``EX`` drops a real plant and silently rewires
+#: the cascade around it (:func:`existing_hydros`).
+IN_SERVICE_STATUSES = ("EX", "EE")
+
+
+def _is_in_service(confhd_df: pd.DataFrame) -> pd.Series:
+    """Boolean mask over *confhd_df* of the rows whose status is in service."""
+    return (
+        confhd_df["usina_existente"].astype(str).str.strip().isin(IN_SERVICE_STATUSES)
+    )
+
 
 def existing_hydros(confhd_df: pd.DataFrame) -> pd.DataFrame:
-    """Return the ``usina_existente == "EX"`` rows (fictitious ones included)."""
-    return confhd_df[confhd_df["usina_existente"] == "EX"]
+    """Return the in-service rows (fictitious ones included)."""
+    return confhd_df[_is_in_service(confhd_df)]
 
 
 def fictitious_codes(confhd_df: pd.DataFrame, cadastro: pd.DataFrame) -> set[int]:
@@ -113,7 +126,8 @@ def active_hydros(
 ) -> pd.DataFrame:
     """Return the existing, non-fictitious hydro rows that enter the Cobre LP.
 
-    ``usina_existente == "EX"`` minus :func:`fictitious_codes`, in confhd
+    The in-service rows (:data:`IN_SERVICE_STATUSES`) minus
+    :func:`fictitious_codes`, in confhd
     declaration order (the id-map relies on this order to assign 0-based Cobre
     hydro IDs). *cadastro* (``Hidr.cadastro``) is required for the structural
     fictitious test; with the data unavailable, no plant is classified
@@ -123,15 +137,15 @@ def active_hydros(
     that carry a dead-volume filling row (:func:`filling_hydro_codes`) are also
     admitted, each kept at its **confhd declaration position** (a single boolean mask
     over *confhd_df*, never a concat/append, so id assignment stays deterministic).
-    With ``exph_df is None`` the result is byte-identical to the EX-only set — no
-    ``NE`` plant is admitted.
+    With ``exph_df is None`` the result is the in-service set alone — no ``NE``
+    plant is admitted.
     """
     fict = fictitious_codes(confhd_df, cadastro)
-    is_ex = confhd_df["usina_existente"] == "EX"
+    in_service = _is_in_service(confhd_df)
     if fict:
-        is_ex = is_ex & ~confhd_df["codigo_usina"].isin(fict)
+        in_service = in_service & ~confhd_df["codigo_usina"].isin(fict)
     filling = filling_hydro_codes(confhd_df, exph_df)
-    keep = is_ex | confhd_df["codigo_usina"].isin(filling)
+    keep = in_service | confhd_df["codigo_usina"].isin(filling)
     return confhd_df[keep]
 
 

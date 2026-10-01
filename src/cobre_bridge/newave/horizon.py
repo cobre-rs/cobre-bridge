@@ -132,12 +132,35 @@ def stage_dates_for(horizon: StudyHorizon) -> list[date]:
     )
 
 
+def _repeating_year_steps(
+    recs: Iterable[tuple[int, float]], transform: Callable[[float], float]
+) -> dict[int, float | None]:
+    """Value in force in each calendar month of a year that repeats, given its
+    ``(month, raw_value)`` steps; months before the first step wrap around to
+    the last. ``None`` marks a cleared month (raw value ``>= BIG_M``). Empty
+    when *recs* is empty.
+    """
+    steps: dict[int, float | None] = {}
+    for month, value in recs:
+        steps[month] = None if value >= BIG_M else transform(value)
+    if not steps:
+        return {}
+    in_force: dict[int, float | None] = {}
+    current = steps[max(steps)]
+    for month in range(1, 13):
+        current = steps.get(month, current)
+        in_force[month] = current
+    return in_force
+
+
 def seasonal_step_function(
     recs: Iterable[tuple[int, int, float]],
     transform: Callable[[float], float],
     *,
     seasonalize: bool,
     horizon: StudyHorizon,
+    pre_recs: Iterable[tuple[int, float]] = (),
+    pos_recs: Iterable[tuple[int, float]] = (),
 ) -> dict[int, float]:
     """Forward-fill dated override records into per-stage values.
 
@@ -146,7 +169,15 @@ def seasonal_step_function(
     clears the fill ("restore default"). Returns ``{stage_id: transform(value)}``
     for every stage that has an active value.
 
-    Post-study extrapolation follows the source model's rule, selected by *seasonalize*:
+    ``pre_recs`` / ``pos_recs`` are ``(month, raw_value)`` steps of the static
+    pre-study and post-study periods, each read as one repeating year
+    (:func:`_repeating_year_steps`). The ``PRE`` value in force in the month
+    before the study starts holds from stage 0 until the first change-point.
+    ``POS`` steps, when present, set every post-study stage by its calendar
+    month and replace the extrapolation below.
+
+    Otherwise the post-study tail follows the source model's rule, selected by
+    *seasonalize*:
 
     - ``True`` (e.g. VMINT/VMAXT with their ``sazonaliza_*`` flag set): repeat the
       last study year's monthly pattern, so a genuinely seasonal constraint keeps
@@ -166,13 +197,13 @@ def seasonal_step_function(
         sid = (year - horizon.start_year) * 12 + (month - sm)
         changepoints.append((max(0, sid), value))
     changepoints.sort()
-    if not changepoints:
-        return {}
+    pre = _repeating_year_steps(pre_recs, transform)
+    pos = _repeating_year_steps(pos_recs, transform)
 
     result: dict[int, float] = {}
     cp_idx = 0
-    current: float | None = None
-    for stage_id in range(changepoints[0][0], study_months):
+    current = pre.get((sm - 2) % 12 + 1)
+    for stage_id in range(study_months):
         while cp_idx < len(changepoints) and changepoints[cp_idx][0] <= stage_id:
             raw = changepoints[cp_idx][1]
             current = None if raw >= BIG_M else transform(raw)
@@ -183,7 +214,12 @@ def seasonal_step_function(
     if total_stages <= study_months:
         return result
 
-    if seasonalize:
+    if pos:
+        for stage_id in range(study_months, total_stages):
+            value = pos[((sm - 1 + stage_id) % 12) + 1]
+            if value is not None:
+                result[stage_id] = value
+    elif seasonalize:
         seasonal: dict[int, float] = {}
         for stage_id in range(max(0, study_months - 12), study_months):
             if stage_id in result:

@@ -139,15 +139,15 @@ def build_metadata(
     warm_start_cuts: int,
     rng_seed: int,
     created_at: str,
-    cobre_version: str,
     season_manifest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the checkpoint `metadata` dict, refusing an unset `cost_scale_factor`.
 
-    cobre 0.14 splits checkpoint metadata into a small core (`cobre_version`,
-    `created_at`, `num_stages`) plus a namespaced `producer` block carrying the
-    algorithm-specific provenance. `state_dimension` is no longer a metadata
-    field — it is per-pool, on each `stage_cuts` payload
+    Checkpoint metadata is a small core (`created_at`, `num_stages`) plus a
+    namespaced `producer` block carrying the algorithm-specific provenance.
+    `cobre_version` is not a caller field: cobre stamps the writing build's own
+    version, and only that cobre version loads the checkpoint. `state_dimension`
+    is no longer a metadata field — it is per-pool, on each `stage_cuts` payload
     (:func:`build_stage_cuts_payload`). `created_at` is accepted as a parameter
     rather than derived internally (this module never calls `datetime.now()`) —
     the caller supplies an ISO 8601 timestamp.
@@ -171,7 +171,6 @@ def build_metadata(
             "every value by 10⁶"
         )
     metadata: dict[str, Any] = {
-        "cobre_version": cobre_version,
         "created_at": created_at,
         "num_stages": num_stages,
         "producer": {

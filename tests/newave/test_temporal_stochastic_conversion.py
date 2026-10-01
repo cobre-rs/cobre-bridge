@@ -2,12 +2,17 @@
 
 All inewave I/O is mocked via ``unittest.mock.patch`` so no real the source model files
 are required.  Synthetic DataFrames exercise the core logic of each converter.
+``test_six_hundred_posto_matrix_is_laid_out_at_full_width`` is the one
+exception: it has to prove the reader lays a 600-posto matrix out as declared,
+which a mock cannot show.
 """
 
 from __future__ import annotations
 
 import calendar
 import datetime
+import struct
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -15,6 +20,10 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity
+from cobre_bridge.core.errors import FieldParseError
+from cobre_bridge.newave.converters.stochastic import _posto_count, _read_vazoes
 from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import make_case, make_nw_files
 
@@ -1275,7 +1284,7 @@ class TestConvertInflowStats:
         mock_obj = MagicMock()
         mock_obj.vazoes = pd.DataFrame()
         mock_vazoes_cls.read.return_value = mock_obj
-        case = make_case(tmp_path, confhd=_make_confhd_mock({}))
+        case = make_case(tmp_path, confhd=_make_confhd_mock({}), dger=_make_dger_mock())
 
         id_map = NewaveIdMap(subsystem_ids=[], hydro_codes=[], thermal_codes=[])
 
@@ -1726,6 +1735,27 @@ def _confhd_row(
     }
 
 
+class TestBuildUpstreamPostosExpansionPlant:
+    """An ``EE`` plant is in service, so its posto is a real inflow node.
+    Walking through it instead credits its whole natural inflow to the plant
+    below, inflating that plant's incremental series."""
+
+    def test_ee_plant_between_two_ex_plants_is_its_own_node(self) -> None:
+        from cobre_bridge.newave.converters.stochastic import _build_upstream_postos
+
+        # A (EX, posto 100) -> B (EE, posto 200) -> C (EX, posto 300)
+        confhd = pd.DataFrame(
+            [
+                _confhd_row(1, 100, 2, "EX"),
+                _confhd_row(2, 200, 3, "EE"),
+                _confhd_row(3, 300, 0, "EX"),
+            ]
+        )
+        upstream = _build_upstream_postos(confhd)
+        assert upstream.get(200) == [100]
+        assert upstream.get(300) == [200]
+
+
 class TestBuildUpstreamPostosNonExistingBypass:
     """``_build_upstream_postos`` must walk through NE/NC plants so the
     posto-level cascade stays connected.  Without this, the downstream
@@ -1876,3 +1906,133 @@ class TestBuildUpstreamPostosFillingAdmission:
         assert 226 not in upstream
         # Walk-through finds no downstream EX, so no edge survives.
         assert upstream == {}
+
+
+# ---------------------------------------------------------------------------
+# Tests: vazoes.dat width
+# ---------------------------------------------------------------------------
+
+
+def _write_vazoes(tmp_path: Path, num_bytes: int) -> Path:
+    """A vazoes.dat of the given byte size; only its size matters."""
+    path = tmp_path / "vazoes.dat"
+    path.write_bytes(b"\x00" * num_bytes)
+    return path
+
+
+def _count(path: Path) -> int:
+    return _posto_count(path, hist_start_year=1931, study_start_year=2026)
+
+
+class TestPostoCount:
+    @pytest.mark.parametrize(
+        ("num_values", "expected"),
+        [
+            # One year at 320; not even a whole number of months at 600.
+            (320 * 12, 320),
+            (600 * 12, 600),
+            # 1931-2026 at 600 is also a whole number of years at 320, but
+            # one that would run to 2110.
+            (600 * 12 * 96, 600),
+        ],
+    )
+    def test_the_only_fitting_width_is_used_silently(
+        self, tmp_path, num_values, expected
+    ) -> None:
+        with dx.collect() as collected:
+            assert _count(_write_vazoes(tmp_path, 4 * num_values)) == expected
+        assert collected == []
+
+    def test_ambiguous_size_assumes_320_and_warns(self, tmp_path) -> None:
+        # 15 years at 320 postos is also 8 years at 600, both ending by 2026.
+        with dx.collect() as collected:
+            count = _count(_write_vazoes(tmp_path, 4 * 320 * 12 * 15))
+
+        assert count == 320
+        assert len(collected) == 1
+        diag = collected[0]
+        assert diag.code == "vazoes-posto-count-ambiguous"
+        assert diag.severity is Severity.WARNING
+        assert diag.category == "Historical inflows"
+        assert "320" in diag.summary
+        assert "600" in diag.summary
+
+    @pytest.mark.parametrize(
+        ("num_bytes", "message"),
+        [
+            (4 * 320 * 12 + 2, "4-byte values"),
+            (4 * 1000, "320 or 600"),
+            # 13 months at 320 postos: the historical record ends in December.
+            (4 * 320 * 13, "320 or 600"),
+            # 100 years at 320 postos from 1931 runs to 2030.
+            (4 * 320 * 12 * 100, "to 2030 at 320 postos"),
+        ],
+    )
+    def test_size_that_fits_no_width_is_rejected(
+        self, tmp_path, num_bytes, message
+    ) -> None:
+        with pytest.raises(FieldParseError, match=message):
+            _count(_write_vazoes(tmp_path, num_bytes))
+
+    def test_empty_file_falls_back_to_the_default(self, tmp_path) -> None:
+        # Emptiness is the callers' finding, not the width derivation's.
+        with dx.collect() as collected:
+            assert _count(_write_vazoes(tmp_path, 0)) == 320
+        assert collected == []
+
+
+def test_six_hundred_posto_matrix_is_laid_out_at_full_width(tmp_path) -> None:
+    """Through the real reader: a width it ignores, rejects or lays out
+    transposed would mis-assign every posto's series. The 320-posto default is
+    covered end to end by the mini deck.
+    """
+    path = tmp_path / "vazoes.dat"
+    # Sequential values, unlike ``_write_vazoes``' zeros: the row-major
+    # assertions below are what pin the width.
+    path.write_bytes(b"".join(struct.pack("<i", v) for v in range(600 * 12)))
+
+    df = _read_vazoes(path, _make_dger_mock(ano_inicio=2026)).vazoes
+
+    assert df.shape == (12, 600)
+    assert df.iloc[0, 0] == 0
+    assert df.iloc[0, -1] == 599
+    assert df.iloc[1, 0] == 600
+
+
+class TestLoadFactorsWithoutBlockFactors:
+    """A deck whose patamar file carries no block load factors."""
+
+    _ID_MAP = NewaveIdMap(subsystem_ids=[1], hydro_codes=[], thermal_codes=[])
+
+    def _convert(self, tmp_path, num_blocks: int) -> dict:
+        from cobre_bridge.newave.converters.stochastic import convert_load_factors
+
+        patamar = MagicMock(numero_patamares=num_blocks, carga_patamares=None)
+        case = make_case(
+            make_nw_files(tmp_path, patamar=tmp_path / "patamar.eas"),
+            patamar=patamar,
+            dger=_make_dger_mock(),
+        )
+        return convert_load_factors(case, self._ID_MAP)
+
+    def test_single_block_needs_no_factors_and_is_not_reported(
+        self, tmp_path, caplog
+    ) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge"):
+            result = self._convert(tmp_path, 1)
+
+        assert result["load_factors"] == []
+        assert caplog.text == ""
+
+    def test_multi_block_without_factors_names_the_deck_file(
+        self, tmp_path, caplog
+    ) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="cobre_bridge"):
+            result = self._convert(tmp_path, 3)
+
+        assert result["load_factors"] == []
+        assert "patamar.eas declares 3 load blocks" in caplog.text

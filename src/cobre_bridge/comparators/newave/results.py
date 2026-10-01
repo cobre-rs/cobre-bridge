@@ -1139,7 +1139,7 @@ def compare_results(
         nw_sin = read_medias_sin(source_dir)
 
     # --- the source model deterministic net load (load - NCS from sistema.dat) ---
-    nw_net_load = read_newave_net_load(case.files.directory)
+    nw_net_load = read_newave_net_load(case.files)
 
     # --- Percentile statistics ---
     _LOG.info("Computing Cobre percentile statistics...")

@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from cobre_bridge.comparators.newave.readers import (
     read_fpha_grid,
@@ -34,6 +35,7 @@ from cobre_bridge.comparators.newave.readers import (
     read_pmo_cost_breakdown,
     read_pmo_productivity_detail,
 )
+from tests.conftest import make_nw_files
 
 _FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "newave_results"
 
@@ -207,21 +209,23 @@ class TestNewaveNetLoadNwlistop:
 
 class TestNewaveNetLoad:
     def test_prefers_nwlistop_full_horizon_over_sistema_reconstruction(self) -> None:
-        df = read_newave_net_load(_FIXTURE_DIR)
+        df = read_newave_net_load(make_nw_files(_FIXTURE_DIR))
         assert not df.is_empty()
-        assert df.height == 12  # the mercl001.out full-horizon reader, not sistema.dat
+        assert df.height == 12  # the mercl001.out full-horizon reader, not sistema
 
+    @pytest.mark.parametrize("extension", ["dat", "eas"])
     def test_falls_back_to_sistema_reconstruction_with_c_adic(
-        self, tmp_path: Path
+        self, tmp_path: Path, extension: str
     ) -> None:
-        # No mercl*.out present -> falls back to sistema.dat + c_adic.dat.
-        (tmp_path / "sistema.dat").write_bytes(
-            (_FIXTURE_DIR / "sistema.dat").read_bytes()
+        # No mercl*.out present -> falls back to the subsystem + c_adic files,
+        # under whatever names the case's arquivos gives them.
+        sistema = tmp_path / f"sistema.{extension}"
+        c_adic = tmp_path / f"c_adic.{extension}"
+        sistema.write_bytes((_FIXTURE_DIR / "sistema.dat").read_bytes())
+        c_adic.write_bytes((_FIXTURE_DIR / "c_adic.dat").read_bytes())
+        df = read_newave_net_load(
+            make_nw_files(tmp_path, sistema=sistema, c_adic=c_adic)
         )
-        (tmp_path / "c_adic.dat").write_bytes(
-            (_FIXTURE_DIR / "c_adic.dat").read_bytes()
-        )
-        df = read_newave_net_load(tmp_path)
         assert not df.is_empty()
         assert df["variable"].unique().to_list() == ["NET_LOAD"]
         # net_load = mercado_energia (38124.0) + c_adic must-take (18.0)
@@ -233,7 +237,7 @@ class TestNewaveNetLoad:
         self, tmp_path: Path, caplog
     ) -> None:
         with caplog.at_level(logging.WARNING):
-            df = read_newave_net_load(tmp_path)
+            df = read_newave_net_load(make_nw_files(tmp_path))
         assert df.is_empty()
         assert "sistema.dat not found" in caplog.text
 

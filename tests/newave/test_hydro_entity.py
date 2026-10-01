@@ -13,7 +13,10 @@ from cobre_bridge.core.diagnostics import Severity
 from cobre_bridge.newave.id_map import NewaveIdMap
 from tests.conftest import hydro_with_group
 from tests.newave.conftest import (
+    _ee_expansion_case,
     _hydro_case,
+    _make_ee_confhd_df,
+    _make_ee_exph_mock,
     _make_hidr_cadastro,
     _make_hydro_dger_mock,
     _make_ne_cadastro,
@@ -31,6 +34,41 @@ class TestConvertHydros:
             subsystem_ids=[1],
             hydro_codes=[1, 2],
             thermal_codes=[],
+        )
+
+    def test_potefe_reaches_the_declared_max_generation(self, tmp_path) -> None:
+        """A permanent POTEFE override travels from modif.dat into hydros.json.
+
+        Pins the wiring, not the arithmetic: every cadastro consumer reads the
+        MODIF-corrected registry, so a converter that reached for
+        ``case.hidr.cadastro`` directly would emit the registry power instead.
+        """
+        from cobre_bridge.newave.converters.hydro import convert_hydros
+
+        potefe_rec = MagicMock()
+        type(potefe_rec).__name__ = "POTEFE"
+        potefe_rec.potencia = 100.0
+        potefe_rec.conjunto = 1
+
+        usina_rec = MagicMock()
+        usina_rec.codigo = 1
+        mock_modif = MagicMock()
+        mock_modif.usina.return_value = [usina_rec]
+        mock_modif.modificacoes_usina.side_effect = lambda code: (
+            [potefe_rec] if code == 1 else []
+        )
+
+        with dx.collect():
+            base = convert_hydros(_hydro_case(tmp_path), self._make_id_map())["hydros"]
+            overridden = convert_hydros(
+                _hydro_case(tmp_path, modif=mock_modif), self._make_id_map()
+            )["hydros"]
+
+        # Plant 1 runs 4 machines in conjunto 1, declared at 200 MW each.
+        assert base[0]["generation"]["max_generation_mw"] == pytest.approx(800.0)
+        assert overridden[0]["generation"]["max_generation_mw"] == pytest.approx(400.0)
+        assert overridden[1]["generation"]["max_generation_mw"] == pytest.approx(
+            base[1]["generation"]["max_generation_mw"]
         )
 
     def test_returns_hydros_key(self, tmp_path) -> None:
@@ -107,28 +145,51 @@ class TestConvertHydros:
                 "max_turbined_m3s",
             }
 
-    def test_run_of_river_S_storage_collapsed_to_vmin(self, tmp_path) -> None:
-        """``tipo_regulacao='S'`` (fio-d'água) collapses storage to Vmin.
+    def test_run_of_river_S_storage_collapsed_to_volref(self, tmp_path) -> None:
+        """``tipo_regulacao='S'`` (fio-d'água) collapses storage to the
+        reference volume.
 
-        The source model treats 'S' plants as run-of-river with no usable buffer
-        (ITAIPU, the only 'S' plant, sits at VARMPUH 0% = Vmin every stage, spilling the
-        turbine-excess inflow).  The converter must pin min==max==Vmin so cobre doesn't
-        store and shift that surplus across stages.
+        The source model treats 'S' plants as run-of-river with no usable buffer:
+        they operate at ``volume_referencia`` every stage, spilling the
+        turbine-excess inflow. The converter must pin min==max==volume_referencia
+        (not volume_minimo) so cobre doesn't store and shift that surplus across
+        stages, matching the daily-regulation ('D') collapse.
         """
+        from cobre_bridge.newave.converters.hydro import convert_hydros
+
+        # USINA_A: Vmin 100, Vmax 1000, Vref 550.
+        cadastro = _make_hidr_cadastro()
+        cadastro.loc[1, "tipo_regulacao"] = "S"
+        case = _hydro_case(tmp_path, cadastro=cadastro)
+
+        result = convert_hydros(case, self._make_id_map())
+        hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
+        assert hydro_a["reservoir"]["min_storage_hm3"] == 550.0
+        assert hydro_a["reservoir"]["max_storage_hm3"] == 550.0
+        # 'M' plant unchanged (keeps its full range).
+        hydro_b = next(h for h in result["hydros"] if h["name"] == "USINA_B")
+        assert hydro_b["reservoir"]["min_storage_hm3"] == 50.0
+        assert hydro_b["reservoir"]["max_storage_hm3"] == 500.0
+
+    def test_run_of_river_S_without_volref_keeps_full_range(self, tmp_path) -> None:
+        """When ``volume_referencia`` is absent/NaN, an 'S' plant is NOT collapsed.
+
+        Without a reference volume there is no defined point to freeze the range
+        at, so the converter leaves ``[volume_minimo, volume_maximo]`` untouched
+        rather than guessing (e.g. pinning to Vmin)."""
+        import numpy as np
+
         from cobre_bridge.newave.converters.hydro import convert_hydros
 
         cadastro = _make_hidr_cadastro()
         cadastro.loc[1, "tipo_regulacao"] = "S"  # USINA_A: Vmin 100, Vmax 1000
+        cadastro.loc[1, "volume_referencia"] = np.nan
         case = _hydro_case(tmp_path, cadastro=cadastro)
 
         result = convert_hydros(case, self._make_id_map())
         hydro_a = next(h for h in result["hydros"] if h["name"] == "USINA_A")
         assert hydro_a["reservoir"]["min_storage_hm3"] == 100.0
-        assert hydro_a["reservoir"]["max_storage_hm3"] == 100.0
-        # 'M' plant unchanged (keeps its full range).
-        hydro_b = next(h for h in result["hydros"] if h["name"] == "USINA_B")
-        assert hydro_b["reservoir"]["min_storage_hm3"] == 50.0
-        assert hydro_b["reservoir"]["max_storage_hm3"] == 500.0
+        assert hydro_a["reservoir"]["max_storage_hm3"] == 1000.0
 
     def test_cascade_downstream_linkage(self, tmp_path) -> None:
         """Plant 2 (code=2) is downstream of plant 1 (code=1)."""
@@ -927,3 +988,62 @@ class TestLegacyHydroShapeRejectedBy013:
         assert "bus_id" not in modern_hydro
         assert len(modern_hydro["unit_groups"]) == 1
         assert modern_hydro["unit_groups"][0]["bus_id"] == 3
+
+
+class TestExpansionPlantAdmission:
+    """An ``EE`` plant operates from stage 0 at its study-start configuration and
+    reaches the registry configuration as its ``exph`` machines enter."""
+
+    def _id_map(self) -> NewaveIdMap:
+        return NewaveIdMap(subsystem_ids=[1], hydro_codes=[1, 2], thermal_codes=[])
+
+    def _hydros(self, case) -> list[dict]:
+        from cobre_bridge.newave.converters.hydro import convert_hydros
+
+        return convert_hydros(case, self._id_map())["hydros"]
+
+    def _plant_b(self, case) -> dict:
+        return next(h for h in self._hydros(case) if h["name"] == "USINA_B")
+
+    def test_ee_plant_is_converted(self, tmp_path) -> None:
+        hydros = self._hydros(_ee_expansion_case(tmp_path))
+        assert {h["name"] for h in hydros} == {"USINA_A", "USINA_B"}
+
+    def test_declares_the_registry_configuration_not_the_start_one(
+        self, tmp_path
+    ) -> None:
+        # 3 x 150 (conjunto 1) + 2 x 120 (conjunto 2, entering) = 690 MW. A
+        # declaration left at the 450 MW start configuration would cap the plant
+        # there for every stage past the ramp, which carries no per-stage row.
+        ee = self._plant_b(_ee_expansion_case(tmp_path))
+        assert ee["generation"]["max_generation_mw"] == pytest.approx(690.0)
+        group = ee["unit_groups"][0]
+        assert group["max_generation_mw"] == ee["generation"]["max_generation_mw"]
+
+    def test_ramp_reports_start_and_full_capacity(self, tmp_path) -> None:
+        with dx.collect() as collected:
+            self._hydros(_ee_expansion_case(tmp_path))
+        diags = [d for d in collected if d.code == "ee-expansion-ramped"]
+        assert len(diags) == 1
+        assert diags[0].severity is Severity.INFO
+        assert diags[0].table is not None
+        assert diags[0].table.rows[0] == ["USINA_B", 2, "450.0", "690.0", 2, 6]
+
+    def test_ee_plant_without_exph_reports_nothing(self, tmp_path) -> None:
+        case = _hydro_case(tmp_path, confhd=_make_ee_confhd_df())
+        with dx.collect() as collected:
+            self._hydros(case)
+        assert [d for d in collected if d.code == "ee-expansion-ramped"] == []
+
+    def test_dated_entry_without_conjunto_is_not_a_ramp(self, tmp_path) -> None:
+        # A dated exph row with no machine group places no machine: the plant
+        # converts at its registry configuration instead of crashing.
+        exph = _make_ee_exph_mock()
+        exph.expansoes = exph.expansoes.iloc[:1].assign(
+            conjunto_maquina_entrada=float("nan")
+        )
+        case = _hydro_case(tmp_path, confhd=_make_ee_confhd_df(), exph=exph)
+        with dx.collect() as collected:
+            ee = self._plant_b(case)
+        assert ee["generation"]["max_generation_mw"] == pytest.approx(690.0)
+        assert [d for d in collected if d.code == "ee-expansion-ramped"] == []

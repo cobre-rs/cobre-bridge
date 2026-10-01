@@ -1,9 +1,13 @@
-"""Stage-math and ζ (zeta) pure helpers for the dead-volume filling mapping.
+"""Stage-math, ζ (zeta), and machine-count pure helpers for the ``exph`` mapping.
 
 This foundation module holds the calendar/horizon arithmetic shared by the
 filling converters and the fill-rate helpers: mapping a
 NEWAVE filling date to a Cobre 0-based stage index (:func:`stage_id`) and the
-per-month hm³-per-m³/s weight (:func:`zeta`).
+per-month hm³-per-m³/s weight (:func:`zeta`). It is also the one home for "how
+many machines are in service at stage *t*", for both kinds of ``exph`` plant:
+a not-yet-built one filling its dead volume (:func:`online_machines`) and one
+already in operation gaining machines (:class:`ExpansionConfig`), both reading
+the machine entries through :func:`exph_unit_rows`.
 
 All functions are pure (no logging, no I/O) so they can be reused and tested in
 isolation. The module deliberately depends on nothing under
@@ -16,8 +20,11 @@ from __future__ import annotations
 
 import calendar
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
+
+import pandas as pd
 
 
 def month_hours(year: int, month: int) -> float:
@@ -158,6 +165,110 @@ def filling_min_rate_m3s(
     if denom > 0.0:
         return remaining / denom
     return 0.0
+
+
+def expansion_machine_counts(
+    registry_counts: Mapping[int, int],
+    start_counts: Mapping[int, int],
+    unit_rows: Sequence[tuple[int, int]],
+    query_stage_id: int,
+) -> dict[int, int]:
+    """Machines in service per ``conjunto`` at *query_stage_id* for an expanding plant.
+
+    *registry_counts* is the final configuration (``hidr.dat``, entering machines
+    included), *start_counts* the study-start one (``modif.dat`` ``NUMMAQ``
+    applied), and *unit_rows* the ``(conjunto, entry_stage_id)`` of each entering
+    machine. The count is ``min(registry, base + entered)`` with
+    ``base = min(start, registry − all entering)``: the floor keeps a deck that
+    declares no ``NUMMAQ`` (``start`` equal to the registry) from crediting the
+    entering machines twice. Every conjunto of *registry_counts* is covered.
+    """
+    entering_total: Counter[int] = Counter(conjunto for conjunto, _ in unit_rows)
+    entered = Counter(
+        conjunto
+        for conjunto, entry_stage_id in unit_rows
+        if entry_stage_id <= query_stage_id
+    )
+    counts: dict[int, int] = {}
+    for conjunto, registry in registry_counts.items():
+        base = min(
+            start_counts.get(conjunto, registry),
+            registry - entering_total.get(conjunto, 0),
+        )
+        counts[conjunto] = min(registry, base + entered.get(conjunto, 0))
+    return counts
+
+
+def exph_unit_rows(
+    exph_df: pd.DataFrame, code: int, start_year: int, start_month: int
+) -> tuple[tuple[int, int], ...]:
+    """``(conjunto, entry_stage_id)`` of every machine plant *code* brings online.
+
+    inewave parses ``data_entrada_operacao`` and ``conjunto_maquina_entrada``
+    independently, so a row missing either cannot place a machine and is skipped
+    rather than cast (a ``NaT`` date would crash the stage arithmetic).
+    """
+    rows = exph_df.loc[
+        (exph_df["codigo_usina"] == code) & exph_df["data_entrada_operacao"].notna()
+    ]
+    return tuple(
+        (int(conjunto), stage_id(entry.year, entry.month, start_year, start_month))
+        for entry, conjunto in zip(
+            rows["data_entrada_operacao"], rows["conjunto_maquina_entrada"]
+        )
+        if not pd.isna(conjunto)
+    )
+
+
+def hreg_with_machines(hreg: pd.Series, counts: Mapping[int, int]) -> pd.Series:
+    """A copy of cadastro row *hreg* whose machine counts are *counts*.
+
+    ``numero_conjuntos_maquinas`` is widened to cover every conjunto in
+    *counts*, since the capacity helpers loop ``1..numero_conjuntos_maquinas``.
+    """
+    hreg_copy = hreg.copy()
+    for conjunto, count in counts.items():
+        hreg_copy[f"maquinas_conjunto_{conjunto}"] = int(count)
+    if counts:
+        hreg_copy["numero_conjuntos_maquinas"] = max(counts)
+    return hreg_copy
+
+
+@dataclass(frozen=True)
+class ExpansionConfig:
+    """An ``EE`` plant's machine configuration across the study horizon.
+
+    The three fields are the inputs of :func:`expansion_machine_counts`; a
+    conjunto ``NUMCNJ`` drops at the study start has a start count of ``0``.
+    """
+
+    registry_counts: dict[int, int]
+    start_counts: dict[int, int]
+    unit_rows: tuple[tuple[int, int], ...]
+
+    @property
+    def full_online_stage(self) -> int:
+        """First stage at which every entering machine is in service."""
+        return max(stage for _conjunto, stage in self.unit_rows)
+
+    def hreg_at(self, hreg: pd.Series, stage: int) -> pd.Series:
+        """Cadastro row *hreg* with the machines in service at *stage*."""
+        return hreg_with_machines(
+            hreg,
+            expansion_machine_counts(
+                self.registry_counts, self.start_counts, self.unit_rows, stage
+            ),
+        )
+
+    def declared_hreg(self, hreg: pd.Series) -> pd.Series:
+        """Cadastro row *hreg* at the configuration ``hydros.json`` declares.
+
+        The final one, never the study-start one: cobre forbids a per-stage
+        bound above the declaration and the stages past the ramp carry no
+        bound, so a start-configuration declaration would cap the plant there
+        for the rest of the horizon.
+        """
+        return self.hreg_at(hreg, self.full_online_stage)
 
 
 def online_machines(

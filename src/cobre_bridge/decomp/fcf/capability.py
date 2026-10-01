@@ -160,7 +160,6 @@ def _probe_cbvf_roundtrip() -> None:
         warm_start_cuts=0,
         rng_seed=0,
         created_at=_PROBE_CREATED_AT,
-        cobre_version="0.0.0",
     )
 
     with tempfile.TemporaryDirectory() as tmp_dir:

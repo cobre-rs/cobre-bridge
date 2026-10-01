@@ -121,10 +121,10 @@ def build_id_map(nw_files: NewaveFiles) -> NewaveIdMap:
 
     This path-only entry point intentionally does **not** thread ``exph``, so it
     forwards ``exph=None`` to :func:`build_id_map_from_readers`: the comparators and
-    any other caller that only holds paths keep the ``EX``-only enumeration (they run
-    against already-existing ``EX`` cases). The conversion pipeline admits
-    ``NE``-with-filling plants through :attr:`NewaveCase.id_map`, which passes the
-    case's ``exph`` reader.
+    any other caller that only holds paths keep the in-service-only enumeration
+    (they run against cases whose plants are already in service). The conversion
+    pipeline admits ``NE``-with-filling plants through :attr:`NewaveCase.id_map`,
+    which passes the case's ``exph`` reader.
     """
     from inewave.newave import Confhd, Conft, Hidr, Ree, Sistema
 
@@ -156,7 +156,7 @@ def build_id_map_from_readers(
     threaded into :func:`plants.active_hydro_codes`, admitting the ``NE`` plants that
     carry a dead-volume filling row (each at its confhd declaration position). With
     ``exph is None`` — the default, used by every path-only caller (``build_id_map``,
-    the comparators) — enumeration is byte-identical to the ``EX``-only set: no ``NE``
+    the comparators) — enumeration is byte-identical to the in-service set: no ``NE``
     plant is admitted.
     """
     # Hydro codes from confhd — existing plants minus the fictitious accounting

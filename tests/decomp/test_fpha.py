@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro
+from cobre_bridge.core import diagnostics as dx
+from cobre_bridge.core.diagnostics import Severity
+from cobre_bridge.decomp.converters.cadastro import EffectiveCadastro, MachineSet
 from cobre_bridge.decomp.converters.fpha import (
     FPHA_VOLUME_WINDOW_FRACTION,
     convert_hydro_geometry,
@@ -34,6 +36,10 @@ def _plant_row(
     cota_area: tuple[float, ...] = (1.0, 0.01, 0.0, 0.0, 0.0),
     rho_esp: float = 0.009,
     tipo_regulacao: str = "M",
+    n_conjuntos: int = 1,
+    maquinas: int = 2,
+    potencia: float = 50.0,
+    vazao: float = 100.0,
 ) -> dict:
     row: dict = {
         "nome_usina": name,
@@ -45,11 +51,22 @@ def _plant_row(
         "tipo_perda": 0,
         "perdas": 0.0,
         "tipo_regulacao": tipo_regulacao,
+        "numero_conjuntos_maquinas": n_conjuntos,
     }
     for i, a in enumerate(volume_cota):
         row[f"a{i}_volume_cota"] = a
     for i, a in enumerate(cota_area):
         row[f"a{i}_cota_area"] = a
+    # Machine set columns for up to 5 conjuntos
+    for i in range(1, 6):
+        if i <= n_conjuntos:
+            row[f"maquinas_conjunto_{i}"] = maquinas
+            row[f"potencia_nominal_conjunto_{i}"] = potencia
+            row[f"vazao_nominal_conjunto_{i}"] = vazao
+        else:
+            row[f"maquinas_conjunto_{i}"] = 0
+            row[f"potencia_nominal_conjunto_{i}"] = 0.0
+            row[f"vazao_nominal_conjunto_{i}"] = 0.0
     return row
 
 
@@ -110,6 +127,66 @@ def test_is_fpha_eligible_false_for_degenerate_cota() -> None:
 def test_is_fpha_eligible_false_for_nonpositive_rho_esp() -> None:
     eff = _effective({1: _plant_row(rho_esp=0.0)})
     assert is_fpha_eligible(eff, 1) is False
+
+
+def test_is_fpha_eligible_false_for_zero_generation_capacity() -> None:
+    eff = _effective({1: _plant_row(potencia=0.0)})
+    assert is_fpha_eligible(eff, 1) is False
+
+
+def test_is_fpha_eligible_false_for_zero_turbined_capacity() -> None:
+    eff = _effective({1: _plant_row(vazao=0.0)})
+    assert is_fpha_eligible(eff, 1) is False
+
+
+def _effective_with_machine_set(
+    stages: tuple[MachineSet, ...],
+) -> EffectiveCadastro:
+    hidr = pd.DataFrame({1: _plant_row()}).T
+    hidr.index.name = "codigo_usina"
+    return EffectiveCadastro(
+        base=hidr,
+        n_stages=len(stages),
+        stage_varying={},
+        machine_sets={(1, 1): stages},
+    )
+
+
+def test_is_fpha_eligible_false_for_ac_potefe_zero() -> None:
+    eff = _effective_with_machine_set((MachineSet(2, 0.0, 100.0),))
+    assert is_fpha_eligible(eff, 1) is False
+
+
+def test_is_fpha_eligible_false_for_ac_vazefe_zero() -> None:
+    eff = _effective_with_machine_set((MachineSet(2, 50.0, 0.0),))
+    assert is_fpha_eligible(eff, 1) is False
+
+
+def test_is_fpha_eligible_true_when_capacity_positive_at_any_stage() -> None:
+    # cobre fits against the max-over-stages envelope hydros.json declares.
+    eff = _effective_with_machine_set(
+        (MachineSet(0, 50.0, 100.0), MachineSet(2, 50.0, 100.0))
+    )
+    assert is_fpha_eligible(eff, 1) is True
+
+
+def test_fpha_eligible_codes_reports_zero_capacity_plants() -> None:
+    eff = _effective(
+        {
+            1: _plant_row(name="A"),
+            2: _plant_row(name="B", maquinas=0),
+            3: _plant_row(name="C", rho_esp=0.0, maquinas=0),
+        }
+    )
+    with dx.collect() as collected:
+        codes = fpha_eligible_codes(eff, _id_map((1, 2, 3)))
+
+    assert codes == {1}
+    [diagnostic] = [d for d in collected if d.code == "fpha-zero-capacity"]
+    assert diagnostic.severity is Severity.INFO
+    # Plant 3 already fails the curve inputs, so only plant 2 is reported.
+    assert diagnostic.table is not None
+    assert diagnostic.table.rows == [["B", 2, 0.0, 0.0]]
 
 
 def test_fpha_eligible_codes_filters_operated() -> None:

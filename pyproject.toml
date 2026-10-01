@@ -4,33 +4,33 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.16.0"
+version = "0.17.0"
 description = "Convert NEWAVE and DECOMP cases to Cobre input format and compare the results"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
 dependencies = [
     "idecomp>=1.14.2",
-    # 1.15.1 (not 1.15.0) is the first release to correctly decode the hybrid
-    # production cortes (`Cortes.from_cortesh(por_estagio=True)`); 1.15.0 mis-decodes.
-    "inewave>=1.15.1",
-    "pyarrow>=24.0.0",
-    "pandas>=3.0.3",
-    "plotly>=6.8.0",
-    "polars>=1.42.0",
+    # 1.16.1: first to read modif.dat VAZMINT PRE/POS markers (1.16.0: modif.dat
+    # POTEFE/VOLCOTA/COTAREA and vazoes.dat at 600 postos).
+    "inewave>=1.16.1",
+    "pyarrow>=25.0.1",
+    "pandas>=3.0.6",
+    "plotly>=7.1.0",
+    "polars>=1.44.2",
     "rich>=15.0.0",
-    "typer>=0.26.8",
+    "typer>=0.27.2",
     # REQUIRED runtime dep, not an optional extra: `convert decomp` imports the
     # boundary FCF by default and `convert --validate` / `compare` load cobre
     # output, so `import cobre` must work out of the box. Keep the floor in
     # lockstep with MIN_COBRE_VERSION in cobre/compat.py (which documents the contract).
-    "cobre-python>=0.16.0,<0.17",
+    "cobre-python>=0.17.0,<0.18",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=9.1.1",
-    "ty>=0.0.55",
+    "ty>=0.0.84",
     "pytest-cov",
     "ruff",
     "jsonschema",

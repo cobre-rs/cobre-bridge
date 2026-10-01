@@ -122,7 +122,7 @@ def switch_off_diagnostic(switch: Switch) -> Diagnostic:
         ),
         notes=[f"switch: {switch.field}"],
         remediation=(
-            f"→ Change {switch.label} in dger.dat if {switch.ignored} should be "
+            f"Change {switch.label} in dger.dat if {switch.ignored} should be "
             "considered; otherwise this is informational."
         ),
     )

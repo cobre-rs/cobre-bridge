@@ -32,6 +32,7 @@ import pandas as pd
 import polars as pl
 
 from cobre_bridge.core.paths import find_case_insensitive
+from cobre_bridge.newave.files import NewaveFiles
 
 _LOG = logging.getLogger(__name__)
 
@@ -681,8 +682,9 @@ def read_newave_net_load_nwlistop(newave_dir: Path) -> pl.DataFrame:
     ).cast({"newave_code": pl.Int64, "stage": pl.Int64, "value": pl.Float64})
 
 
-def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
-    """Read deterministic net load from ``sistema.dat`` and ``c_adic.dat``.
+def read_newave_net_load(files: NewaveFiles) -> pl.DataFrame:
+    """Read deterministic net load from the case's subsystem and additional-load
+    files (``sistema`` and ``c_adic`` as ``arquivos`` names them).
 
     Computes ``net_load = mercado_energia + c_adic - sum(geracao_usinas_nao_simuladas)``
     per submarket and date.  The C_ADIC contribution (must-take energy from
@@ -701,7 +703,7 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
     falling back to this ``sistema.dat`` reconstruction (study period only,
     since post-study dates are written under a filtered-out sentinel year).
     """
-    nwlistop = read_newave_net_load_nwlistop(newave_dir)
+    nwlistop = read_newave_net_load_nwlistop(files.directory)
     if not nwlistop.is_empty():
         return nwlistop
 
@@ -714,9 +716,9 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
         }
     )
 
-    sistema_path = find_case_insensitive(newave_dir, "sistema.dat")
-    if sistema_path is None:
-        _LOG.warning("sistema.dat not found in %s", newave_dir)
+    sistema_path = files.sistema
+    if not sistema_path.is_file():
+        _LOG.warning("%s not found in %s", sistema_path.name, files.directory)
         return empty
 
     try:
@@ -726,7 +728,7 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
         load_df = sistema.mercado_energia
         ncs_df = sistema.geracao_usinas_nao_simuladas
     except Exception:  # noqa: BLE001
-        _LOG.warning("Failed to read sistema.dat for net load")
+        _LOG.warning("Failed to read %s for net load", sistema_path.name)
         return empty
 
     if load_df is None or load_df.empty:
@@ -737,7 +739,7 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
     load_df = load_df[load_df["data"].dt.year < 9000]
 
     # Add C_ADIC must-take energy (Itaipu, ANDE, MMGD, etc.) to load.
-    cadical_path = find_case_insensitive(newave_dir, "c_adic.dat")
+    cadical_path = files.c_adic
     if cadical_path is not None:
         try:
             from cobre_bridge.newave.converters.stochastic import parse_cadical
@@ -759,7 +761,9 @@ def read_newave_net_load(newave_dir: Path) -> pl.DataFrame:
                 axis=1,
             )
         except Exception:  # noqa: BLE001
-            _LOG.warning("Failed to parse c_adic.dat for net load adjustment")
+            _LOG.warning(
+                "Failed to parse %s for net load adjustment", cadical_path.name
+            )
 
     # NCS: sum across all source types per (submarket, date).
     ncs_total = None

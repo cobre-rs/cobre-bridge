@@ -81,7 +81,6 @@ def test_build_metadata_refuses_none_cost_scale_factor() -> None:
             warm_start_cuts=0,
             rng_seed=0,
             created_at="2026-08-03T00:00:00Z",
-            cobre_version="0.13.0",
         )
 
 
@@ -113,7 +112,6 @@ def test_write_boundary_checkpoint_creates_files(tmp_path: Path) -> None:
         warm_start_cuts=0,
         rng_seed=0,
         created_at="2026-08-03T00:00:00Z",
-        cobre_version="0.14.0",
     )
 
     boundary_dir = tmp_path / "boundary"
@@ -132,6 +130,9 @@ def test_write_boundary_checkpoint_creates_files(tmp_path: Path) -> None:
     # "producer" block; state_dimension is no longer a metadata field.
     assert "state_dimension" not in reloaded["metadata"]
     assert reloaded["metadata"]["producer"]["cost_scale_factor"] is not None
+    # Only the cobre version that wrote a checkpoint loads it, so the boundary
+    # must carry the installed cobre-python's own version.
+    assert reloaded["metadata"]["cobre_version"] == cobre.__version__
     reloaded_stage = reloaded["stage_cuts"][0]
     assert reloaded_stage["state_dimension"] == 2
     assert len(reloaded_stage["cuts"]) == 1

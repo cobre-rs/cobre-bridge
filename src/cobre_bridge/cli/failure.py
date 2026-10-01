@@ -29,6 +29,14 @@ def _emit_convert_json(document: dict[str, object]) -> None:
     sys.stdout.write("\n")
 
 
+#: Operation named in a failure's heading, category and title, by command family.
+_FAILURE_CONTEXT = {
+    "convert": "Conversion",
+    "compare": "Comparison",
+    "dashboard": "Dashboard",
+}
+
+
 def _fail(
     command: str,
     args: CommonArgs,
@@ -38,9 +46,15 @@ def _fail(
     summary: Mapping[str, object] | None = None,
 ) -> NoReturn:
     """Render + (under --json) emit one failure verdict, then Exit(code)."""
-    diag = diagnostic_from_exception(exc, context=command)
+    context = _FAILURE_CONTEXT[command.split()[0]]
+    diag = diagnostic_from_exception(exc, context=context)
     if args.json_output:
         _emit_convert_json(build_verdict(command, "error", summary or {}, [diag]))
     else:
-        render_diagnostics([diag], console=args.err_console(), quiet=args.quiet)
+        render_diagnostics(
+            [diag],
+            heading=f"{context} notes",
+            console=args.err_console(),
+            quiet=args.quiet,
+        )
     raise typer.Exit(code=code)

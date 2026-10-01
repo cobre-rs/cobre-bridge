@@ -432,7 +432,7 @@ summary = "Volume inicial de cada usina operada (`UH` com `volume_inicial`), em 
   path = "past_anticipated_commitments[].value_mw"
   from = [ { file = "dadgnl", register = "GL", item = "geracao" }, { file = "dadgnl", register = "GL", item = "duracao" }, { file = "dadgnl", register = "TG", item = "inflexibilidade, disponibilidade" } ]
   when = "somente quando `dadgnl` declara despacho GNL comprometido (algum `GL` com `geracao` não nula)"
-  how = "MW comprometido: média de `geracao` ponderada pelas `duracao` de patamar de cada registro `GL`; nas janelas de classe 2, as semanas `GL` que caem no estágio são refundidas por horas sobre o estágio (0 onde não há nenhuma). O valor é limitado à faixa `[min_mw, max_mw]` da usina com aviso."
+  how = "MW comprometido: média de `geracao` ponderada pelas `duracao` de patamar de cada registro `GL`; nas janelas de classe 2, as semanas `GL` que caem no estágio são refundidas por horas sobre o estágio (0 onde não há nenhuma). O valor é limitado, com aviso, à faixa de `TG` do seu estágio (inflexibilidade e disponibilidade ponderadas pelas horas de patamar, herdando o último `TG` declarado); as janelas de classe 4 usam a do último estágio do estudo."
 
 # ---------------------------------------------------------------------------
 # system/buses.json
@@ -583,18 +583,18 @@ summary = "Uma térmica por `codigo_usina` de `CT`, com os valores do estágio 1
 
   [[output.field]]
   path = "thermals[].cost_per_mwh"
-  from = [ { file = "dadger", register = "CT", item = "cvu" }, { file = "dadger", register = "DP", item = "duracao" }, { file = "dadgnl", register = "TG", item = "cvu" }, { file = "dadgnl", register = "GL", item = "duracao" } ]
-  how = "CVU do estágio 1 por patamar (`cvu_k`, em branco lido como 0), ponderado pelas horas de patamar de `DP`; estágios seguintes vão para `constraints/thermal_bounds.parquet`. GNL: `cvu_1..3` de `TG` ponderados pelas `duracao` do `GL` do estágio 1 (média simples sem ele)."
+  from = [ { file = "dadger", register = "CT", item = "cvu" }, { file = "dadger", register = "DP", item = "duracao" }, { file = "dadgnl", register = "TG", item = "cvu" } ]
+  how = "CVU do estágio 1 por patamar (`cvu_k`, em branco lido como 0), ponderado pelas horas de patamar de `DP`; estágios seguintes vão para `constraints/thermal_bounds.parquet`. GNL: o mesmo com o `TG` do estágio 1."
 
   [[output.field]]
   path = "thermals[].generation.min_mw"
   from = [ { file = "dadger", register = "CT", item = "inflexibilidade" }, { file = "dadger", register = "DP", item = "duracao" }, { file = "dadgnl", register = "TG", item = "inflexibilidade" } ]
-  how = "Inflexibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: `inflexibilidade_1..3` de `TG` com a mesma ponderação do custo."
+  how = "Inflexibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: a menor inflexibilidade de `TG` entre os estágios, cada um ponderado pelas suas horas de patamar (um estágio sem registro `TG` herda o último declarado, como em `CT`), para que todo compromisso dentro da capacidade do seu estágio seja aceito."
 
   [[output.field]]
   path = "thermals[].generation.max_mw"
   from = [ { file = "dadger", register = "CT", item = "disponibilidade" }, { file = "dadger", register = "DP", item = "duracao" }, { file = "dadgnl", register = "TG", item = "disponibilidade" } ]
-  how = "Disponibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: `disponibilidade_1..3` de `TG` com a mesma ponderação do custo."
+  how = "Disponibilidade do estágio 1 por patamar, ponderada pelas horas de patamar. GNL: a maior disponibilidade de `TG` entre os estágios, com a mesma ponderação e herança da inflexibilidade."
 
   [[output.field]]
   path = "thermals[].anticipated_config.lead_time_hours"
@@ -772,7 +772,7 @@ summary = "Declara, para cada usina operada, os parâmetros `@rho_eq_h{id}` e `@
   path = "scalar_parameters[].kind"
   from = [ { file = "dadger", register = "HE", item = "codigo_restricao" }, { file = "dadger", register = "CM", item = "codigo_ree" }, { file = "dadger", register = "UH", item = "codigo_ree" } ]
   status = "derived"
-  how = "`computed` por padrão. `per_stage` no `rho_acum` de cada usina que participa da expressão de alguma RHE emitida: membros da REE (`codigo_ree` de `UH`) nomeada por `CM`, restritos a reservatórios de regularização mensal (`tipo_regulacao` = `M`) com volume útil positivo."
+  how = "`computed` por padrão. `per_stage` no `rho_acum` de cada usina que participa da expressão de alguma RHE emitida: membros da REE (`codigo_ree` de `UH`) nomeada por `CM`, restritos a reservatórios (`tipo_regulacao` = `M` ou `S`) com volume útil positivo."
 
   [[output.field]]
   path = "scalar_parameters[].computed_spec.tag"
@@ -789,7 +789,7 @@ summary = "Declara, para cada usina operada, os parâmetros `@rho_eq_h{id}` e `@
   [[output.field]]
   path = "scalar_parameters[].values[][]"
   from = [ { file = "hidr", item = "a0_volume_cota … a4_volume_cota" }, { file = "hidr", item = "volume_minimo, volume_maximo, volume_referencia" }, { file = "hidr", item = "produtibilidade_especifica, canal_fuga_medio, tipo_regulacao" }, { file = "hidr", item = "codigo_usina_jusante" }, { file = "dadger", register = "AC", item = "COTVOL, JUSMED, VOLMIN, VOLMAX, NUMJUS" }, { file = "dadger", register = "DP", item = "duracao" } ]
-  how = "Pares `[estágio, ρ_acum]` em MWmês/hm³. Por estágio, a produtibilidade de energia armazenada própria de cada usina operada (integral da altura em `[vmin, vmax]` para `tipo_regulacao` = `M`; ponto em `volume_referencia` para `D`/`S`) é somada ao longo da cascata operada (`codigo_usina_jusante`, com `AC NUMJUS`), e o total é dividido por `3600 · H / 1e6`, com `H` as horas do estágio. Os `AC COTVOL`/`JUSMED`/`VOLMIN`/`VOLMAX` vigentes deslocam o valor do estágio. Emitido apenas para as usinas referenciadas por uma RHE."
+  how = "Pares `[estágio, ρ_acum]` em MWmês/hm³. Por estágio, a produtibilidade de energia armazenada própria de cada usina operada (integral da altura em `[vmin, vmax]` para `tipo_regulacao` = `M` ou `S`; ponto em `volume_referencia` para `D`) é somada ao longo da cascata operada (`codigo_usina_jusante`, com `AC NUMJUS`), e o total é dividido por `3600 · H / 1e6`, com `H` as horas do estágio. Os `AC COTVOL`/`JUSMED`/`VOLMIN`/`VOLMAX` vigentes deslocam o valor do estágio. Emitido apenas para as usinas referenciadas por uma RHE."
 
 # ---------------------------------------------------------------------------
 # constraints/line_bounds.parquet
@@ -991,18 +991,18 @@ summary = "Calendário pós-estudo na grade semanal (sábados): preenche as sema
 
   [[output.field]]
   path = "thermal_bounds[].cost_per_mwh"
-  from = [ { file = "dadgnl", register = "TG", item = "cvu" }, { file = "dadgnl", register = "GL", item = "duracao" } ]
-  how = "`cvu_1..3` de `TG` ponderados pelas `duracao` do `GL` do estágio 1 (média simples sem ele); o mesmo valor de `system/thermals.json`."
+  from = [ { file = "dadgnl", register = "TG", item = "cvu" }, { file = "dadger", register = "DP", item = "duracao" } ]
+  how = "`cvu_1..3` do `TG` vigente no último estágio do estudo (o último declarado), ponderados pelas horas de patamar desse estágio."
 
   [[output.field]]
   path = "thermal_bounds[].min_mw"
-  from = [ { file = "dadgnl", register = "TG", item = "inflexibilidade" }, { file = "dadgnl", register = "GL", item = "duracao" } ]
-  how = "`inflexibilidade_1..3` de `TG` com a mesma ponderação."
+  from = [ { file = "dadgnl", register = "TG", item = "inflexibilidade" }, { file = "dadger", register = "DP", item = "duracao" } ]
+  how = "`inflexibilidade_1..3` do mesmo `TG`, com a mesma ponderação."
 
   [[output.field]]
   path = "thermal_bounds[].max_mw"
-  from = [ { file = "dadgnl", register = "TG", item = "disponibilidade" }, { file = "dadgnl", register = "GL", item = "duracao" } ]
-  how = "`disponibilidade_1..3` de `TG` com a mesma ponderação."
+  from = [ { file = "dadgnl", register = "TG", item = "disponibilidade" }, { file = "dadger", register = "DP", item = "duracao" } ]
+  how = "`disponibilidade_1..3` do mesmo `TG`, com a mesma ponderação."
 
 # ---------------------------------------------------------------------------
 # system/energy_contracts.json (conditional)
@@ -1213,7 +1213,7 @@ summary = "Uma entrada por usina hidráulica operada (registro `UH` com `volume_
     { file = "dadger", register = "AC", item = "PROESP" },
   ]
   status = "derived"
-  how = "`fpha` quando o polinômio cota-volume efetivo (pós `AC COTVOL`) do estágio inicial não é identicamente nulo e a produtibilidade específica efetiva (pós `AC PROESP`) é positiva; caso contrário `constant_productivity`, com o ρ_eq em `system/hydro_energy_productivity.parquet`."
+  how = "`fpha` quando o polinômio cota-volume efetivo (pós `AC COTVOL`) do estágio inicial não é identicamente nulo, a produtibilidade específica efetiva (pós `AC PROESP`) é positiva e o engolimento e a potência nominais efetivos (maior valor ao longo dos estágios, pós `AC NUMCON`/`NUMMAQ`/`POTEFE`/`VAZEFE`) são positivos; caso contrário `constant_productivity`, e a usina excluída só pela capacidade nula é listada em diagnóstico informativo, com o ρ_eq em `system/hydro_energy_productivity.parquet`."
 
   [[output.field]]
   path = "hydros[].generation.min_turbined_m3s"
@@ -1495,7 +1495,7 @@ summary = "Uma entrada por usina operada com um único intervalo de estágios co
     { file = "dadger", register = "AC", item = "PROESP" },
   ]
   status = "derived"
-  how = "`fpha` para as usinas com polinômio cota-volume efetivo não nulo e produtibilidade específica positiva no estágio inicial; `constant_productivity` para as demais. É o mesmo critério de `generation.model` em `system/hydros.json`."
+  how = "`fpha` para as usinas com polinômio cota-volume efetivo não nulo e produtibilidade específica positiva no estágio inicial e engolimento e potência nominais efetivos positivos; `constant_productivity` para as demais. É o mesmo critério de `generation.model` em `system/hydros.json`."
 
   [[output.field]]
   path = "production_models[].stage_ranges[].fpha_config.source"
@@ -1776,7 +1776,7 @@ summary = "Sobrescritas por (usina, estágio, patamar) dos limites declarados em
   path = "block_id"
   from = [ { file = "dadger", register = "DP", item = "numero_patamares" } ]
   status = "derived"
-  how = "Nulo na linha-base (vale para todos os patamares); 0..n−1 quando algum contribuinte do eixo naquele estágio é por patamar (`RQ` com percentuais desiguais, `LU`/`LQ` por patamar): então todos os patamares do estágio são materializados. Os eixos de armazenamento e retirada de água são sempre de estágio."
+  how = "Nulo na linha-base (vale para todos os patamares); 0..n−1 quando algum contribuinte do eixo naquele estágio é por patamar (`LU`/`LQ` por patamar): então todos os patamares do estágio são materializados. O piso `RQ`/`UH` de defluência é por estágio (linha-base). Os eixos de armazenamento e retirada de água são sempre de estágio."
 
   [[output.field]]
   path = "min_outflow_m3s"
@@ -1792,8 +1792,11 @@ summary = "Sobrescritas por (usina, estágio, patamar) dos limites declarados em
     { file = "dadger", register = "CQ", item = "codigo_usina" },
     { file = "dadger", register = "CQ", item = "tipo" },
     { file = "dadger", register = "CQ", item = "coeficiente" },
+    { file = "hidr", item = "tipo_regulacao" },
+    { file = "hidr", item = "codigo_usina_jusante" },
+    { file = "dadger", register = "AC", item = "NUMJUS" },
   ]
-  how = "Piso de defluência: a `vazao_defluente_minima` do `UH` (fixa em todos os estágios) ou, na sua ausência, o percentual por patamar do `RQ` da REE da usina aplicado à `vazao_minima_historica` efetiva (`AC VAZMIN`), como média ponderada pelas horas quando os patamares coincidem e por patamar quando não; valores não positivos não geram linha. Um piso `QDEF` de RHQ de termo único (`LQ` limite inferior por patamar, herdado entre estágios) coexiste e o maior piso prevalece."
+  how = "Piso de defluência: a `vazao_defluente_minima` do `UH` (fixa em todos os estágios) ou, na sua ausência, o percentual por estágio do `RQ` da REE da usina (`vazao_1` → estágio 0, `vazao_2` → estágio 1, …, repetindo o último declarado além das colunas do registro) aplicado à `vazao_minima_historica` efetiva (`AC VAZMIN`), um piso por (usina, estágio); valores não positivos não geram linha. Um piso `QDEF` de RHQ de termo único (`LQ` limite inferior por patamar, herdado entre estágios) coexiste e o maior piso prevalece. O piso padrão `RQ`/`UH` é liberado para as usinas a fio d'água desde a cabeceira até (exclusive) o primeiro reservatório da cascata (`tipo_regulacao` M ou S; jusante efetiva `codigo_usina_jusante` com `AC NUMJUS`): essas usinas não recebem piso `RQ`/`UH`. Uma janela `QDEF` de RHQ é uma restrição declarada pelo usuário e não é liberada — continua valendo."
 
   [[output.field]]
   path = "max_outflow_m3s"
@@ -2551,7 +2554,7 @@ summary = "Uma entrada por restrição especial que não se reduz a limite de en
     { file = "libs_restricao_eletrica", item = "EXPRESSAO-ELETRICA · formula" },
     { file = "renovaveis", item = "PEE-CAD · codigo_pee" },
   ]
-  how = "Soma linear de termos `coeficiente * token`, com coeficiente unitário omitido: `FU` → `hydro_generation(id)`, `FT` → `thermal_generation(id)`, `FI` → `line_direct(id)`/`line_reverse(id)` pela orientação do par nas linhas `IA`, `CQ.tipo` `QDEF`/`QTUR`/`QVER`/`QDES` → `hydro_outflow`/`hydro_turbined`/`hydro_spillage`/`hydro_diversion(id)`, `QBOM` → `pumping_flow(id)` da estação `UE`, `CV.tipo` `VARM` → `hydro_storage(id)`; `HE` expande cada REE (`CM`) em `@rho_acum_h<id> * hydro_storage(id)` sobre os reservatórios de regularização mensal (`M`) ligados ao REE por `UH.codigo_ree`, com o sinal do `CM`. Nas restrições LIBs a fórmula (com `EXPRESSAO-ELETRICA` expandida) mantém apenas os termos de decisão `ger_usih`/`ger_usit`/`ger_pee`/`ger_conjh`/`ener_interc`, mapeados para os mesmos tokens (`ger_pee` → `non_controllable_generation`, `ger_conjh` → `hydro_generation(id, bus=…)`); os termos de dados (`demanda`, `carga_ande`, aliases, `disp_usih`) são dobrados no limite."
+  how = "Soma linear de termos `coeficiente * token`, com coeficiente unitário omitido: `FU` → `hydro_generation(id)`, `FT` → `thermal_generation(id)`, `FI` → `line_direct(id)`/`line_reverse(id)` pela orientação do par nas linhas `IA`, `CQ.tipo` `QDEF`/`QTUR`/`QVER`/`QDES` → `hydro_outflow`/`hydro_turbined`/`hydro_spillage`/`hydro_diversion(id)`, `QBOM` → `pumping_flow(id)` da estação `UE`, `CV.tipo` `VARM` → `hydro_storage(id)`; `HE` expande cada REE (`CM`) em `@rho_acum_h<id> * hydro_storage(id)` sobre os reservatórios (`M` ou `S`) com volume útil positivo ligados ao REE por `UH.codigo_ree`, com o sinal do `CM`. Nas restrições LIBs a fórmula (com `EXPRESSAO-ELETRICA` expandida) mantém apenas os termos de decisão `ger_usih`/`ger_usit`/`ger_pee`/`ger_conjh`/`ener_interc`, mapeados para os mesmos tokens (`ger_pee` → `non_controllable_generation`, `ger_conjh` → `hydro_generation(id, bus=…)`); os termos de dados (`demanda`, `carga_ande`, aliases, `disp_usih`) são dobrados no limite."
 
   [[output.field]]
   path = "constraints[].slack.enabled"

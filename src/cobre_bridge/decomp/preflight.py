@@ -358,7 +358,7 @@ def _ac_coverage(
                     ],
                 ),
                 remediation=(
-                    "→ Check the override's (mes, semana, ano) triple against "
+                    "Check the override's (mes, semana, ano) triple against "
                     "the deck's study horizon."
                 ),
             )

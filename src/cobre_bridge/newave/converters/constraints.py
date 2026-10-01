@@ -1224,8 +1224,9 @@ def _parse_re_dat(
         Mapping from constraint code to list of the source model plant codes.
     re_dat_bounds : dict[int, dict[tuple[int, int], float]]
         ``{constraint_code: {(stage_id, block_id): upper_bound}}``.
-        ``patamar=0`` in RE.DAT is expanded to all 3 blocks.
-        Bounds are forward-filled through the study horizon.
+        ``patamar=0`` in RE.DAT is expanded to all blocks.  A bound covers
+        only the stages its own row declares — the row's ``mes_fim``/
+        ``ano_fim`` ends it, and stages no row covers carry no bound.
     """
     conjuntos: dict[int, list[int]] = {}
     re_dat_bounds: dict[int, dict[tuple[int, int], float]] = {}
@@ -1287,30 +1288,16 @@ def _parse_re_dat(
         if not changepoints:
             continue
 
-        # Build the full stage→bound map with forward-fill.
-        # Sort by stage, then by patamar for deterministic processing.
+        # Patamar 0 sorts first, so a patamar-specific row wins its block.
         changepoints.sort()
-        first_stage = changepoints[0][0]
-
-        # Current value per block (forward-filled).
-        current: dict[int, float] = {}  # block_id -> value
-        cp_idx = 0
         stage_bounds: dict[tuple[int, int], float] = {}
 
-        for sid in range(first_stage, num_stages):
-            # Apply all changepoints at this stage.
-            while cp_idx < len(changepoints) and changepoints[cp_idx][0] == sid:
-                _, pat, val = changepoints[cp_idx]
-                if pat == 0:
-                    for b in range(num_patamares):
-                        current[b] = val
-                else:
-                    current[pat - 1] = val
-                cp_idx += 1
-
-            # Emit current values for all active blocks.
-            for block_id, val in current.items():
-                stage_bounds[(sid, block_id)] = val
+        for sid, pat, val in changepoints:
+            if pat == 0:
+                for b in range(num_patamares):
+                    stage_bounds[(sid, b)] = val
+            else:
+                stage_bounds[(sid, pat - 1)] = val
 
         re_dat_bounds[code] = stage_bounds
 
@@ -1326,8 +1313,10 @@ def convert_electric_constraints(
 
     ``restricao-eletrica.csv`` provides constraints for the individualised
     period (first ~12 stages).  ``RE.DAT`` provides post-individualised
-    bounds.  For constraints only in restricao-eletrica.csv, bounds are
-    seasonally extrapolated beyond the individualised period.
+    bounds.  Both sources register every limit with a start and an end
+    period, and a bound is emitted only for the stages its own registration
+    covers: a constraint declared for part of the horizon is absent from the
+    rest of it.
 
     Parameters
     ----------
@@ -1515,9 +1504,6 @@ def convert_electric_constraints(
         # csv_sup/csv_inf: restricao-eletrica.csv bounds by (stage, block)
         csv_sup: dict[tuple[int, int], float] = {}
         csv_inf: dict[tuple[int, int], float] = {}
-        # seasonal fallback: (calendar_month, block_id) -> value
-        seasonal_sup: dict[tuple[int, int], float] = {}
-        seasonal_inf: dict[tuple[int, int], float] = {}
 
         entries_for_code = csv_bounds_by_code.get(cod, [])
         horizon = horizons.get(cod)
@@ -1545,10 +1531,8 @@ def convert_electric_constraints(
                 if 0 <= sid < num_stages:
                     if lim_sup > _UNBOUNDED_THRESHOLD:
                         csv_sup[(sid, block_id)] = lim_sup
-                        seasonal_sup[(m, block_id)] = lim_sup
                     if lim_inf > _UNBOUNDED_THRESHOLD:
                         csv_inf[(sid, block_id)] = lim_inf
-                        seasonal_inf[(m, block_id)] = lim_inf
                 m += 1
                 if m > 12:
                     m = 1
@@ -1585,9 +1569,8 @@ def convert_electric_constraints(
                 slack=slack_config,
             )
 
-        # --- Emit bounds for the full horizon ---
+        # --- Emit one row per declared (stage, block) bound ---
         for stage_id in range(num_stages):
-            cal_month = ((start_month - 1 + stage_id) % 12) + 1
             is_post_indiv = stage_id >= cutoff
 
             for block_id in range(num_patamares):
@@ -1598,9 +1581,6 @@ def convert_electric_constraints(
                         sup_val = re_sup[(stage_id, block_id)]
                     elif (stage_id, block_id) in csv_sup:
                         sup_val = csv_sup[(stage_id, block_id)]
-                    elif is_post_indiv and not re_sup:
-                        # No RE.DAT data: seasonal extrapolation fallback.
-                        sup_val = seasonal_sup.get((cal_month, block_id))
                     if sup_val is not None:
                         builder.add_bound_row(
                             sup_id,
@@ -1615,8 +1595,6 @@ def convert_electric_constraints(
                     inf_val: float | None = None
                     if (stage_id, block_id) in csv_inf:
                         inf_val = csv_inf[(stage_id, block_id)]
-                    elif is_post_indiv:
-                        inf_val = seasonal_inf.get((cal_month, block_id))
                     if inf_val is not None:
                         builder.add_bound_row(
                             inf_id,
