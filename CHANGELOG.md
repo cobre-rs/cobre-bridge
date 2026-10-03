@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`compare` records the cobre version in its comparison manifest.** It read
+  a key cobre never writes, so the manifest's `cobre_version` was always
+  empty. The version now comes from `software_version`, the key cobre writes
+  from this change on, or from `cobre_version` for outputs of cobre 0.17.0 and
+  earlier; the dashboard's run summary reads it the same way.
+
 ## [0.17.0] - 2026-10-01
 
 Pairs the bridge with the **cobre 0.17.0** release: the `cobre-python` pin and

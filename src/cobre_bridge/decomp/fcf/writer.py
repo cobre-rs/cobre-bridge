@@ -145,8 +145,9 @@ def build_metadata(
 
     Checkpoint metadata is a small core (`created_at`, `num_stages`) plus a
     namespaced `producer` block carrying the algorithm-specific provenance.
-    `cobre_version` is not a caller field: cobre stamps the writing build's own
-    version, and only that cobre version loads the checkpoint. `state_dimension`
+    The software identity is not a caller field: cobre stamps the writing
+    build's own `software` and `software_version`, and only that build loads
+    the checkpoint. `state_dimension`
     is no longer a metadata field — it is per-pool, on each `stage_cuts` payload
     (:func:`build_stage_cuts_payload`). `created_at` is accepted as a parameter
     rather than derived internally (this module never calls `datetime.now()`) —

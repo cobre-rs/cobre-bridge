@@ -13,6 +13,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 
+from cobre_bridge.cobre.readers import cobre_software_version
 from cobre_bridge.dashboard.chart_helpers import (
     COST_GROUP_COLORS,
     build_cost_table,
@@ -68,7 +69,7 @@ def _format_duration(elapsed_seconds: object) -> str:
 
 def _run_identity_strip(data: DashboardData) -> str:
     """Build the run identity row HTML."""
-    version = data.training_metadata.get("cobre_version", "N/A")
+    version = cobre_software_version(data.training_metadata) or "N/A"
     discount_pct = data.discount_rate * 100.0
 
     run_date = data.training_metadata.get("started_at", "N/A")

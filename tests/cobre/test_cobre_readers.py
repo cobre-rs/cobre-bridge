@@ -24,6 +24,7 @@ from cobre_bridge.cli.args import CompareArgs
 from cobre_bridge.cobre.readers import (
     CobreReadError,
     _load_entity_bus_map,
+    cobre_software_version,
     read_cobre_bus_aggregates,
     read_cobre_bus_means,
     read_cobre_hydro_bus_generation,
@@ -1643,3 +1644,26 @@ class TestReadCobreTrainingMetadata:
         (training_dir / "metadata.json").write_text("not valid json{")
 
         assert read_cobre_training_metadata(out) == {}
+
+
+class TestCobreSoftwareVersion:
+    def test_reads_software_version(self) -> None:
+        assert (
+            cobre_software_version({"software": "cobre", "software_version": "0.18.0"})
+            == "0.18.0"
+        )
+
+    def test_falls_back_to_the_pre_software_key(self) -> None:
+        assert cobre_software_version({"cobre_version": "0.17.0"}) == "0.17.0"
+
+    def test_prefers_software_version_when_both_are_present(self) -> None:
+        assert (
+            cobre_software_version(
+                {"software_version": "0.18.0", "cobre_version": "0.17.0"}
+            )
+            == "0.18.0"
+        )
+
+    def test_absent_or_non_string_returns_none(self) -> None:
+        assert cobre_software_version({}) is None
+        assert cobre_software_version({"software_version": 18}) is None
