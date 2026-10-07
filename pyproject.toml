@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cobre-bridge"
-version = "0.17.0"
+version = "0.18.0"
 description = "Convert NEWAVE and DECOMP cases to Cobre input format and compare the results"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -22,9 +22,9 @@ dependencies = [
     "typer>=0.27.2",
     # REQUIRED runtime dep, not an optional extra: `convert decomp` imports the
     # boundary FCF by default and `convert --validate` / `compare` load cobre
-    # output, so `import cobre` must work out of the box. Keep the floor in
-    # lockstep with MIN_COBRE_VERSION in cobre/compat.py (which documents the contract).
-    "cobre-python>=0.17.0,<0.18",
+    # output, so `import cobre` must work out of the box. Pinned exactly to
+    # MIN_COBRE_VERSION in cobre/compat.py, which documents why.
+    "cobre-python==0.18.0",
 ]
 
 [project.optional-dependencies]

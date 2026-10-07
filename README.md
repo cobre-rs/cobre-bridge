@@ -34,13 +34,13 @@ You need it to solve the converted case between those two steps.
 ### Versions
 
 A cobre-bridge release `X.Y.Z` targets cobre `X.Y.Z`: the converted case
-follows that cobre release's input contract, and the `cobre-python`
-dependency floor is the oldest cobre the output loads on. A packaging test
-keeps the two in lockstep. `convert --validate` skips its validation step,
-with a note, when the installed `cobre-python` is older than that floor. A
-DECOMP boundary imported by `convert decomp` is stricter: cobre loads it only
-in the exact version of the `cobre-python` that wrote it (see the
+follows that cobre release's input contract, and the bridge depends on
+exactly that `cobre-python` release. The pin is exact because cobre loads a
+DECOMP boundary imported by `convert decomp` only in the version of the
+`cobre-python` that wrote it (see the
 [DECOMP track page](https://github.com/cobre-rs/cobre-bridge/blob/main/docs/decomp.md#running-a-case-with-an-imported-boundary)).
+`convert --validate` skips its validation step, with a note, when the
+installed `cobre-python` is older than the paired release.
 
 ## Quick start
 

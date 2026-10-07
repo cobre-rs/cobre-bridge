@@ -715,6 +715,20 @@ def read_cobre_training_metadata(cobre_output_dir: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def cobre_software_version(training_metadata: dict) -> str | None:
+    """Return the Cobre version a ``training/metadata.json`` dict records.
+
+    Reads ``software_version``; outputs written by Cobre 0.17 and earlier carry
+    the version as ``cobre_version`` instead. Returns ``None`` when neither key
+    holds a string.
+    """
+    for key in ("software_version", "cobre_version"):
+        value = training_metadata.get(key)
+        if isinstance(value, str):
+            return value
+    return None
+
+
 def read_cobre_line_means(cobre_output_dir: Path) -> pl.DataFrame:
     """Read Cobre line simulation means per (line_id, stage_id).
 

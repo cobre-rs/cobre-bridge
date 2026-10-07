@@ -13,24 +13,24 @@ from cobre_bridge.cobre.compat import (
 
 
 def test_min_cobre_version_value() -> None:
-    assert MIN_COBRE_VERSION == "0.17.0"
+    assert MIN_COBRE_VERSION == "0.18.0"
     assert isinstance(MIN_COBRE_VERSION, str)
 
 
 def test_supports_output_at_the_floor() -> None:
-    assert _cobre_python_supports_output("0.17.0") is True
+    assert _cobre_python_supports_output("0.18.0") is True
 
 
 def test_supports_output_above_the_floor() -> None:
-    assert _cobre_python_supports_output("0.17.1") is True
+    assert _cobre_python_supports_output("0.18.1") is True
 
 
 def test_supports_output_below_the_floor() -> None:
-    assert _cobre_python_supports_output("0.16.0") is False
+    assert _cobre_python_supports_output("0.17.0") is False
 
 
 def test_supports_output_pre_release_suffix_is_lenient() -> None:
-    assert _cobre_python_supports_output("0.17.0rc1") is True
+    assert _cobre_python_supports_output("0.18.0rc1") is True
 
 
 def test_installed_version_returns_the_distribution_version(

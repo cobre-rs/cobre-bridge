@@ -39,6 +39,8 @@ python3 scripts/ci/check_doc_paths.py         # every path cited in the docs res
 CI (`.github/workflows/ci.yml`) runs ruff and the three gates on one Python,
 the test suite on every Python version the project supports, and a coverage
 floor on the comparator reader layer (`[tool.coverage]` in `pyproject.toml`).
+CI installs the ruff version `uv.lock` pins, so a ruff upgrade changes both
+together; `tests/test_packaging.py` fails if they differ.
 `scripts/README.md` describes each gate and the advisory reports next to them.
 
 ### Test tiers and local data
@@ -140,9 +142,9 @@ on them, and they are the canonical statements for humans too. In short:
 A bridge release `X.Y.Z` pairs with cobre `X.Y.Z`.
 
 1. Bump `version` in `pyproject.toml`. When the cobre pairing moves, bump the
-   `cobre-python` floor and `MIN_COBRE_VERSION` (`src/cobre_bridge/cobre/compat.py`)
-   together and refresh `uv.lock`; `tests/test_packaging.py` fails if they
-   drift.
+   exact `cobre-python` pin and `MIN_COBRE_VERSION`
+   (`src/cobre_bridge/cobre/compat.py`) together and refresh `uv.lock`;
+   `tests/test_packaging.py` fails if they differ.
 2. Move the `Unreleased` entries in `CHANGELOG.md` under the new version.
 3. Tag `vX.Y.Z` and push the tag. `.github/workflows/release.yml` builds,
    runs the suite, and publishes to PyPI through trusted publishing.

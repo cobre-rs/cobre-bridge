@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.18.0] - 2026-10-07
+
+Pairs the bridge with the **cobre 0.18.0** release and pins `cobre-python` to
+exactly that release. cobre 0.18.0 refuses policy checkpoints written by 0.17.0
+or earlier, so a DECOMP case whose boundary FCF an earlier bridge imported must
+be converted again.
+
+### Changed
+
+- **`cobre-python` is pinned to exactly the paired cobre release.** The
+  dependency is now `cobre-python==0.18.0` instead of `>=0.17.0,<0.18`, and
+  `MIN_COBRE_VERSION` moves to `0.18.0`. cobre loads a policy checkpoint only
+  in the version that wrote it, so the boundary `convert decomp` writes loads
+  only in that release; a range let an installer pick a patch release that
+  refuses it. `tests/test_packaging.py` checks that the pin equals
+  `MIN_COBRE_VERSION`.
+
+### Fixed
+
+- **`compare` records the cobre version in its comparison manifest.** It read
+  a key cobre never writes, so the manifest's `cobre_version` was always
+  empty. The version now comes from `software_version`, the key cobre writes
+  from 0.18.0 on, or from `cobre_version` for outputs of cobre 0.17.0 and
+  earlier; the dashboard's run summary reads it the same way.
+
 ## [0.17.0] - 2026-10-01
 
 Pairs the bridge with the **cobre 0.17.0** release: the `cobre-python` pin and

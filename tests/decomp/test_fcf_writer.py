@@ -130,9 +130,10 @@ def test_write_boundary_checkpoint_creates_files(tmp_path: Path) -> None:
     # "producer" block; state_dimension is no longer a metadata field.
     assert "state_dimension" not in reloaded["metadata"]
     assert reloaded["metadata"]["producer"]["cost_scale_factor"] is not None
-    # Only the cobre version that wrote a checkpoint loads it, so the boundary
-    # must carry the installed cobre-python's own version.
-    assert reloaded["metadata"]["cobre_version"] == cobre.__version__
+    # Only the software and version that wrote a checkpoint load it, so the
+    # boundary must carry the installed cobre-python's own identity.
+    assert reloaded["metadata"]["software"] == "cobre"
+    assert reloaded["metadata"]["software_version"] == cobre.__version__
     reloaded_stage = reloaded["stage_cuts"][0]
     assert reloaded_stage["state_dimension"] == 2
     assert len(reloaded_stage["cuts"]) == 1

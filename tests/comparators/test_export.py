@@ -172,10 +172,23 @@ def test_read_cobre_version_reads_version(tmp_path: Path) -> None:
     training_dir = cobre_output_dir / "training"
     training_dir.mkdir(parents=True)
     (training_dir / "metadata.json").write_text(
-        json.dumps({"version": "0.7.0"}), encoding="utf-8"
+        json.dumps({"software": "cobre", "software_version": "0.7.0"}),
+        encoding="utf-8",
     )
 
     assert _read_cobre_version(cobre_output_dir) == "0.7.0"
+
+
+def test_read_cobre_version_reads_the_pre_software_key(tmp_path: Path) -> None:
+    case_dir = tmp_path / "case"
+    cobre_output_dir = case_dir / "output"
+    training_dir = cobre_output_dir / "training"
+    training_dir.mkdir(parents=True)
+    (training_dir / "metadata.json").write_text(
+        json.dumps({"cobre_version": "0.6.0"}), encoding="utf-8"
+    )
+
+    assert _read_cobre_version(cobre_output_dir) == "0.6.0"
 
 
 def test_read_cobre_version_malformed_json_returns_none(tmp_path: Path) -> None:

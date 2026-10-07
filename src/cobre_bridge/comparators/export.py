@@ -20,7 +20,10 @@ import json
 from collections import Counter
 from typing import TYPE_CHECKING
 
-from cobre_bridge.cobre.readers import read_cobre_training_metadata
+from cobre_bridge.cobre.readers import (
+    cobre_software_version,
+    read_cobre_training_metadata,
+)
 from cobre_bridge.comparators.manifest import ComparisonManifest
 
 if TYPE_CHECKING:
@@ -198,7 +201,6 @@ def _read_cobre_version(cobre_output_dir: Path) -> str | None:
         cobre_output_dir: The Cobre output directory handed to the comparator.
 
     Returns:
-        The ``"version"`` string when present and readable, else ``None``.
+        The recorded Cobre version when present and readable, else ``None``.
     """
-    version = read_cobre_training_metadata(cobre_output_dir).get("version")
-    return version if isinstance(version, str) else None
+    return cobre_software_version(read_cobre_training_metadata(cobre_output_dir))

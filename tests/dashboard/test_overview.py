@@ -86,9 +86,9 @@ def _make_training_metadata(
     """
     result: dict = {}
     if metadata:
-        # metadata may carry {"version": "1.0"} -> map to cobre_version
+        # metadata may carry {"version": "1.0"} -> map to software_version
         if "version" in metadata:
-            result["cobre_version"] = metadata["version"]
+            result["software_version"] = metadata["version"]
 
     if training_manifest:
         if "elapsed_seconds" in training_manifest:
