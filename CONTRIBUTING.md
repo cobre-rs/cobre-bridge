@@ -39,6 +39,8 @@ python3 scripts/ci/check_doc_paths.py         # every path cited in the docs res
 CI (`.github/workflows/ci.yml`) runs ruff and the three gates on one Python,
 the test suite on every Python version the project supports, and a coverage
 floor on the comparator reader layer (`[tool.coverage]` in `pyproject.toml`).
+CI installs the ruff version `uv.lock` pins, so a ruff upgrade changes both
+together; `tests/test_packaging.py` fails if they differ.
 `scripts/README.md` describes each gate and the advisory reports next to them.
 
 ### Test tiers and local data

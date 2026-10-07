@@ -5,12 +5,14 @@
 not an optional extra. This module locks that down: a fresh
 `pip install cobre-bridge` (no extras) must pull a checkpoint-capable cobre. It was the
 absence of exactly this guard that let a release ship with `cobre-python` as an
-extra, so a plain install failed `convert decomp` on any real deck. Tier-1: reads
-`pyproject.toml`, never imports cobre.
+extra, so a plain install failed `convert decomp` on any real deck. It also keeps
+the ruff CI installs on the version `uv.lock` pins. Tier-1: reads `pyproject.toml`,
+`uv.lock` and the CI workflow, never imports cobre.
 """
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -91,4 +93,33 @@ def test_uv_lock_cobre_python_floors_at_min_cobre_version() -> None:
     assert f">={MIN_COBRE_VERSION}" in specifier, (
         f"uv.lock cobre-python specifier {specifier!r} must floor at "
         f"MIN_COBRE_VERSION {MIN_COBRE_VERSION!r}"
+    )
+
+
+_CI_WORKFLOW = (
+    Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"
+)
+
+
+def _lock_package_version(name: str) -> str | None:
+    data = tomllib.loads(_UV_LOCK.read_text(encoding="utf-8"))
+    for package in data["package"]:
+        if package.get("name") == name:
+            return package.get("version")
+    return None
+
+
+def test_ci_installs_the_ruff_version_uv_lock_pins() -> None:
+    """CI's lint job must install exactly the ruff uv.lock resolves, so a new
+    ruff release cannot turn CI red, or green on code the pre-commit hook
+    rejects, without a change in the repository."""
+    locked = _lock_package_version("ruff")
+    assert locked is not None, "ruff missing from uv.lock"
+    installs = re.findall(
+        r"pip install\s+[\"']?(ruff[^\s\"']*)",
+        _CI_WORKFLOW.read_text(encoding="utf-8"),
+    )
+    assert installs == [f"ruff=={locked}"], (
+        f"ci.yml must install ruff=={locked} (the uv.lock version) exactly once; "
+        f"found {installs}"
     )
