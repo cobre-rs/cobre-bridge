@@ -42,7 +42,7 @@ wheels = [
 
 [[package]]
 name = "cobre-bridge"
-version = "0.17.0"
+version = "0.18.0"
 source = { editable = "." }
 dependencies = [
     { name = "cobre-python" },
@@ -67,7 +67,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cobre-python", specifier = ">=0.17.0,<0.18" },
+    { name = "cobre-python", specifier = "==0.18.0" },
     { name = "idecomp", specifier = ">=1.14.2" },
     { name = "inewave", specifier = ">=1.16.1" },
     { name = "jsonschema", marker = "extra == 'dev'" },
@@ -86,15 +86,15 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "cobre-python"
-version = "0.17.0"
+version = "0.18.0"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ea/d5/4231d3e485793e1f8e7f338b14d7800a665635429d67328b9b4d30d6bd9c/cobre_python-0.17.0-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:4762b2c83564437eca39e6079207b52f81af02df28ca78370bedbc630ec9bdf8", size = 8874696, upload-time = "2026-10-01T16:30:48.365Z" },
-    { url = "https://files.pythonhosted.org/packages/f6/6b/9e0068af844fe77744337ef7ef3e612c7a6822ebce4e64c92ae8dfcc52de/cobre_python-0.17.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:1986a3eddb9773ca49ae1d5f67441a41db1608ee9e1266a01d8731b8632a2d50", size = 8078676, upload-time = "2026-10-01T16:30:50.6Z" },
-    { url = "https://files.pythonhosted.org/packages/11/9c/21f374b18e66c48519694e779d072f4f081c49327fbe959ebeb73326bcad/cobre_python-0.17.0-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:b67bd90ed9ce5e36ea67b93245bfe65c08890c72517dbe8af957857fb97ac81d", size = 8962524, upload-time = "2026-10-01T16:30:52.818Z" },
-    { url = "https://files.pythonhosted.org/packages/e8/67/0c6878e48ad80f0a917be72641a7c020c00bf3225072a7172091c05dbabf/cobre_python-0.17.0-cp312-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:c0b117d212ce0895ff64e5b122e58ecb37d408f381b4d4707daf0f2beefc25fc", size = 9601504, upload-time = "2026-10-01T16:30:54.933Z" },
-    { url = "https://files.pythonhosted.org/packages/59/3d/b3716fb8d7e020d363585b7a3a40fcfd6825cfa3155d1a8932aae1d870b8/cobre_python-0.17.0-cp312-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:c565a25424d48a7ae9608119c64810f5e1450e0bea94b3fcb27f3403ad4a9a17", size = 15920429, upload-time = "2026-10-01T16:30:57.244Z" },
-    { url = "https://files.pythonhosted.org/packages/81/9b/8157d2ebbdd74cd616cd3422530dcc84f25f5a1a57928f08e635548a0758/cobre_python-0.17.0-cp312-abi3-win_amd64.whl", hash = "sha256:f2f154a36a23ed1117463b009cd720b42cb18d000b33ce8d1c5b3574f5ca1059", size = 7922417, upload-time = "2026-10-01T16:30:59.555Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/e9/25962e694ebe23cd946938c0d229e277223ec4293cc39b30d2806fc0e940/cobre_python-0.18.0-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:0efb76c61ec42af2365ec4ced74679559b19bfa9ca60b1aa7773e1667f998d5e", size = 8980483, upload-time = "2026-10-07T03:38:27.039Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/fd/cbf0c594951f239d903ffae1debec7e14447d50eb677d633b71a30c0b017/cobre_python-0.18.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:ca986b23394c5751c720b1864d8ee84333e54c2bd26af7fdb4392f638e094ece", size = 8160661, upload-time = "2026-10-07T03:38:29.59Z" },
+    { url = "https://files.pythonhosted.org/packages/53/21/a7f58d4b30a8a559be799d557fc4dc4437a5679c911f4c423c95eaaf43e7/cobre_python-0.18.0-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:af67c3ef8f9c24048a79a89523b1be7cc4af5187f11c71f6261a46df2efad396", size = 9065629, upload-time = "2026-10-07T03:38:31.834Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/a0/4d2d69a40f1c2f290dde8464d8c027692a34985276ef60adff3af913974b/cobre_python-0.18.0-cp312-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:8a31828a528ea54a6a9edcddd74a948b046f982f164eb379aafcc7c660f7513c", size = 9719910, upload-time = "2026-10-07T03:38:33.97Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/25/d1eba12bda9505b474783976017b3681719fe89647a584b40da60823821b/cobre_python-0.18.0-cp312-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:3b8bf8e0b7f5905dfdd89239203e75d50a67d7ea1f98d85cd364575a1d225b0a", size = 16032319, upload-time = "2026-10-07T03:38:36.252Z" },
+    { url = "https://files.pythonhosted.org/packages/38/69/01b8b25419b30c2cac3fdc37d71bb49b40005719fbae82278e779b6b62bf/cobre_python-0.18.0-cp312-abi3-win_amd64.whl", hash = "sha256:ee0f8e9344deb921535542bf17e32a6e14ddea952575029cadc06f8c4e1f44be", size = 7999398, upload-time = "2026-10-07T03:38:38.614Z" },
 ]
 
 [[package]]

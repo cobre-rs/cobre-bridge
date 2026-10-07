@@ -41,16 +41,17 @@ def test_cobre_python_is_a_core_runtime_dependency() -> None:
     )
 
 
-def test_cobre_python_core_pin_floors_at_min_cobre_version() -> None:
-    """The core `cobre-python` pin floor must match `MIN_COBRE_VERSION` so the
-    two never drift (the pyproject comment promises this lockstep)."""
+def test_cobre_python_core_pin_is_exactly_min_cobre_version() -> None:
+    """The core `cobre-python` pin must be exactly `MIN_COBRE_VERSION`: cobre
+    loads a policy checkpoint only in the version that wrote it, so the
+    boundary `convert decomp` writes must come from the paired release."""
     from cobre_bridge.cli import MIN_COBRE_VERSION
 
     pin = _cobre_python_pin(_core_dependencies())
     assert pin is not None
-    assert f">={MIN_COBRE_VERSION}" in pin.replace(" ", ""), (
-        f"cobre-python core pin {pin!r} must floor at MIN_COBRE_VERSION "
-        f"{MIN_COBRE_VERSION!r}"
+    assert pin.replace(" ", "") == f"cobre-python=={MIN_COBRE_VERSION}", (
+        f"cobre-python core pin {pin!r} must be exactly "
+        f"cobre-python=={MIN_COBRE_VERSION}"
     )
 
 
@@ -82,17 +83,17 @@ def test_uv_lock_cobre_python_is_a_core_dependency() -> None:
     )
 
 
-def test_uv_lock_cobre_python_floors_at_min_cobre_version() -> None:
-    """The uv.lock cobre-python floor must match MIN_COBRE_VERSION so a
-    regenerated lock never drifts below the pinned cobre contract."""
+def test_uv_lock_cobre_python_is_pinned_exactly_to_min_cobre_version() -> None:
+    """The uv.lock cobre-python specifier must be exactly MIN_COBRE_VERSION, so
+    a regenerated lock never resolves a release other than the paired one."""
     from cobre_bridge.cli import MIN_COBRE_VERSION
 
     req = _lock_cobre_python_requirement()
     assert req is not None
     specifier = req.get("specifier", "").replace(" ", "")
-    assert f">={MIN_COBRE_VERSION}" in specifier, (
-        f"uv.lock cobre-python specifier {specifier!r} must floor at "
-        f"MIN_COBRE_VERSION {MIN_COBRE_VERSION!r}"
+    assert specifier == f"=={MIN_COBRE_VERSION}", (
+        f"uv.lock cobre-python specifier {specifier!r} must be exactly "
+        f"=={MIN_COBRE_VERSION}"
     )
 
 

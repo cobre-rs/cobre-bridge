@@ -78,5 +78,5 @@ cobre before comparing so an existing run's `output/` is not clobbered.
 
 A local cobre checkout, when present, is the reference for the input contract
 (serde structs and schemas); a bridge release `X.Y.Z` pairs with cobre
-`X.Y.Z`, and the `cobre-python` floor in `pyproject.toml` moves in lockstep
-with `MIN_COBRE_VERSION`.
+`X.Y.Z`, and the `cobre-python` pin in `pyproject.toml` is exactly
+`MIN_COBRE_VERSION`.

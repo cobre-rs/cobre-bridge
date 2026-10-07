@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-#: Minimum cobre / cobre-python version that can load the bridge's converted
-#: output. The manifest records it (single source of truth) and the
-#: ``--validate`` gate uses it to decide whether the installed cobre-python is
-#: new enough to validate the output. Keep the ``cobre-python`` pin in
-#: ``pyproject.toml`` in lockstep with this constant on any future bump.
+#: The cobre / cobre-python release the bridge pairs with. ``pyproject.toml``
+#: pins ``cobre-python`` to exactly this version, and the two change together.
+#: The pin is exact because cobre loads a policy checkpoint only in the software
+#: and version that wrote it, and the checkpoint writer stamps the installed
+#: cobre-python's own version, so the DECOMP terminal boundary the bridge writes
+#: loads only in the matching cobre release.
 #:
-#: The floor is 0.17.0 because the DECOMP terminal boundary depends on it: cobre
-#: 0.17.0 loads a policy checkpoint only in the cobre version that wrote it, and
-#: its checkpoint writer stamps that version itself. A boundary written by an
-#: older cobre-python records the older version and cobre 0.17.0 refuses it.
-MIN_COBRE_VERSION = "0.17.0"
+#: The manifest records it (single source of truth), and the ``--validate``
+#: gate treats it as the minimum an installed cobre-python must reach to
+#: validate the output.
+MIN_COBRE_VERSION = "0.18.0"
 
 
 def _installed_cobre_python_version() -> str | None:
