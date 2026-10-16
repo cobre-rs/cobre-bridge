@@ -211,6 +211,22 @@ class NewaveCase:
             return None
         return cast(UsinasHidreletricas, UsinasHidreletricas.read(str(path)))
 
+    @cached_property
+    def estacao_bombeamento(self) -> UsinasHidreletricas | None:
+        """LIBS reader for pumping station data, or ``None`` if absent."""
+        path = self.files.estacao_bombeamento
+        if path is None:
+            return None
+        return cast(UsinasHidreletricas, UsinasHidreletricas.read(str(path)))
+
+    @cached_property
+    def estacao_bombeamento_submercado(self) -> UsinasHidreletricas | None:
+        """LIBS reader for pumping station submercado mapping, or ``None`` if absent."""
+        path = self.files.estacao_bombeamento_submercado
+        if path is None:
+            return None
+        return cast(UsinasHidreletricas, UsinasHidreletricas.read(str(path)))
+
     # --- Derived state ---------------------------------------------------------
 
     @property
@@ -242,6 +258,45 @@ class NewaveCase:
 
         return study_horizon(self.dger)
 
+    @cached_property
+    def pumping_related_codes(self) -> frozenset[int]:
+        """Hydro codes referenced as source or destination by pumping stations.
+
+        Returns the union of ``codigo_usina_origem`` and ``codigo_usina_destino``
+        from the pumping stations table; empty when the switch is off or no pumping
+        data is available.
+        """
+        if not self.switches.bombeamento.on:
+            return frozenset()
+        reader = self.estacao_bombeamento
+        if reader is None:
+            return frozenset()
+        df = reader.estacao_bombeamento(df=True)
+        if df is None or df.empty:
+            return frozenset()
+        codes: set[int] = set()
+        for col in ("codigo_usina_origem", "codigo_usina_destino"):
+            if col in df.columns:
+                codes.update(int(c) for c in df[col].dropna())
+        return frozenset(codes)
+
+    @cached_property
+    def fictitious_codes(self) -> frozenset[int]:
+        """Fictitious hydro codes with pumping exemption applied.
+
+        This is the single source of truth for fictitious classification. All code
+        that needs the fictitious set should read this property rather than calling
+        ``plants.fictitious_codes`` directly, so the pumping exemption is always
+        applied.
+        """
+        from cobre_bridge.newave.plants import fictitious_codes
+
+        return fictitious_codes(
+            self.confhd.usinas,
+            self.hidr.cadastro,
+            pumping_related_codes=self.pumping_related_codes,
+        )
+
     @property
     def active_hydros(self) -> pd.DataFrame:
         """The existing hydro rows that enter the Cobre LP.
@@ -254,6 +309,8 @@ class NewaveCase:
         plants; a direct ``plants`` caller without ``exph`` admits none). Recomputed
         per access (not cached) — it's a cheap filter and callers may hold their own
         view, so a shared cached DataFrame could alias.
+
+        Uses ``self.fictitious_codes`` so the pumping exemption is applied.
         """
         from cobre_bridge.newave.plants import active_hydros
 
@@ -261,17 +318,22 @@ class NewaveCase:
             self.confhd.usinas,
             self.hidr.cadastro,
             self.exph.expansoes if self.exph is not None else None,
+            fictitious=self.fictitious_codes,
         )
 
     @property
     def active_hydro_codes(self) -> list[int]:
-        """``codigo_usina`` of the active hydros (in confhd declaration order)."""
+        """``codigo_usina`` of the active hydros (in confhd declaration order).
+
+        Uses ``self.fictitious_codes`` so the pumping exemption is applied.
+        """
         from cobre_bridge.newave.plants import active_hydro_codes
 
         return active_hydro_codes(
             self.confhd.usinas,
             self.hidr.cadastro,
             self.exph.expansoes if self.exph is not None else None,
+            fictitious=self.fictitious_codes,
         )
 
     @cached_property
@@ -287,6 +349,9 @@ class NewaveCase:
         dead-volume filling row is admitted at its confhd declaration position. The
         path-only ``build_id_map`` keeps the in-service-only enumeration
         (``exph=None``).
+
+        Uses ``self.pumping_related_codes`` so hydros referenced by pumping stations
+        are not excluded as fictitious.
         """
         from cobre_bridge.newave.id_map import build_id_map_from_readers
 
@@ -297,4 +362,5 @@ class NewaveCase:
             self.ree,
             self.hidr,
             exph=self.exph,
+            pumping_related_codes=self.pumping_related_codes,
         )

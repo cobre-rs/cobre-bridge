@@ -442,7 +442,9 @@ def compute_per_stage_own_integrated_productivities(
 
     from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
-    fict_cascade = resolve_cascade(confhd_df, cadastro)
+    fict_cascade = resolve_cascade(
+        confhd_df, cadastro, fictitious=case.fictitious_codes
+    )
 
     result: dict[int, list[float]] = {}
     for plant_code in confhd_codes:
@@ -593,7 +595,9 @@ def convert_hydro_energy_productivity(
     # to non-zero FICT productivities.
     from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
-    fict_cascade = resolve_cascade(confhd_df, cadastro)
+    fict_cascade = resolve_cascade(
+        confhd_df, cadastro, fictitious=case.fictitious_codes
+    )
 
     hydro_ids: list[int] = []
     stage_ids: list[int | None] = []
@@ -692,7 +696,9 @@ def compute_per_stage_own_productivities(
     # accounting matches the topology rewired into ``hydros.json``.
     from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
-    fict_cascade = resolve_cascade(confhd_df, cadastro)
+    fict_cascade = resolve_cascade(
+        confhd_df, cadastro, fictitious=case.fictitious_codes
+    )
 
     result: dict[int, list[float]] = {}
     for plant_code in confhd_codes:
@@ -736,7 +742,9 @@ def compute_base_productivities(
     # helpers so every downstream consumer sees the same effective ρ_eq.
     from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
-    fict_cascade = resolve_cascade(confhd_df, cadastro)
+    fict_cascade = resolve_cascade(
+        confhd_df, cadastro, fictitious=case.fictitious_codes
+    )
 
     result: dict[int, float] = {}
     for _, row in existing.iterrows():

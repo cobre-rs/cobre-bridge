@@ -28,6 +28,7 @@ import pyarrow as pa
 from cobre_bridge.cobre import schemas as cobre_schemas
 from cobre_bridge.cobre.scalar_parameters import rho_acum_name
 from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
+from cobre_bridge.core.errors import BridgeError
 from cobre_bridge.core.generic_constraint_builder import (
     ConstraintIdAllocator,
     GenericConstraintBuilder,
@@ -146,6 +147,8 @@ class VminopResult(NamedTuple):
 def _build_hydro_downstream_map(
     confhd_df: pd.DataFrame,
     cadastro: pd.DataFrame | None = None,
+    *,
+    fictitious: frozenset[int] | None = None,
 ) -> dict[int, int | None]:
     """Return ``{plant_code: downstream_code}`` for every real (non-FICT) plant.
 
@@ -166,12 +169,16 @@ def _build_hydro_downstream_map(
         resolver cannot tell a fictitious accounting node from a real plant and
         the cascade stops short.  Defaults to empty only for callers that
         operate on FICT-free plant sets (e.g. unit tests).
+    fictitious:
+        Pre-computed fictitious codes (e.g., from ``NewaveCase.fictitious_codes``).
+        When provided, passed to :func:`resolve_cascade` to ensure the pumping
+        exemption is applied.
     """
     from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
     if cadastro is None:
         cadastro = pd.DataFrame()
-    resolutions = resolve_cascade(confhd_df, cadastro)
+    resolutions = resolve_cascade(confhd_df, cadastro, fictitious=fictitious)
     return {code: r.downstream_code for code, r in resolutions.items()}
 
 
@@ -186,6 +193,8 @@ def _build_hydro_to_ree(
 def compute_accumulated_integrated_productivities(
     cadastro: pd.DataFrame,
     confhd_df: pd.DataFrame,
+    *,
+    fictitious: frozenset[int] | None = None,
 ) -> dict[int, float]:
     """Cascade-sum of per-plant stored-energy (EARM) productivity.
 
@@ -205,10 +214,21 @@ def compute_accumulated_integrated_productivities(
     values keyed by plant code.  Used as the base-case static check in
     :func:`convert_vminop_constraints` — the per-stage version is computed
     separately and accounts for CFUGA/CMONT overrides.
+
+    Parameters
+    ----------
+    cadastro:
+        The ``Hidr.cadastro`` DataFrame (with MODIF.DAT overrides applied).
+    confhd_df:
+        The ``Confhd.usinas`` DataFrame.
+    fictitious:
+        Pre-computed fictitious codes (e.g., from ``NewaveCase.fictitious_codes``).
+        When provided, passed to :func:`resolve_cascade` to ensure the pumping
+        exemption is applied.
     """
     from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
-    resolutions = resolve_cascade(confhd_df, cadastro)
+    resolutions = resolve_cascade(confhd_df, cadastro, fictitious=fictitious)
     downstream_map: dict[int, int | None] = {
         code: r.downstream_code for code, r in resolutions.items()
     }
@@ -227,6 +247,8 @@ def compute_accumulated_integrated_productivities(
 def compute_accumulated_productivities(
     cadastro: pd.DataFrame,
     confhd_df: pd.DataFrame,
+    *,
+    fictitious: frozenset[int] | None = None,
 ) -> dict[int, float]:
     """Compute accumulated cascade productivity for each hydro plant.
 
@@ -248,6 +270,10 @@ def compute_accumulated_productivities(
         The ``Hidr.cadastro`` DataFrame (with MODIF.DAT overrides applied).
     confhd_df:
         The ``Confhd.usinas`` DataFrame.
+    fictitious:
+        Pre-computed fictitious codes (e.g., from ``NewaveCase.fictitious_codes``).
+        When provided, passed to :func:`resolve_cascade` to ensure the pumping
+        exemption is applied.
 
     Returns
     -------
@@ -256,7 +282,7 @@ def compute_accumulated_productivities(
     """
     from cobre_bridge.newave.converters.fict_cascade import resolve_cascade
 
-    resolutions = resolve_cascade(confhd_df, cadastro)
+    resolutions = resolve_cascade(confhd_df, cadastro, fictitious=fictitious)
     downstream_map: dict[int, int | None] = {
         code: r.downstream_code for code, r in resolutions.items()
     }
@@ -281,19 +307,30 @@ def _cascade_sum(
     Plants with no downstream (sea sinks) keep their own value. Used by both
     the single-scalar :func:`compute_accumulated_productivities` and the
     per-stage :func:`compute_per_stage_acc_productivities`.
+
+    Raises
+    ------
+    BridgeError
+        If a cycle is detected in the downstream map.
     """
     result: dict[int, float] = {}
 
-    def _accumulate(code: int) -> float:
+    def _accumulate(code: int, visited: frozenset[int]) -> float:
+        if code in visited:
+            cycle_path = " → ".join(str(c) for c in [*visited, code])
+            raise BridgeError(
+                f"Cascade cycle detected: {cycle_path}. This usually indicates "
+                "a fictitious plant was removed that breaks the cascade topology."
+            )
         if code in result:
             return result[code]
         ds = downstream_map.get(code)
-        ds_acc = _accumulate(ds) if ds is not None else 0.0
+        ds_acc = _accumulate(ds, visited | {code}) if ds is not None else 0.0
         result[code] = own_value.get(code, 0.0) + ds_acc
         return result[code]
 
     for code in downstream_map:
-        _accumulate(code)
+        _accumulate(code, frozenset())
     return result
 
 
@@ -317,10 +354,11 @@ def compute_max_prodtacum_sin(case: NewaveCase) -> float | None:
     try:
         cadastro = _apply_permanent_overrides(case.hidr.cadastro, case)
         confhd_df = case.confhd.usinas
+        fictitious = case.fictitious_codes
     except (OSError, ValueError, AttributeError, TypeError, KeyError):
         return None
 
-    resolutions = resolve_cascade(confhd_df, cadastro)
+    resolutions = resolve_cascade(confhd_df, cadastro, fictitious=fictitious)
     downstream_map: dict[int, int | None] = {
         code: r.downstream_code for code, r in resolutions.items()
     }
@@ -342,6 +380,8 @@ def compute_per_stage_acc_productivities(
     confhd_df: pd.DataFrame,
     per_stage_own: dict[int, list[float]],
     cadastro: pd.DataFrame | None = None,
+    *,
+    fictitious: frozenset[int] | None = None,
 ) -> dict[int, list[float]]:
     """Cascade-sum per-stage own productivities into per-stage ρ_acum lists.
 
@@ -360,6 +400,12 @@ def compute_per_stage_acc_productivities(
     per_stage_own:
         ``{plant_code: [own_ρ_eq per stage]}`` — output of
         :func:`hydro.compute_per_stage_own_productivities`.
+    cadastro:
+        The ``Hidr.cadastro`` DataFrame (optional).
+    fictitious:
+        Pre-computed fictitious codes (e.g., from ``NewaveCase.fictitious_codes``).
+        When provided, passed to :func:`_build_hydro_downstream_map` to ensure
+        the pumping exemption is applied.
 
     Returns
     -------
@@ -367,7 +413,9 @@ def compute_per_stage_acc_productivities(
         ``{plant_code: [ρ_acum per stage]}`` for every plant present in both
         ``confhd_df`` (existing, non-fictitious) and ``per_stage_own``.
     """
-    downstream_map = _build_hydro_downstream_map(confhd_df, cadastro)
+    downstream_map = _build_hydro_downstream_map(
+        confhd_df, cadastro, fictitious=fictitious
+    )
     if not per_stage_own:
         return {}
 
@@ -581,10 +629,12 @@ def convert_vminop_constraints(
     # generic_parameters.json so the LP's constraint coefficient matches the source
     # model.  Without the override the LHS would use cobre's default point ρ_acum and
     # silently drift from the RHS by ~10% on plants with non-trivial head swing.
-    acc_prod = compute_accumulated_integrated_productivities(cadastro, confhd_df)
+    acc_prod = compute_accumulated_integrated_productivities(
+        cadastro, confhd_df, fictitious=case.fictitious_codes
+    )
     per_stage_own_int = compute_per_stage_own_integrated_productivities(case)
     per_stage_acc = compute_per_stage_acc_productivities(
-        confhd_df, per_stage_own_int, cadastro
+        confhd_df, per_stage_own_int, cadastro, fictitious=case.fictitious_codes
     )
 
     # Convert ρ_acum from MW/(m³/s) to MWmonth/hm³ so the VminOP LHS (Σ ρ_acum ·
