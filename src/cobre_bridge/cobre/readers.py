@@ -129,6 +129,35 @@ def _weighted_stage_mean(
     return with_means.drop(drop_cols).group_by(id_col, "stage_id").agg(final_aggs)
 
 
+def read_cobre_stage_hours(cobre_output_dir: Path) -> dict[int, float]:
+    """Return ``{stage_id: total hours}`` from ``stages.json`` (empty when absent)."""
+    block_hours = _load_block_hours(cobre_output_dir)
+    if block_hours is None:
+        return {}
+    totals = block_hours.group_by("stage_id").agg(pl.col("hours").sum())
+    return {int(r["stage_id"]): float(r["hours"]) for r in totals.iter_rows(named=True)}
+
+
+#: cobre's resolved generic-constraint echo, relative to the ``output/`` directory.
+_GENERIC_CONSTRAINT_ECHO = Path("generic_constraints") / "resolved_echo.parquet"
+
+
+def read_cobre_generic_constraint_echo(cobre_output_dir: Path) -> pl.DataFrame | None:
+    """Read cobre's resolved generic-constraint echo, or ``None`` when absent.
+
+    One row per resolved LHS term per active ``(stage, block)`` row: the
+    coefficient and the row bounds exactly as the LP received them.
+    """
+    path = cobre_output_dir / _GENERIC_CONSTRAINT_ECHO
+    if not path.exists():
+        _LOG.warning("Generic-constraint echo not found: %s", path)
+        return None
+    try:
+        return pl.read_parquet(path)
+    except Exception as exc:  # noqa: BLE001
+        raise CobreReadError(f"Failed to read {path}") from exc
+
+
 def scan_simulation_entity(
     cobre_output_dir: Path,
     entity: str,

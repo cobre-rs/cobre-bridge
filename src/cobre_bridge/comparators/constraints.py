@@ -10,7 +10,12 @@ from typing import NamedTuple
 import pandas as pd
 import polars as pl
 
-from cobre_bridge.cobre.constraint_expr import evaluate_constraint_expressions
+from cobre_bridge.cobre import readers as cobre_readers
+from cobre_bridge.cobre.constraint_expr import (
+    ResolvedGenericConstraints,
+    evaluate_lhs,
+    resolve_generic_constraints,
+)
 from cobre_bridge.cobre.readers import scan_simulation_entity
 from cobre_bridge.core.generic_constraint_format import shape_from_bounds
 
@@ -38,76 +43,60 @@ def load_generic_constraints(cobre_input_dir: Path) -> list[dict]:
     return list(data.get("constraints", []))
 
 
-def load_generic_constraint_bounds(cobre_input_dir: Path) -> pl.DataFrame:
-    """Load bound table from ``constraints/generic_constraint_bounds.parquet``.
+def load_resolved_generic_constraints(
+    cobre_case_dir: Path, cobre_output_dir: Path
+) -> ResolvedGenericConstraints:
+    """The case's generic constraints with the coefficients and bounds cobre built.
 
-    F3 shape: nullable ``bound_lower``/``bound_upper`` endpoints, no single
-    ``bound`` column — even in the missing-file fallback schema below.
+    See :func:`cobre_bridge.cobre.constraint_expr.resolve_generic_constraints`;
+    terms and bounds are empty when the run wrote no
+    ``generic_constraints/resolved_echo.parquet``.
     """
-    path = cobre_input_dir / "constraints" / "generic_constraint_bounds.parquet"
-    if not path.exists():
-        return pl.DataFrame(
-            schema={
-                "constraint_id": pl.Int32,
-                "stage_id": pl.Int32,
-                "block_id": pl.Int32,
-                "bound_lower": pl.Float64,
-                "bound_upper": pl.Float64,
-            }
-        )
-    return pl.read_parquet(path)
+    min_storage = {
+        hid: float(meta.get("min_storage_hm3") or 0.0)
+        for hid, meta in cobre_readers.read_cobre_hydro_metadata(
+            cobre_output_dir
+        ).items()
+    }
+    return resolve_generic_constraints(
+        load_generic_constraints(cobre_case_dir),
+        cobre_readers.read_cobre_generic_constraint_echo(cobre_output_dir),
+        min_storage,
+        cobre_readers.read_cobre_stage_hours(cobre_output_dir),
+    )
+
+
+_LHS_SCHEMA = {
+    "constraint_id": pl.Int32,
+    "stage_id": pl.Int32,
+    "lhs_value": pl.Float64,
+}
 
 
 def evaluate_lhs_cobre(
-    constraints: list[dict],
+    resolved: ResolvedGenericConstraints,
     cobre_output_dir: Path,
-    rho_acum_overrides: dict[int, dict[int, float]] | None = None,
 ) -> pl.DataFrame:
     """Evaluate each constraint's LHS from Cobre simulation outputs.
 
-    Uses the shared
-    :func:`cobre_bridge.cobre.constraint_expr.evaluate_constraint_expressions`
-    (which returns one row per (constraint, scenario, stage, block)) and
-    collapses to mean across scenarios and blocks per (constraint, stage).
-
-    ``rho_acum_overrides`` (typically :func:`cobre_bridge.cobre.constraint_expr.
-    load_rho_acum_overrides` against the converted case dir) is forwarded
-    verbatim so a ``@rho_acum_h{id}``-scaled constraint (VminOP, RHE)
-    resolves against the LP's actual per-stage coefficient rather than the
-    simulation's default point-productivity column — see
-    :func:`cobre_bridge.cobre.constraint_expr.evaluate_constraint_expressions`.
+    Uses the shared :func:`cobre_bridge.cobre.constraint_expr.evaluate_lhs`
+    (one row per (constraint, scenario, stage, block)) and collapses to the
+    mean across scenarios and blocks per (constraint, stage).
 
     Returns
     -------
     polars.DataFrame
         Columns: ``constraint_id`` (Int32), ``stage_id`` (Int32),
         ``lhs_value`` (Float64).  Empty when no simulation data is
-        available or no constraints reference the simulation entities.
+        available or no constraint has an evaluable term.
     """
-    if not constraints:
-        return pl.DataFrame(
-            schema={
-                "constraint_id": pl.Int32,
-                "stage_id": pl.Int32,
-                "lhs_value": pl.Float64,
-            }
-        )
+    empty = pl.DataFrame(schema=_LHS_SCHEMA)
+    if resolved.terms.is_empty():
+        return empty
 
-    # Scan with the comparator's own simulation reader (which already takes the
-    # ``output/`` directory directly), instead of reaching into the dashboard's
-    # case-dir-based scanner via a synthetic ``cobre_output_dir.parent``. A
-    # present-but-corrupt parquet raises CobreReadError.
-    # NB: ``lf or pl.LazyFrame()`` would evaluate ``bool(lf)``, which polars
-    # rejects ("truth value of a LazyFrame is ambiguous") — use explicit None
-    # checks.
-    empty = pl.DataFrame(
-        schema={
-            "constraint_id": pl.Int32,
-            "stage_id": pl.Int32,
-            "lhs_value": pl.Float64,
-        }
-    )
-
+    # A present-but-corrupt parquet raises CobreReadError. NB: ``lf or
+    # pl.LazyFrame()`` would evaluate ``bool(lf)``, which polars rejects
+    # ("truth value of a LazyFrame is ambiguous") — use explicit None checks.
     hydros_lf = scan_simulation_entity(cobre_output_dir, "hydros")
     if hydros_lf is None:
         # No hydro simulation → no operation data to evaluate the LHS against.
@@ -116,17 +105,9 @@ def evaluate_lhs_cobre(
     if exchanges_lf is None:
         exchanges_lf = pl.LazyFrame()
 
-    lhs_pd: pd.DataFrame = evaluate_constraint_expressions(
-        constraints, hydros_lf, exchanges_lf, rho_acum_overrides
-    )
+    lhs_pd: pd.DataFrame = evaluate_lhs(resolved, hydros_lf, exchanges_lf)
     if lhs_pd.empty:
-        return pl.DataFrame(
-            schema={
-                "constraint_id": pl.Int32,
-                "stage_id": pl.Int32,
-                "lhs_value": pl.Float64,
-            }
-        )
+        return empty
 
     # Collapse to mean across scenarios and blocks per (constraint, stage).
     grouped = lhs_pd.groupby(["constraint_id", "stage_id"], as_index=False)

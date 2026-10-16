@@ -36,6 +36,7 @@ from cobre_bridge.core.errors import FieldParseError, SourceFileError
 from cobre_bridge.decomp.files import DecompFiles
 from cobre_bridge.decomp.id_map import DecompIdMap
 from tests.comparators.conftest import (
+    GC_STAGE_HOURS,
     _aligned_fixture,
     _no_dec_oper,
     _patch_aligned_frames,
@@ -728,7 +729,7 @@ class TestBuildDecompDatasetSingleParse:
                 "id": 0,
                 "name": "RHE_115",
                 "description": "RHE stored-energy constraint 115",
-                "expression": "@rho_acum_h0 * hydro_storage(0)",
+                "expression": "@rho_acum_scaled_h0 * hydro_storage_final(0)",
                 "slack": {"enabled": True, "penalty": 1000.0},
             }
         ]
@@ -808,6 +809,7 @@ class TestBuildDecompDatasetSingleParse:
         nw_row = dataset.render.gc_lhs_newave.row(0, named=True)
         assert nw_row["constraint_id"] == 0
         assert nw_row["stage_id"] == 0
-        assert nw_row["lhs_value"] == pytest.approx(2951.58)
+        # valor_MW (stage-average MW) over the stage's hours, in MWh.
+        assert nw_row["lhs_value"] == pytest.approx(2951.58 * GC_STAGE_HOURS)
         cb_row = dataset.render.gc_lhs_cobre.row(0, named=True)
         assert cb_row == {"constraint_id": 0, "stage_id": 0, "lhs_value": 3000.0}

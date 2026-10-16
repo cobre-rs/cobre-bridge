@@ -2,10 +2,11 @@
 and electric constraints from restricao-eletrica.csv.
 
 Converts the source model minimum stored energy constraints into Cobre generic
-constraints. Each REE with entries in ``curva.dat`` becomes one generic constraint whose
-expression is a weighted sum of ``hydro_storage_final`` variables (the end-of-stage
-stored volume the source model's security curve bounds), with weights equal to the
-accumulated cascade productivities.
+constraints. Each REE with entries in ``curva.dat`` becomes one generic constraint per
+stage whose expression bounds the REE's useful stored energy (MWh) — the
+``hydro_useful_volume_final`` of its reservoirs weighted by cobre's scaled integrated
+accumulated productivity — from below by the curve fraction of its maximum useful
+stored energy.
 
 Electric constraints from ``restricao-eletrica.csv`` (discovered via
 ``indices.csv``) are converted into Cobre generic constraints with
@@ -26,7 +27,10 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.cobre.scalar_parameters import rho_acum_name
+from cobre_bridge.cobre.scalar_parameters import (
+    earm_max_name,
+    rho_acum_scaled_name,
+)
 from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
 from cobre_bridge.core.generic_constraint_builder import (
     ConstraintIdAllocator,
@@ -37,12 +41,8 @@ from cobre_bridge.core.productivity import (
     compute_productivity,
     stored_energy_productivity,
 )
-from cobre_bridge.core.units import C_M3S2HM3, MONTH_HOURS
 from cobre_bridge.newave.case import NewaveCase
-from cobre_bridge.newave.converters.hydro import (
-    _apply_permanent_overrides,
-    compute_per_stage_own_integrated_productivities,
-)
+from cobre_bridge.newave.converters.hydro import _apply_permanent_overrides
 from cobre_bridge.newave.converters.temporal import _month_hours
 from cobre_bridge.newave.id_map import NewaveIdMap
 from cobre_bridge.newave.plants import active_hydros
@@ -109,37 +109,68 @@ class _AgrintGroupSkip:
     group_id: int
 
 
-def _vminop_energy_factor(start_year: int, start_month: int, stage: int) -> float:
-    """Per-stage ``ρ_acum·hm³ → MWmonth`` divisor for the VminOP energy units.
-
-    ρ_acum is in MW/(m³/s), so ``ρ_acum · storage[hm³]`` overstates the true stored
-    energy (MWmonth) by the hm³↔(m³/s)·month factor. That factor scales with the month's
-    length, and cobre prices the VminOP slack with each stage's **real** ``block_hours``
-    (672–744 h — actual calendar months), **not** the source model's fixed 730 h
-    convention. Using the actual month length here makes the effective slack penalty
-    resolve to the intended R$/MWh on every stage; the fixed ``C_M3S2HM3`` would leave a
-    ±~9 % per-stage error (worst in February). Equals ``C_M3S2HM3`` exactly for a 730 h
-    month.
-    """
-    total = start_month - 1 + stage
-    hours = _month_hours(start_year + total // 12, total % 12 + 1)
-    return C_M3S2HM3 * hours / MONTH_HOURS
-
-
 class VminopResult(NamedTuple):
     """Result of :func:`convert_vminop_constraints`.
 
-    Field order matches the legacy 4-tuple so existing index/destructure callers
-    keep working; new code should use the names. ``constraints_dict`` is the full
-    ``{"$schema", "constraints": [...]}`` object; ``bounds`` is the full 5-column
-    F3 bounds table (``block_id`` always null — VminOP is stage-level, never
-    per-block).
+    ``constraints_dict`` is the full ``{"$schema", "constraints": [...]}``
+    object; ``bounds`` is the full 5-column F3 bounds table (``block_id`` always
+    null — VminOP is stage-level, never per-block). ``per_stage_parameters``
+    maps each ``pct_vminop_ree{code}`` name the expressions reference to its
+    per-stage curve fraction (one value per study stage, ``0.0`` where the REE
+    has no curve), for ``build_scalar_parameters``.
     """
 
     constraints_dict: dict
     bounds: pa.Table
     referenced_hydro_ids: list[int]
-    rho_acum_overrides: dict[int, list[float]]
+    per_stage_parameters: dict[str, list[float]]
+
+
+def vminop_pct_name(ree_code: int) -> str:
+    """Canonical ``@name`` for the per-stage security-curve fraction of one REE."""
+    return f"pct_vminop_ree{ree_code}"
+
+
+#: One VminOP term: the LHS ``coefficient * variable`` text and the RHS text with
+#: a ``{pct}`` placeholder for the security-curve fraction of the REE it lands in.
+_VminopTerm = tuple[str, str]
+
+
+def _vminop_ree_terms(
+    cadastro: pd.DataFrame,
+    confhd_df: pd.DataFrame,
+    id_map: NewaveIdMap,
+    acc_prod: dict[int, float],
+) -> dict[int, list[_VminopTerm]]:
+    """Build every REE's VminOP terms, in plant-code order.
+
+    Each stored-energy reservoir contributes its useful volume weighted by
+    cobre's ``@rho_acum_scaled_h{id}`` on the LHS and the curve fraction of
+    cobre's ``@earm_max_h{id}`` on the RHS.
+    """
+    terms: dict[int, list[_VminopTerm]] = defaultdict(list)
+    for code, ree_code in sorted(_build_hydro_to_ree(confhd_df, cadastro).items()):
+        # The source model's stored energy (EARM) — and thus the VminOP expression —
+        # counts only monthly-regulating reservoirs with usable storage. Gate on
+        # that, not on ``acc_prod > 0`` alone: run-of-river / special-regime plants
+        # such as ITAIPU and JIRAU carry a positive *accumulated* productivity from
+        # downstream powerhouses yet are not part of the source model's stored
+        # energy.
+        if not _is_stored_energy_reservoir(cadastro, code):
+            continue
+        if acc_prod.get(code, 0.0) <= 0.0:
+            continue
+        try:
+            hid = id_map.hydro_id(code)
+        except KeyError:
+            continue
+        terms[ree_code].append(
+            (
+                f"@{rho_acum_scaled_name(hid)} * hydro_useful_volume_final({hid})",
+                f"@{{pct}} * @{earm_max_name(hid)}",
+            )
+        )
+    return terms
 
 
 def _build_hydro_downstream_map(
@@ -277,9 +308,8 @@ def _cascade_sum(
 ) -> dict[int, float]:
     """Topological cascade sum: result[h] = own_value[h] + result[downstream(h)].
 
-    Plants with no downstream (sea sinks) keep their own value. Used by both
-    the single-scalar :func:`compute_accumulated_productivities` and the
-    per-stage :func:`compute_per_stage_acc_productivities`.
+    Plants with no downstream (sea sinks) keep their own value. Shared by the
+    accumulated-productivity helpers of this module.
     """
     result: dict[int, float] = {}
 
@@ -335,55 +365,6 @@ def compute_max_prodtacum_sin(case: NewaveCase) -> float | None:
 
     acc = _cascade_sum(downstream_map, own_max)
     return max(acc.values()) if acc else None
-
-
-def compute_per_stage_acc_productivities(
-    confhd_df: pd.DataFrame,
-    per_stage_own: dict[int, list[float]],
-    cadastro: pd.DataFrame | None = None,
-) -> dict[int, list[float]]:
-    """Cascade-sum per-stage own productivities into per-stage ρ_acum lists.
-
-    For each plant ``h`` and stage ``s``:
-        ρ_acum(h, s) = ρ_eq_own(h, s) + ρ_acum(downstream(h), s)
-
-    The cascade topology is static; only the leaf values change per stage.
-    Stages are processed independently so a CFUGA override on plant ``A``
-    correctly shifts ρ_acum for every plant strictly upstream of ``A`` from
-    the override stage onwards, while leaving siblings unaffected.
-
-    Parameters
-    ----------
-    confhd_df:
-        ``Confhd.usinas`` — supplies the downstream-plant topology.
-    per_stage_own:
-        ``{plant_code: [own_ρ_eq per stage]}`` — output of
-        :func:`hydro.compute_per_stage_own_productivities`.
-
-    Returns
-    -------
-    dict[int, list[float]]
-        ``{plant_code: [ρ_acum per stage]}`` for every plant present in both
-        ``confhd_df`` (existing, non-fictitious) and ``per_stage_own``.
-    """
-    downstream_map = _build_hydro_downstream_map(confhd_df, cadastro)
-    if not per_stage_own:
-        return {}
-
-    # All per-stage lists must share the same length — pick the first.
-    sample = next(iter(per_stage_own.values()))
-    n_stages = len(sample)
-
-    result: dict[int, list[float]] = {code: [0.0] * n_stages for code in downstream_map}
-    for s in range(n_stages):
-        own_at_s: dict[int, float] = {
-            code: (per_stage_own[code][s] if code in per_stage_own else 0.0)
-            for code in downstream_map
-        }
-        acc_at_s = _cascade_sum(downstream_map, own_at_s)
-        for code, v in acc_at_s.items():
-            result[code][s] = v
-    return result
 
 
 def _warn_if_non_fixa_penalization(configuracoes_penalizacao: list[Any] | None) -> bool:
@@ -492,13 +473,17 @@ def convert_vminop_constraints(
 ) -> VminopResult | None:
     """Convert curva.dat VminOP constraints to Cobre generic constraints.
 
-    Expressions are emitted using the cobre HEAD ``@name`` sigil, with one
-    ``@rho_acum_h{hydro_id}`` per hydro term.  The accumulated productivity used both
-    for the per-stage RHS bound and (via the fourth return value) for the
-    ``@rho_acum_h{id}`` override is the cascade-summed *integrated* productivity — the
-    source model's stored-energy / EARM convention — which differs from cobre's default
-    point ρ_acum (gen = ρ·Q coefficient) by up to ~10% on plants with non-trivial head
-    swing.
+    Each REE yields one constraint per stage with a curve value::
+
+        Σ @rho_acum_scaled_h{id} * hydro_useful_volume_final(id)
+            >= Σ @pct_vminop_ree{code} * @earm_max_h{id}
+
+    i.e. useful stored energy (MWh) at least the curve fraction of the maximum
+    useful stored energy. Both coefficients are cobre's scaled *integrated*
+    accumulated productivity — the source model's stored-energy (EARM)
+    convention, not the gen = ρ·Q point ρ_acum. cobre moves the dead-volume
+    term of ``hydro_useful_volume_final`` onto the bound, so the row matches
+    the source model's ``pct·useful + dead`` bound on the absolute storage.
 
     Only monthly-regulating reservoirs with usable storage participate in a REE's
     expression (see :func:`_is_stored_energy_reservoir`); run-of-river and
@@ -517,12 +502,10 @@ def convert_vminop_constraints(
 
     Returns
     -------
-    tuple[dict, pa.Table, list[int], dict[int, list[float]]] | None
-        ``(constraints_dict, bounds_table, referenced_hydro_ids,
-        rho_acum_per_stage_overrides)`` or ``None`` if ``curva.dat`` is
-        absent.  The fourth element maps cobre hydro_id → per-stage
-        integrated ρ_acum and is fed into ``build_scalar_parameters`` so
-        the LP coefficient at ``@rho_acum_h{id}`` matches the RHS bound.
+    VminopResult | None
+        The constraints, their bounds, the referenced hydro ids and the
+        per-stage ``pct_vminop_ree{code}`` parameters, or ``None`` when no
+        VminOP constraint is emitted.
     """
     if case.curva is None:
         _LOG.debug("curva.dat not found; skipping VminOP constraints.")
@@ -571,45 +554,12 @@ def convert_vminop_constraints(
     start_year = _horizon.start_year
     num_stages = _horizon.total_stages
 
-    # The source model uses the *integrated* productivity (ρ_esp · (1/useful) ·
-    # ∫_vmin^vmax h(V) dV) to evaluate stored energy / VminOP, which is the
-    # `produtibilidade_acumulada_calculo_earm` column in pmo.dat — different from the
-    # gen = ρ·Q point productivity at v_65 that the LP uses.  We compute that integrated
-    # cascade here and use it both for the per-stage RHS bound *and* (via the return
-    # value) to override the `@rho_acum_h{id}` scalar parameter in
-    # generic_parameters.json so the LP's constraint coefficient matches the source
-    # model.  Without the override the LHS would use cobre's default point ρ_acum and
-    # silently drift from the RHS by ~10% on plants with non-trivial head swing.
+    # Plants with no positive integrated cascade productivity store no energy.
     acc_prod = compute_accumulated_integrated_productivities(cadastro, confhd_df)
-    per_stage_own_int = compute_per_stage_own_integrated_productivities(case)
-    per_stage_acc = compute_per_stage_acc_productivities(
-        confhd_df, per_stage_own_int, cadastro
-    )
-
-    # Convert ρ_acum from MW/(m³/s) to MWmonth/hm³ so the VminOP LHS (Σ ρ_acum ·
-    # hydro_storage[hm³], and the matching RHS, both built from per_stage_acc) is the
-    # *true* stored energy in MWmonth rather than ρ_acum·hm³, which overstates it by the
-    # hm³↔(m³/s)·month factor (≈ 2.628). The VminOP slack penalty is a R$/MWh value
-    # (penalid.dat); without this conversion the slack is that factor too large, so the
-    # effective curve-violation cost rises above the deficit cost and the LP prefers
-    # deficit to violating the security curve — i.e. Cobre hoards water under scarcity
-    # instead of drawing it down like the source model.
-    #
-    # The factor is applied *per stage* via :func:`_vminop_energy_factor`, which
-    # uses each stage's real month length (cobre prices the slack as
-    # ``penalty × block_hours`` with the actual 672–744 h durations, not the
-    # fixed 730 h). The factor cancels between LHS and RHS, so the binding
-    # storage level is unchanged; only the slack's energy units (and thus the
-    # effective R$/MWh penalty) are corrected.
-    per_stage_acc = {
-        code: [
-            v / _vminop_energy_factor(start_year, start_month, s)
-            for s, v in enumerate(values)
-        ]
-        for code, values in per_stage_acc.items()
-    }
 
     hydro_to_ree = _build_hydro_to_ree(confhd_df, cadastro)
+    ree_terms = _vminop_ree_terms(cadastro, confhd_df, id_map, acc_prod)
+    per_stage_parameters: dict[str, list[float]] = {}
 
     ree_hydros: dict[int, list[int]] = defaultdict(list)
     for code, ree_code in hydro_to_ree.items():
@@ -655,55 +605,8 @@ def convert_vminop_constraints(
             )
             continue
 
-        # Build expression: sum of
-        # @rho_acum_h{cobre_id} * hydro_storage_final(cobre_id).
-        # The coefficient is resolved by cobre to its own ρ_acum at solve time.
-        # We collect the participating plants here; the RHS bound for each
-        # stage is computed below using the per-stage ρ_acum so LHS and RHS
-        # stay aligned through CFUGA/CMONT temporal overrides.
-        terms: list[str] = []
-        active_plant_codes: list[int] = []
-        referenced_ids: list[int] = []
-
-        for plant_code in sorted(hydros_in_ree):
-            # The source model's stored energy (EARM) — and thus the VminOP expression —
-            # counts only monthly-regulating reservoirs with usable storage. Gate on
-            # that, not on ``acc_prod > 0`` alone: run-of-river / special-regime plants
-            # such as ITAIPU and JIRAU carry a positive *accumulated* productivity from
-            # downstream powerhouses yet are not part of the source model's stored
-            # energy.
-            if not _is_stored_energy_reservoir(cadastro, plant_code):
-                continue
-            if acc_prod.get(plant_code, 0.0) <= 0.0:
-                continue
-            try:
-                cobre_id = id_map.hydro_id(plant_code)
-            except KeyError:
-                continue
-            terms.append(
-                f"@{rho_acum_name(cobre_id)} * hydro_storage_final({cobre_id})"
-            )
-            referenced_ids.append(cobre_id)
-            active_plant_codes.append(plant_code)
-
-        # Pre-compute (vol_min, vol_max) per active plant once.
-        plant_volumes: dict[int, tuple[float, float]] = {
-            code: (
-                float(cadastro.loc[code, "volume_minimo"]),
-                float(cadastro.loc[code, "volume_maximo"]),
-            )
-            for code in active_plant_codes
-        }
-
-        # Existence check: at any stage there must be at least one plant
-        # contributing positive ρ_acum × usable volume. Use stage 0 as a
-        # representative; if everything is zero there, every later stage is
-        # too (cascade sum is monotone in own values).
-        max_energy_stage0 = sum(
-            per_stage_acc.get(code, [0.0])[0] * vmax
-            for code, (_vmin, vmax) in plant_volumes.items()
-        )
-        if not terms or max_energy_stage0 <= 0.0:
+        terms = ree_terms.get(ree_code, [])
+        if not terms:
             vminop_skips.append(
                 _VminopSkip(
                     ree_code=ree_code,
@@ -713,18 +616,14 @@ def convert_vminop_constraints(
             )
             continue
 
-        def _rhs_at(stage: int, pct: float) -> float:
-            """Compute (pct/100)·useful(stage) + dead(stage)."""
-            useful_s = 0.0
-            dead_s = 0.0
-            for code, (vmin, vmax) in plant_volumes.items():
-                ps = per_stage_acc.get(code)
-                ap_s = ps[stage] if ps is not None and 0 <= stage < len(ps) else 0.0
-                useful_s += ap_s * (vmax - vmin)
-                dead_s += ap_s * vmin
-            return (pct / 100.0) * useful_s + dead_s
-
-        expression = " + ".join(terms)
+        pct_name = vminop_pct_name(ree_code)
+        expression = (
+            " + ".join(lhs for lhs, _ in terms)
+            + " >= "
+            + " + ".join(rhs.format(pct=pct_name) for _, rhs in terms)
+        )
+        # Every hydro an ``@…_h{id}`` parameter names must be declared.
+        referenced_ids = [int(h) for h in re.findall(r"@\w+?_h(\d+)\b", expression)]
         ree_name = ree_names.get(ree_code, str(ree_code))
         penalty = penalty_map.get(ree_code, 1000.0)
         if penalty <= 0.0:
@@ -738,21 +637,14 @@ def convert_vminop_constraints(
             )
             penalty = 1000.0
 
-        all_referenced_ids.update(referenced_ids)
-
-        # Build per-stage bounds from curva_df.
-        # curva.dat only covers the study period. Extend into the post-study
-        # ("Período Estático Final") per source-model's rule (manual table p.32-33):
-        # seasonalize (repeat the last study year's monthly curve) when
-        # curva.dat's third penalization field is set, otherwise freeze December's
-        # value across the whole tail. ``seasonalize_curve_post_study`` carries the
-        # flag.
+        # Curve percentage per stage. curva.dat only covers the study period.
+        # Extend into the post-study ("Período Estático Final") per source-model's
+        # rule (manual table p.32-33): seasonalize (repeat the last study year's
+        # monthly curve) when curva.dat's third penalization field is set,
+        # otherwise freeze December's value across the whole tail.
         study_months = _horizon.study_months
         ree_curva = curva_df[curva_df["codigo_ree"] == ree_code].sort_values("data")
 
-        # First pass: emit in-study slots; build the per-calendar-month seasonal
-        # map and a per-stage map (the latter supplies the freeze value).
-        slots: list[tuple[int, int | None, float | None, float | None]] = []
         seasonal_pct: dict[int, float] = {}  # calendar_month -> last percentage
         pct_by_stage: dict[int, float] = {}
         for _, crow in ree_curva.iterrows():
@@ -760,24 +652,19 @@ def convert_vminop_constraints(
             stage_id = (dt.year - start_year) * 12 + (dt.month - start_month)
             if stage_id < 0 or stage_id >= num_stages:
                 continue
-
             percentage = float(crow["valor"])
-            rhs = _rhs_at(stage_id, percentage)
-            slots.append((stage_id, None, rhs, None))
-
             seasonal_pct[dt.month] = percentage  # last value wins
             pct_by_stage[stage_id] = percentage
 
-        # Second pass: fill uncovered stages. In-study gaps (and the post-study
-        # tail when seasonalized) use the seasonal pattern; otherwise the tail
-        # freezes at the last in-study stage's percentage (December of the last
-        # study year, forward-filled if that exact stage had no explicit row).
+        # In-study gaps (and the post-study tail when seasonalized) use the
+        # seasonal pattern; otherwise the tail freezes at the last in-study
+        # stage's percentage (December of the last study year, forward-filled if
+        # that exact stage had no explicit row).
         if seasonal_pct:
-            covered = set(pct_by_stage)
             in_study = [s for s in pct_by_stage if s < study_months]
             freeze_pct = pct_by_stage[max(in_study)] if in_study else None
             for stage_id in range(num_stages):
-                if stage_id in covered:
+                if stage_id in pct_by_stage:
                     continue
                 if stage_id >= study_months and not seasonalize_curve_post_study:
                     pct = freeze_pct
@@ -785,16 +672,34 @@ def convert_vminop_constraints(
                     cal_month = ((start_month - 1 + stage_id) % 12) + 1
                     pct = seasonal_pct.get(cal_month)
                 if pct is not None:
-                    rhs = _rhs_at(stage_id, pct)
-                    slots.append((stage_id, None, rhs, None))
+                    pct_by_stage[stage_id] = pct
 
-        builder.add(
-            name=f"VminOP_{ree_name}",
-            description=f"Minimum stored energy for REE {ree_code} ({ree_name})",
-            expression=expression,
-            slack={"enabled": True, "penalty": penalty},
-            slots=slots,
-        )
+        if not pct_by_stage:
+            continue
+
+        # TRACKED COBRE-GAP WORKAROUND (C12): cobre prices generic-constraint
+        # slack at ``penalty × stage hours`` (a power unit), but this row is in
+        # MWh, so a single R$/MWh penalty would be inflated ~730×. The stage hours
+        # vary (672–744 h) and the penalty is per constraint, so the REE is
+        # split into one constraint per stage, each priced at R$/MWh ÷ its own
+        # hours, which cobre's ``× hours`` restores to R$/MWh exactly.
+        for stage_id in sorted(pct_by_stage):
+            total = start_month - 1 + stage_id
+            stage_hours = _month_hours(start_year + total // 12, total % 12 + 1)
+            builder.add(
+                name=f"VminOP_{ree_name}_s{stage_id}",
+                description=(
+                    f"Minimum stored energy for REE {ree_code} ({ree_name}),"
+                    f" stage {stage_id}"
+                ),
+                expression=expression,
+                slack={"enabled": True, "penalty": penalty / stage_hours},
+                slots=[(stage_id, None, 0.0, None)],
+            )
+        per_stage_parameters[pct_name] = [
+            pct_by_stage.get(stage_id, 0.0) / 100.0 for stage_id in range(num_stages)
+        ]
+        all_referenced_ids.update(referenced_ids)
 
     if vminop_skips:
         emit(
@@ -854,25 +759,16 @@ def convert_vminop_constraints(
         result.bounds.num_rows,
     )
 
-    # Build the per_stage override for rho_acum_h{id}: map cobre hydro_id to
-    # the integrated cascade ρ per stage. Only emit overrides for plants
-    # actually referenced by a VminOP expression so unaffected hydros keep
-    # cobre's default `computed` resolution.
-    rho_acum_overrides: dict[int, list[float]] = {}
-    for plant_code, per_stage_values in per_stage_acc.items():
-        try:
-            cobre_id = id_map.hydro_id(plant_code)
-        except KeyError:
-            continue
-        if cobre_id not in all_referenced_ids:
-            continue
-        rho_acum_overrides[cobre_id] = list(per_stage_values)
+    _LOG.debug(
+        "VminOP split into one constraint per stage to price its MWh slack"
+        " in R$/MWh (cobre prices generic slack × stage hours)."
+    )
 
     return VminopResult(
         constraints_dict,
         result.bounds,
         sorted(all_referenced_ids),
-        rho_acum_overrides,
+        per_stage_parameters,
     )
 
 

@@ -1018,3 +1018,36 @@ class TestLoadPolicyMetadataHappyPath:
         result = _load_policy_metadata(case_dir)
 
         assert result == {"state_dimension": state_dimension}
+
+
+class TestGcViolationsFollowMergedConstraints:
+    """``violations/generic`` is keyed by cobre's per-stage constraint ids; the
+    dashboard shows a stage-split family (``VminOP_<REE>_s<stage>``) as one
+    constraint, so its violations move to the family's shown id."""
+
+    def test_stage_member_violation_moves_to_family_id(self) -> None:
+        import pandas as pd
+
+        from cobre_bridge.cobre.constraint_expr import resolve_generic_constraints
+        from cobre_bridge.dashboard.data import GenericConstraintData
+
+        constraints = [
+            {"id": 4, "name": "VminOP_SUL_s0"},
+            {"id": 5, "name": "VminOP_SUL_s1"},
+            {"id": 6, "name": "RE_9"},
+        ]
+        stub = SimpleNamespace(
+            gc=GenericConstraintData(
+                resolve_generic_constraints(constraints, None, {}, {})
+            ),
+            simulation=SimpleNamespace(
+                gc_violations=pd.DataFrame(
+                    {"constraint_id": [4, 5, 6], "slack_value": [1.0, 2.0, 3.0]}
+                )
+            ),
+        )
+
+        out = DashboardData.gc_violations.fget(stub)
+
+        assert out["constraint_id"].tolist() == [4, 4, 6]
+        assert out["slack_value"].tolist() == [1.0, 2.0, 3.0]
