@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`convert decomp` warns about negative incremental inflows.** The values
+  are converted as the deck gives them. DECOMP reports a negative incremental
+  inflow as zero in its operation output, while Cobre removes that water from
+  the plant's balance unless its priced inflow slack adds it back. A
+  `decomp-negative-incremental-inflows` warning lists each plant and stage
+  with the number of negative values and the lowest one.
 - **`convert decomp` accepts a deck with a multi-month trunk, or with monthly
   stages only.** The operative calendar admits any number of deterministic
   months before the terminal month, and a deck with no operative weeks
@@ -207,6 +213,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`convert decomp` converts two flow restrictions on one plant that no
+  value meets at once.** Single-plant `HQ` restrictions on the same variable,
+  such as a 0 m³/s ceiling and a 6 m³/s floor on a plant's outflow, failed the
+  conversion where their bounds were intersected. They now become generic
+  constraints, each with its own slack at the same penalty, so Cobre violates
+  the cheaper one as DECOMP does, whatever their order or numbers in the
+  deck. A `decomp-conflicting-flow-restrictions` warning names the plant, the
+  restrictions and both limits.
 - **`compare decomp` renders the report when DECOMP's lower bound
   overflowed.** DECOMP prints a lower bound too wide for its field as
   asterisks; the convergence chart now draws each bound over the iterations
