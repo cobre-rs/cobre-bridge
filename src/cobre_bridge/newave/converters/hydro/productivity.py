@@ -18,7 +18,13 @@ import pandas as pd
 import pyarrow as pa
 
 from cobre_bridge.cobre import schemas as cobre_schemas
-from cobre_bridge.core.diagnostics import Diagnostic, DiagnosticTable, Severity, emit
+from cobre_bridge.core.diagnostics import (
+    Diagnostic,
+    DiagnosticTable,
+    Severity,
+    emit,
+    format_stage_ranges,
+)
 from cobre_bridge.core.pandas_utils import is_na
 from cobre_bridge.core.productivity import (
     KTURB_BY_TIPO_TURBINA,
@@ -34,6 +40,7 @@ from cobre_bridge.core.productivity import (
 from cobre_bridge.core.source_text import read_source_text
 from cobre_bridge.core.tailrace import (
     TailraceFamily,
+    spill_outside_tailrace_diagnostic,
     tailrace_families_from_polinjus,
     tailrace_level_m,
 )
@@ -442,7 +449,10 @@ def convert_production_models(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     The stages are grouped by :func:`_model_selection`.
 
     When FPHA is active, a file-level ``fpha_plane_reduction`` block parsed from
-    ``tratamento-fpha`` is added (see :func:`_parse_fpha_plane_reduction`).
+    ``tratamento-fpha`` is added (see :func:`_parse_fpha_plane_reduction`). An
+    FPHA plant whose spilled flow the source model keeps out of its tailrace is
+    reported by
+    :func:`~cobre_bridge.core.tailrace.spill_outside_tailrace_diagnostic`.
 
     Parameters
     ----------
@@ -484,6 +494,7 @@ def convert_production_models(case: NewaveCase, id_map: NewaveIdMap) -> dict:
     )
 
     production_models: list[dict] = []
+    outside_tailrace: list[list[object]] = []
     for newave_code in confhd_codes:
         try:
             hydro_id = id_map.hydro_id(newave_code)
@@ -509,11 +520,25 @@ def convert_production_models(case: NewaveCase, id_map: NewaveIdMap) -> dict:
             )
             for volume, fit_max in zip(volumes, fit_maxima, strict=True)
         ]
+        if (
+            is_fpha
+            and hreg is not None
+            and int(hreg["influencia_vertimento_canal_fuga"]) == 0
+        ):
+            outside_tailrace.append(
+                [
+                    newave_code,
+                    str(hreg["nome_usina"]).strip(),
+                    format_stage_ranges(range(len(stages))),
+                ]
+            )
         production_models.append(
             {"hydro_id": hydro_id, **_model_selection(stages, calendar_months)}
         )
 
     production_models.sort(key=lambda m: m["hydro_id"])
+    if outside_tailrace:
+        emit(spill_outside_tailrace_diagnostic(outside_tailrace), logger=_LOG)
 
     result: dict = {
         "$schema": cobre_schemas.schema_url_for("system/hydro_production_models.json")
